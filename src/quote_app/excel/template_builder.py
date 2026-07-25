@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from openpyxl import load_workbook  # type: ignore[import-untyped]
@@ -11,8 +12,22 @@ HEADER_ROW = 1
 STYLE_SKELETON_ROW = 2
 
 
+def _paths_refer_to_same_file(source: Path, destination: Path) -> bool:
+    if source.resolve(strict=False) == destination.resolve(strict=False):
+        return True
+    try:
+        return source.exists() and destination.exists() and os.path.samefile(
+            source, destination
+        )
+    except OSError:
+        return False
+
+
 def build_template(source: Path, destination: Path) -> None:
     """Build a clean quotation template without modifying the source workbook."""
+    if _paths_refer_to_same_file(source, destination):
+        raise ValueError("源文件和目标文件不能是同一个文件")
+
     workbook = load_workbook(source, data_only=False)
     try:
         template_sheet = workbook[TEMPLATE_SHEET_NAME]

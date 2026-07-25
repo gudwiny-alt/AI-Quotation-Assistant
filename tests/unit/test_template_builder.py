@@ -1,18 +1,30 @@
 from hashlib import sha256
+import os
 from pathlib import Path
 import subprocess
 import sys
 from zipfile import ZipFile
 
 from openpyxl import Workbook, load_workbook  # type: ignore[import-untyped]
+from openpyxl.cell.cell import Cell  # type: ignore[import-untyped]
 from openpyxl.drawing.image import Image as OpenpyxlImage  # type: ignore[import-untyped]
 from openpyxl.styles import Alignment, Font, PatternFill  # type: ignore[import-untyped]
 from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
 from openpyxl.xml.functions import tostring  # type: ignore[import-untyped]
 from PIL import Image as PillowImage
+import pytest
+
+from quote_app.excel.template_builder import build_template
 
 
 TEMPLATE_PATH = Path("resources/templates/quote_template.xlsx")
+APPROVED_SOURCE_PATH = Path(
+    os.environ.get(
+        "QUOTE_APPROVED_SAMPLE",
+        "/Users/yangguowei/Desktop/铺货报价系统/铺货报价需求书2026.7.24/"
+        "2026年8月终端供货价报价表.xlsx",
+    )
+)
 EXPECTED_HEADERS = (
     "终端类型（二级）",
     "品牌",
@@ -87,6 +99,54 @@ def _style_digest_for_first_two_rows(sheet: Worksheet) -> str:
             digest.update(str(cell.pivotButton).encode())
             digest.update(str(cell.quotePrefix).encode())
     return digest.hexdigest()
+
+
+def _style_semantics(cell: Cell) -> tuple[bytes | str | bool, ...]:
+    return (
+        tostring(cell.font.to_tree()),
+        tostring(cell.fill.to_tree()),
+        tostring(cell.border.to_tree()),
+        tostring(cell.alignment.to_tree()),
+        tostring(cell.protection.to_tree()),
+        cell.number_format,
+        cell.pivotButton,
+        cell.quotePrefix,
+    )
+
+
+def _serialized(value: object) -> bytes:
+    """Serialize an openpyxl serialisable value for semantic comparison."""
+    assert hasattr(value, "to_tree")
+    return tostring(value.to_tree())
+
+
+@pytest.mark.parametrize("alias_kind", ["literal", "symlink", "hardlink"])
+def test_build_template_rejects_source_destination_aliases_before_loading(
+    tmp_path: Path,
+    alias_kind: str,
+) -> None:
+    source = tmp_path / "source.xlsx"
+    source.write_text("not an xlsx file", encoding="utf-8")
+
+    if alias_kind == "literal":
+        destination = source
+    elif alias_kind == "symlink":
+        destination = tmp_path / "source-symlink.xlsx"
+        try:
+            destination.symlink_to(source)
+        except (NotImplementedError, OSError) as error:
+            pytest.skip(f"symbolic links are unavailable: {error}")
+    else:
+        destination = tmp_path / "source-hardlink.xlsx"
+        try:
+            os.link(source, destination)
+        except (NotImplementedError, OSError) as error:
+            pytest.skip(f"hard links are unavailable: {error}")
+
+    with pytest.raises(ValueError, match="源文件和目标文件不能是同一个文件"):
+        build_template(source, destination)
+
+    assert source.read_text(encoding="utf-8") == "not an xlsx file"
 
 
 def test_build_script_cleans_explicit_source_into_explicit_destination(
@@ -210,31 +270,72 @@ def test_clean_template_has_only_header_and_empty_style_row() -> None:
         workbook.close()
 
 
-def test_clean_template_preserves_approved_format_and_page_settings() -> None:
+def test_clean_template_preserves_all_approved_format_and_page_settings() -> None:
+    assert APPROVED_SOURCE_PATH.is_file(), (
+        "Approved quotation sample is required; set QUOTE_APPROVED_SAMPLE "
+        "when it is stored elsewhere."
+    )
+    source_workbook = load_workbook(APPROVED_SOURCE_PATH, data_only=False)
     workbook = load_workbook(TEMPLATE_PATH, data_only=False)
     try:
+        source_sheet = source_workbook["5G手机"]
         sheet = workbook["5G手机"]
 
-        assert sheet.row_dimensions[1].height == 58.0
-        assert sheet.row_dimensions[2].height == 38.0
-        assert {
-            column: sheet.column_dimensions[column].width
-            for column in EXPECTED_COLUMN_WIDTHS
-        } == EXPECTED_COLUMN_WIDTHS
+        for column in range(1, 41):
+            letter = source_sheet.cell(1, column).column_letter
+            assert sheet.column_dimensions[letter].width == (
+                source_sheet.column_dimensions[letter].width
+            ), letter
+
+        for row in (1, 2):
+            source_dimension = source_sheet.row_dimensions[row]
+            target_dimension = sheet.row_dimensions[row]
+            assert (
+                target_dimension.height,
+                target_dimension.hidden,
+                target_dimension.outlineLevel,
+                target_dimension.collapsed,
+                target_dimension.thickTop,
+                target_dimension.thickBot,
+                target_dimension.style_id,
+            ) == (
+                source_dimension.height,
+                source_dimension.hidden,
+                source_dimension.outlineLevel,
+                source_dimension.collapsed,
+                source_dimension.thickTop,
+                source_dimension.thickBot,
+                source_dimension.style_id,
+            ), row
+
+        for row in (1, 2):
+            for column in range(1, 41):
+                coordinate = sheet.cell(row, column).coordinate
+                assert _style_semantics(sheet[coordinate]) == _style_semantics(
+                    source_sheet[coordinate]
+                ), coordinate
+
         assert _style_digest_for_first_two_rows(sheet) == EXPECTED_A_TO_AN_STYLE_DIGEST
-        assert sheet.freeze_panes == "A2"
-        assert sheet.sheet_view.showGridLines is None
-        assert not sheet.merged_cells.ranges
-        assert sheet.page_margins.left == 0.75
-        assert sheet.page_margins.right == 0.75
-        assert sheet.page_margins.top == 1.0
-        assert sheet.page_margins.bottom == 1.0
-        assert sheet.page_setup.orientation is None
-        assert sheet.page_setup.paperSize is None
-        assert sheet.print_title_rows is None
-        assert sheet.print_title_cols is None
+        assert sheet.freeze_panes == source_sheet.freeze_panes
+        assert tuple(map(str, sheet.merged_cells.ranges)) == tuple(
+            str(item)
+            for item in source_sheet.merged_cells.ranges
+            if item.max_row <= 2
+        )
+        assert _serialized(sheet.sheet_view) == _serialized(source_sheet.sheet_view)
+        assert _serialized(sheet.sheet_format) == _serialized(source_sheet.sheet_format)
+        assert _serialized(sheet.sheet_properties) == _serialized(
+            source_sheet.sheet_properties
+        )
+        assert _serialized(sheet.page_margins) == _serialized(source_sheet.page_margins)
+        assert _serialized(sheet.page_setup) == _serialized(source_sheet.page_setup)
+        assert _serialized(sheet.print_options) == _serialized(source_sheet.print_options)
+        assert sheet.print_title_rows == source_sheet.print_title_rows
+        assert sheet.print_title_cols == source_sheet.print_title_cols
+        assert str(sheet.print_area) == str(source_sheet.print_area)
     finally:
         workbook.close()
+        source_workbook.close()
 
 
 def test_clean_template_package_has_no_images_or_wps_dispimg_content() -> None:
@@ -246,5 +347,25 @@ def test_clean_template_package_has_no_images_or_wps_dispimg_content() -> None:
             or part.startswith("xl/drawings/")
             for part in package_parts
         )
-        worksheet_xml = archive.read("xl/worksheets/sheet1.xml")
-        assert b"DISPIMG" not in worksheet_xml.upper()
+
+        xml_parts = {
+            part
+            for part in package_parts
+            if part.endswith(".xml") or part.endswith(".rels")
+        }
+        for part in xml_parts:
+            content = archive.read(part).lower()
+            assert b"dispimg" not in content, part
+            assert b"cellimage" not in content, part
+            assert b"<drawing" not in content, part
+            assert b"<legacydrawing" not in content, part
+            if part.endswith(".rels"):
+                assert b"/drawing" not in content, part
+                assert b"/image" not in content, part
+                assert b"drawings/" not in content, part
+                assert b"media/" not in content, part
+
+        content_types = archive.read("[Content_Types].xml").lower()
+        assert b"cellimage" not in content_types
+        assert b"drawing" not in content_types
+        assert b"image/" not in content_types
