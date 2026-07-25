@@ -1,0 +1,365 @@
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Protocol
+
+from quote_app.browser.worker import JsonValue, WorkerEvent
+from quote_app.tasks.models import TaskState, WebsiteResult, WebsiteTask
+from quote_app.tasks.repository import AttemptToken, SQLiteTaskRepository
+from quote_app.tasks.retry import (
+    LoginRequired,
+    NonRetryableTechnicalError,
+    RETRYABLE_ERROR_CODES,
+    RetryPolicy,
+    RetryableTechnicalError,
+    SchedulerControl,
+    SecurityVerificationRequired,
+    TechnicalError,
+    classify_attempt_error,
+    consumes_technical_budget,
+    credential_free_error_message,
+)
+
+
+class AttemptCallback(Protocol):
+    def __call__(
+        self,
+        task: WebsiteTask,
+        token: AttemptToken,
+        control: SchedulerControl,
+    ) -> WebsiteResult: ...
+
+
+EventSink = Callable[[WorkerEvent], None]
+ManualLoginCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True, slots=True)
+class EventDeliveryError:
+    event: str
+    task_id: str
+    error_code: str = "EVENT_SINK_ERROR"
+
+
+class ManualLoginError(RuntimeError):
+    """A stable public error for manual-login foreground preparation."""
+
+
+class BrowserTaskScheduler:
+    """Serial scheduler around the crash-safe repository attempt boundary."""
+
+    def __init__(
+        self,
+        repository: SQLiteTaskRepository,
+        run_id: str,
+        attempt_callback: AttemptCallback,
+        *,
+        retry_policy: RetryPolicy | None = None,
+        control: SchedulerControl | None = None,
+        event_sink: EventSink | None = None,
+        manual_login_callback: ManualLoginCallback | None = None,
+    ) -> None:
+        if not isinstance(repository, SQLiteTaskRepository):
+            raise ValueError("repository must be a SQLiteTaskRepository")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must not be blank")
+        if not callable(attempt_callback):
+            raise ValueError("attempt_callback must be callable")
+        self.repository = repository
+        self.run_id = run_id.strip()
+        self.attempt_callback = attempt_callback
+        self.retry_policy = retry_policy or RetryPolicy()
+        self.control = control or SchedulerControl()
+        self.event_sink = event_sink
+        self.event_errors: list[EventDeliveryError] = []
+        self.manual_login_callback = manual_login_callback
+        self._run_lock = threading.Lock()
+        self._manual_lock = threading.Lock()
+
+    def run_until_idle(self) -> None:
+        with self._run_lock:
+            while self.control.automated_work_allowed:
+                tasks = self._eligible_tasks()
+                if not tasks:
+                    return
+                made_progress = False
+                for task in tasks:
+                    if not self.control.automated_work_allowed:
+                        return
+                    if self._run_task(task):
+                        made_progress = True
+                if not made_progress:
+                    return
+
+    def waiting_for_site(self, site: str) -> tuple[WebsiteTask, ...]:
+        return self.repository.select_waiting(self.run_id, site=site)
+
+    def enter_manual_login(self, site: str) -> None:
+        with self._manual_lock:
+            self.control.enter_manual_login(site)
+            active_site = self.control.manual_site
+            if active_site is None:
+                raise AssertionError("manual login site was not retained")
+            try:
+                with self._run_lock:
+                    if self.manual_login_callback is not None:
+                        self.manual_login_callback(active_site)
+            except Exception:
+                self.control.cancel_manual_login(active_site)
+                raise ManualLoginError(
+                    "无法进入人工登录模式，请重试"
+                ) from None
+
+    def confirm_manual_login(self, site: str) -> tuple[WebsiteTask, ...]:
+        normalized_site = _normalized_site(site)
+        with self._manual_lock, self._run_lock:
+            if self.control.manual_site != normalized_site:
+                raise ValueError("确认的站点与当前人工登录站点不一致")
+            requeued = self.repository.requeue_waiting_site(
+                self.run_id,
+                normalized_site,
+            )
+            self.control.confirm_manual_login(normalized_site)
+            return requeued
+
+    def _eligible_tasks(self) -> tuple[WebsiteTask, ...]:
+        pending = self.repository.select_pending(self.run_id)
+        failed = tuple(
+            task
+            for task in self.repository.select_failed(self.run_id)
+            if self._can_retry_persisted_failure(task.task_id)
+        )
+        return pending + failed
+
+    def _can_retry_persisted_failure(self, task_id: str) -> bool:
+        latest = self.repository.latest_attempt(task_id)
+        if latest is None or latest.error_code not in RETRYABLE_ERROR_CODES:
+            return False
+        return self.retry_policy.can_start_technical_attempt(
+            self._technical_attempts(task_id)
+        )
+
+    def _run_task(self, task: WebsiteTask) -> bool:
+        completed_technical_attempts = self._technical_attempts(task.task_id)
+        if not self.retry_policy.can_start_technical_attempt(
+            completed_technical_attempts
+        ):
+            return False
+
+        while self.control.automated_work_allowed:
+            token = self.repository.start_attempt(task.task_id)
+            self._emit(
+                "progress",
+                task.task_id,
+                {
+                    "attempt_number": token.attempt_number,
+                    "channel": task.channel.value,
+                },
+            )
+            try:
+                result = self.attempt_callback(task, token, self.control)
+            except Exception as error:
+                classified = classify_attempt_error(error)
+                if isinstance(classified, LoginRequired):
+                    self._park_for_login(task, token, classified)
+                    return True
+                if not isinstance(classified, TechnicalError):
+                    raise AssertionError("attempt classifier returned an unknown outcome")
+                completed_technical_attempts += classified.retry_cost
+                self._save_technical_failure(
+                    task,
+                    token,
+                    classified.code,
+                    classified.message,
+                    retryable=isinstance(classified, RetryableTechnicalError),
+                    completed_technical_attempts=completed_technical_attempts,
+                )
+                if isinstance(classified, NonRetryableTechnicalError):
+                    return True
+                if not self.retry_policy.can_start_technical_attempt(
+                    completed_technical_attempts
+                ):
+                    return True
+                if not self.retry_policy.wait_before_retry(self.control):
+                    return True
+                continue
+
+            if not isinstance(result, WebsiteResult):
+                completed_technical_attempts += 1
+                classified = NonRetryableTechnicalError(
+                    "INVALID_ATTEMPT_RESULT",
+                    "网站适配器未返回有效结果",
+                )
+                self._save_technical_failure(
+                    task,
+                    token,
+                    classified.code,
+                    classified.message,
+                    retryable=False,
+                    completed_technical_attempts=completed_technical_attempts,
+                )
+                return True
+            if result.task_id != task.task_id:
+                classified = NonRetryableTechnicalError(
+                    "RESULT_TASK_MISMATCH",
+                    "网站结果与当前任务不匹配",
+                )
+                completed_technical_attempts += 1
+                self._save_technical_failure(
+                    task,
+                    token,
+                    classified.code,
+                    classified.message,
+                    retryable=False,
+                    completed_technical_attempts=completed_technical_attempts,
+                )
+                return True
+            if result.state is TaskState.SUCCEEDED:
+                self.repository.save_result(result, token=token)
+                self._emit(
+                    "result",
+                    task.task_id,
+                    {
+                        "outcome": result.outcome.value if result.outcome else None,
+                        "price": str(result.price) if result.price is not None else None,
+                    },
+                )
+                return True
+
+            self.repository.save_result(result, token=token)
+            retryable = result.error_code in RETRYABLE_ERROR_CODES
+            completed_technical_attempts += (
+                1 if consumes_technical_budget(result.error_code) else 0
+            )
+            self._emit_technical_failure(
+                task.task_id,
+                result.error_code or "UNKNOWN_TECHNICAL_FAILURE",
+                retryable=retryable,
+                completed_technical_attempts=completed_technical_attempts,
+            )
+            if (
+                not retryable
+                or not self.retry_policy.can_start_technical_attempt(
+                    completed_technical_attempts
+                )
+                or not self.retry_policy.wait_before_retry(self.control)
+            ):
+                return True
+        return True
+
+    def _park_for_login(
+        self,
+        task: WebsiteTask,
+        token: AttemptToken,
+        error: LoginRequired,
+    ) -> None:
+        self.repository.mark_waiting_for_login(
+            task.task_id,
+            token=token,
+            site=error.site,
+        )
+        condition = (
+            "security_verification"
+            if isinstance(error, SecurityVerificationRequired)
+            else "login_required"
+        )
+        self._emit(
+            "waiting_for_login",
+            task.task_id,
+            {
+                "site": error.site,
+                "condition": condition,
+            },
+        )
+
+    def _save_technical_failure(
+        self,
+        task: WebsiteTask,
+        token: AttemptToken,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+        completed_technical_attempts: int,
+    ) -> None:
+        result = WebsiteResult(
+            task_id=task.task_id,
+            state=TaskState.TECHNICAL_FAILURE,
+            outcome=None,
+            price=None,
+            url=None,
+            evidence=None,
+            diagnostic_path=None,
+            error_code=code,
+            error_message=credential_free_error_message(code, message),
+        )
+        self.repository.save_result(result, token=token)
+        self._emit_technical_failure(
+            task.task_id,
+            code,
+            retryable=retryable,
+            completed_technical_attempts=completed_technical_attempts,
+        )
+
+    def _emit_technical_failure(
+        self,
+        task_id: str,
+        code: str,
+        *,
+        retryable: bool,
+        completed_technical_attempts: int,
+    ) -> None:
+        retry_remaining = max(
+            0,
+            self.retry_policy.maximum_technical_attempts
+            - completed_technical_attempts,
+        )
+        self._emit(
+            "technical_failure",
+            task_id,
+            {
+                "error_code": code,
+                "retryable": retryable,
+                "retry_remaining": retry_remaining,
+            },
+        )
+
+    def _technical_attempts(self, task_id: str) -> int:
+        generation = self.repository.task_generation(task_id)
+        return sum(
+            consumes_technical_budget(attempt.error_code)
+            for attempt in self.repository.list_attempts(task_id)
+            if attempt.generation == generation
+        )
+
+    def _emit(
+        self,
+        event: str,
+        task_id: str,
+        data: dict[str, JsonValue],
+    ) -> None:
+        if self.event_sink is None:
+            return
+        worker_event = WorkerEvent(
+            event=event,
+            run_id=self.run_id,
+            task_id=task_id,
+            data=data,
+        )
+        try:
+            self.event_sink(worker_event)
+        except Exception:
+            self.event_errors.append(
+                EventDeliveryError(
+                    event=event,
+                    task_id=task_id,
+                )
+            )
+
+
+def _normalized_site(site: object) -> str:
+    if not isinstance(site, str) or not site.strip():
+        raise ValueError("site must not be blank")
+    return site.strip()
