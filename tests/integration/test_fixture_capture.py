@@ -720,6 +720,56 @@ def test_external_diagnostic_path_is_not_persisted(tmp_path: Path) -> None:
         assert outside.is_file()
 
 
+def test_symlinked_diagnostics_directory_is_rejected_before_callback(
+    tmp_path: Path,
+) -> None:
+    task = _task("normal", output_row=2)
+    fixtures = {"normal": FIXTURES / "normal.html"}
+    session = _Session(fixtures)
+    capture = _Capture(failing_task="normal")
+    evidence_dir = tmp_path / "evidence"
+    outside = tmp_path / "outside"
+    evidence_dir.mkdir()
+    outside.mkdir()
+    (evidence_dir / "diagnostics").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+    diagnostic_called = False
+
+    def should_not_run(
+        _task: WebsiteTask,
+        _error: BaseException,
+        _requested: Path,
+    ) -> Path:
+        nonlocal diagnostic_called
+        diagnostic_called = True
+        raise AssertionError("diagnostic callback must not run")
+
+    with SQLiteTaskRepository(tmp_path / "state.sqlite3") as repository:
+        repository.create_run(_run(tmp_path))
+        runner = WebsiteTaskRunner(
+            repository=repository,
+            run_id="fixture-run",
+            browser_session=session,
+            adapter=_adapter,
+            evidence_capture=capture,
+            evidence_dir=evidence_dir,
+            diagnostic_capture=should_not_run,
+            retry_policy=RetryPolicy(
+                technical_retries=0,
+                retry_delay_seconds=0,
+            ),
+        )
+        runner.run((task,))
+
+        result = repository.load_result(task.task_id)
+        assert result is not None
+        assert result.diagnostic_path is None
+        assert diagnostic_called is False
+        assert tuple(outside.iterdir()) == ()
+
+
 def test_retry_diagnostics_are_attempt_scoped_and_not_overwritten(
     tmp_path: Path,
 ) -> None:

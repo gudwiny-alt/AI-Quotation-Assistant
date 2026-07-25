@@ -360,7 +360,9 @@ class WebsiteTaskRunner:
     ) -> Path | None:
         if self.diagnostic_capture is None:
             return None
-        diagnostics_root = (self.evidence_dir / "diagnostics").resolve()
+        diagnostics_root = self._safe_diagnostics_root()
+        if diagnostics_root is None:
+            return None
         path = (
             diagnostics_root
             / (
@@ -376,6 +378,9 @@ class WebsiteTaskRunner:
             return None
         if not isinstance(captured, Path):
             return None
+        verified_root = self._safe_diagnostics_root()
+        if verified_root is None or verified_root != diagnostics_root:
+            return None
         normalized = captured.expanduser().resolve()
         requested = path.resolve()
         if normalized != requested or not normalized.is_file():
@@ -385,6 +390,18 @@ class WebsiteTaskRunner:
         except ValueError:
             return None
         return normalized
+
+    def _safe_diagnostics_root(self) -> Path | None:
+        evidence_root = self.evidence_dir.resolve()
+        unresolved = evidence_root / "diagnostics"
+        if unresolved.is_symlink():
+            return None
+        resolved = unresolved.resolve()
+        try:
+            resolved.relative_to(evidence_root)
+        except ValueError:
+            return None
+        return resolved
 
     def _prepare_manual_login(self, site: str) -> None:
         with self._page_lock:
