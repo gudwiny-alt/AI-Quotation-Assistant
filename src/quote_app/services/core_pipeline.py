@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from quote_app.core.association import associate_rows
+from quote_app.core.precheck import precheck_inputs
+from quote_app.domain.models import InputPaths, Issue, QuoteMonth, QuoteRow
+from quote_app.excel.quote_writer import QuoteWriteRequest, write_quote_workbook
+from quote_app.excel.report_writer import (
+    ReportWriteRequest,
+    RunSummary,
+    summarize_rows,
+    write_execution_report,
+)
+
+
+DEFAULT_TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[3] / "resources" / "templates" / "quote_template.xlsx"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CoreRunResult:
+    quote_path: Path
+    report_path: Path
+    summary: RunSummary
+    rows: list[QuoteRow]
+
+
+class CorePipelineError(ValueError):
+    """Stable business exception raised before output generation."""
+
+    def __init__(self, issues: tuple[Issue, ...]) -> None:
+        self.issues = issues
+        messages = "；".join(issue.message for issue in issues)
+        super().__init__(f"输入预检查未通过：{messages}")
+
+
+def run_core_pipeline(
+    paths: InputPaths,
+    quote_month: QuoteMonth,
+    template_path: str | Path = DEFAULT_TEMPLATE_PATH,
+) -> CoreRunResult:
+    precheck = precheck_inputs(paths, quote_month)
+    if precheck.fatal_issues:
+        raise CorePipelineError(precheck.fatal_issues)
+
+    rows = associate_rows(
+        precheck.identified_sheets["base"],
+        precheck.identified_sheets["marketing"],
+        precheck.identified_sheets["bop"],
+        quote_month,
+    )
+    rows = [row for row in rows if row.material_code]
+    if not rows:
+        raise CorePipelineError(
+            (
+                Issue(
+                    code="NO_QUOTABLE_ROWS",
+                    message="基础表没有可报价的非空物料编码",
+                    fatal=True,
+                ),
+            )
+        )
+
+    _merge_base_precheck_issues(rows, precheck.row_issues)
+    quote_path = write_quote_workbook(
+        QuoteWriteRequest(
+            quote_month=quote_month,
+            rows=rows,
+            template_path=template_path,
+            output_dir=paths.output_dir,
+        )
+    )
+    summary = summarize_rows(rows)
+    report_path = write_execution_report(
+        ReportWriteRequest(
+            quote_month=quote_month,
+            rows=rows,
+            output_dir=paths.output_dir,
+            input_paths=paths,
+            quote_path=quote_path,
+        )
+    )
+    return CoreRunResult(
+        quote_path=quote_path,
+        report_path=report_path,
+        summary=summary,
+        rows=rows,
+    )
+
+
+def _merge_base_precheck_issues(
+    rows: list[QuoteRow],
+    row_issues: tuple[Issue, ...],
+) -> None:
+    base_issues_by_row: dict[int, list[Issue]] = {}
+    for issue in row_issues:
+        if issue.row_number is None or not issue.message.startswith("base row "):
+            continue
+        base_issues_by_row.setdefault(issue.row_number, []).append(issue)
+    for row in rows:
+        row.issues.extend(base_issues_by_row.get(row.source_row_number, ()))
