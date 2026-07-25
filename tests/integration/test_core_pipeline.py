@@ -381,3 +381,39 @@ def test_rollback_delete_failure_reports_exact_orphan_without_internal_detail(
     assert "internal report error" not in str(caught.value)
     assert "secret unlink failure" not in str(caught.value)
     assert orphan.exists()
+
+
+def test_post_publish_cleanup_failures_still_return_pair_and_preserve_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _inputs(tmp_path)
+    paths.output_dir.mkdir()
+    historical_quote = paths.output_dir / "2026年08月终端供货价报价表.xlsx"
+    historical_report = paths.output_dir / "2026年08月报价执行报告.xlsx"
+    historical_quote.write_bytes(b"historical-quote")
+    historical_report.write_bytes(b"historical-report")
+    real_unlink = Path.unlink
+
+    def fail_private_temp_unlink(
+        self: Path,
+        missing_ok: bool = False,
+    ) -> None:
+        if self.name.endswith(".tmp.xlsx"):
+            raise OSError("persistent post-publish cleanup failure")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_private_temp_unlink)
+
+    with pytest.warns(RuntimeWarning) as warnings:
+        result = run_core_pipeline(paths, QuoteMonth(2026, 8), TEMPLATE_PATH)
+
+    assert len(warnings) == 2
+    assert result.quote_path.exists()
+    assert result.report_path.exists()
+    assert result.quote_path != historical_quote
+    assert result.report_path != historical_report
+    assert historical_quote.read_bytes() == b"historical-quote"
+    assert historical_report.read_bytes() == b"historical-report"
+    assert len(list(paths.output_dir.glob(".quote-*.tmp.xlsx"))) == 1
+    assert len(list(paths.output_dir.glob(".report-*.tmp.xlsx"))) == 1

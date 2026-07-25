@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from tempfile import NamedTemporaryFile
 from typing import Iterator
+import warnings
 
 from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 from openpyxl.worksheet.datavalidation import (  # type: ignore[import-untyped]
@@ -55,6 +56,7 @@ def write_quote_workbook(request: QuoteWriteRequest) -> Path:
     """Generate a new quotation workbook while leaving its template unchanged."""
     output_dir = _ensure_output_directory(Path(request.output_dir))
     temporary_path: Path | None = None
+    published_path: Path | None = None
     try:
         workbook = load_clean_template(Path(request.template_path))
         try:
@@ -75,14 +77,27 @@ def write_quote_workbook(request: QuoteWriteRequest) -> Path:
         finally:
             workbook.close()
 
-        return _publish_without_overwrite(
+        published_path = _publish_without_overwrite(
             temporary_path,
             output_dir,
             request.quote_month,
         )
+        return published_path
     finally:
         if temporary_path is not None:
-            _remove_temporary_file(temporary_path)
+            try:
+                _remove_temporary_file(temporary_path)
+            except ValueError:
+                if published_path is None:
+                    raise
+                warnings.warn(
+                    (
+                        f"正式报价表已生成：{published_path}；"
+                        f"临时文件未能清理：{temporary_path}"
+                    ),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
 
 def _ensure_output_directory(output_dir: Path) -> Path:

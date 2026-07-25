@@ -287,3 +287,52 @@ def test_report_cleans_private_temporary_file_when_publish_fails(
 
     assert list(tmp_path.glob(".report-*.tmp.xlsx")) == []
     assert list(tmp_path.glob("*报价执行报告*.xlsx")) == []
+
+
+def test_report_returns_published_path_when_post_publish_cleanup_keeps_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_unlink = Path.unlink
+
+    def fail_private_temp_unlink(
+        self: Path,
+        missing_ok: bool = False,
+    ) -> None:
+        if self.name.startswith(".report-") and self.name.endswith(".tmp.xlsx"):
+            raise OSError("persistent post-publish cleanup failure")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_private_temp_unlink)
+
+    with pytest.warns(RuntimeWarning, match="正式执行报告已生成.*临时文件"):
+        output = write_execution_report(_request(tmp_path))
+
+    assert output == tmp_path / "2026年08月报价执行报告.xlsx"
+    workbook = load_workbook(output)
+    workbook.close()
+    assert len(list(tmp_path.glob(".report-*.tmp.xlsx"))) == 1
+
+
+def test_report_save_and_cleanup_failure_names_private_temp_without_internal_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_save(self: Workbook, filename: str | Path) -> None:
+        raise OSError("secret serialization failure")
+
+    def fail_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise OSError("secret cleanup failure")
+
+    monkeypatch.setattr(Workbook, "save", fail_save)
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    with pytest.raises(ValueError) as caught:
+        write_execution_report(_request(tmp_path))
+
+    temporary_files = list(tmp_path.glob(".report-*.tmp.xlsx"))
+    assert len(temporary_files) == 1
+    assert str(caught.value) == f"执行报告临时文件无法清理：{temporary_files[0]}"
+    assert "secret serialization failure" not in str(caught.value)
+    assert "secret cleanup failure" not in str(caught.value)
+    assert list(tmp_path.glob("*报价执行报告*.xlsx")) == []

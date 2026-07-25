@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Iterator
+import warnings
 
 from openpyxl import Workbook  # type: ignore[import-untyped]
 from openpyxl.styles import Alignment, Font, PatternFill  # type: ignore[import-untyped]
@@ -119,6 +120,7 @@ def write_execution_report(request: ReportWriteRequest) -> Path:
     summary = summarize_assessments(assessments)
     workbook = Workbook()
     temporary_path: Path | None = None
+    published_path: Path | None = None
     try:
         overview = workbook.active
         overview.title = "运行总览"
@@ -137,15 +139,28 @@ def write_execution_report(request: ReportWriteRequest) -> Path:
         except OSError:
             raise ValueError(f"执行报告无法写入输出目录：{output_dir}") from None
         workbook.close()
-        return _publish_without_overwrite(
+        published_path = _publish_without_overwrite(
             temporary_path,
             output_dir,
             request.quote_month,
         )
+        return published_path
     finally:
         workbook.close()
         if temporary_path is not None:
-            _remove_temporary_file(temporary_path)
+            try:
+                _remove_temporary_file(temporary_path)
+            except ValueError:
+                if published_path is None:
+                    raise
+                warnings.warn(
+                    (
+                        f"正式执行报告已生成：{published_path}；"
+                        f"临时文件未能清理：{temporary_path}"
+                    ),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
 
 def _assess_row(row: QuoteRow) -> RowAssessment:

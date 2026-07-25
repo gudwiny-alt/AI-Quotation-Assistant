@@ -418,6 +418,69 @@ def test_writer_cleans_temporary_file_when_exclusive_publish_fails(
     assert close_calls == 1
 
 
+def test_writer_returns_published_quote_when_post_publish_cleanup_keeps_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_unlink = Path.unlink
+
+    def fail_private_temp_unlink(
+        self: Path,
+        missing_ok: bool = False,
+    ) -> None:
+        if self.name.startswith(".quote-") and self.name.endswith(".tmp.xlsx"):
+            raise OSError("persistent post-publish cleanup failure")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_private_temp_unlink)
+
+    with pytest.warns(RuntimeWarning, match="正式报价表已生成.*临时文件"):
+        output = write_quote_workbook(
+            QuoteWriteRequest(
+                quote_month=QuoteMonth(2026, 8),
+                rows=_rows()[:1],
+                template_path=TEMPLATE_PATH,
+                output_dir=tmp_path,
+            )
+        )
+
+    assert output == tmp_path / "2026年08月终端供货价报价表.xlsx"
+    workbook = load_workbook(output)
+    workbook.close()
+    assert len(list(tmp_path.glob(".quote-*.tmp.xlsx"))) == 1
+
+
+def test_writer_save_and_cleanup_failure_names_private_temp_without_internal_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_save(self: Workbook, filename: str | Path) -> None:
+        raise OSError("secret serialization failure")
+
+    def fail_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise OSError("secret cleanup failure")
+
+    monkeypatch.setattr(Workbook, "save", fail_save)
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    with pytest.raises(ValueError) as caught:
+        write_quote_workbook(
+            QuoteWriteRequest(
+                quote_month=QuoteMonth(2026, 8),
+                rows=_rows()[:1],
+                template_path=TEMPLATE_PATH,
+                output_dir=tmp_path,
+            )
+        )
+
+    temporary_files = list(tmp_path.glob(".quote-*.tmp.xlsx"))
+    assert len(temporary_files) == 1
+    assert str(caught.value) == f"报价表临时文件无法清理：{temporary_files[0]}"
+    assert "secret serialization failure" not in str(caught.value)
+    assert "secret cleanup failure" not in str(caught.value)
+    assert list(tmp_path.glob("*终端供货价报价表*.xlsx")) == []
+
+
 def test_writer_with_empty_rows_outputs_header_only_and_no_validation(
     tmp_path: Path,
 ) -> None:
