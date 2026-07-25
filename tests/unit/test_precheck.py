@@ -174,10 +174,8 @@ def test_missing_file_becomes_fatal_issue(tmp_path: Path) -> None:
 
     result = precheck_inputs(_paths(tmp_path, marketing=missing), QuoteMonth(2026, 8))
 
-    assert any(
-        issue.code == "UNREADABLE_WORKBOOK" and "marketing" in issue.message
-        for issue in result.fatal_issues
-    )
+    issue = next(issue for issue in result.fatal_issues if issue.code == "UNREADABLE_WORKBOOK")
+    assert issue.message == "营销商品信息查询表文件无法读取：missing.xlsx"
 
 
 def test_real_empty_workbook_becomes_fatal_issue(tmp_path: Path) -> None:
@@ -185,9 +183,11 @@ def test_real_empty_workbook_becomes_fatal_issue(tmp_path: Path) -> None:
 
     result = precheck_inputs(_paths(tmp_path, base=empty), QuoteMonth(2026, 8))
 
-    assert any(
-        issue.code == "UNREADABLE_WORKBOOK" and "base" in issue.message
-        for issue in result.fatal_issues
+    issue = next(issue for issue in result.fatal_issues if issue.code == "UNREADABLE_WORKBOOK")
+    assert issue.message == "基础表文件无法读取：empty.xlsx"
+    assert all(
+        detail not in issue.message
+        for detail in ("ValueError", "WorkbookReadError", "first worksheet", "openpyxl")
     )
 
 
@@ -203,9 +203,18 @@ def test_real_encrypted_workbook_becomes_fatal_issue(tmp_path: Path) -> None:
 
     result = precheck_inputs(_paths(tmp_path, base=encrypted), QuoteMonth(2026, 8))
 
-    assert any(
-        issue.code == "UNREADABLE_WORKBOOK" and "base" in issue.message
-        for issue in result.fatal_issues
+    issue = next(issue for issue in result.fatal_issues if issue.code == "UNREADABLE_WORKBOOK")
+    assert issue.message == "基础表文件无法读取：encrypted.xlsx"
+    assert all(
+        detail not in issue.message
+        for detail in (
+            "BadZipFile",
+            "ZIP",
+            "OLE",
+            "EncryptionInfo",
+            "msoffcrypto",
+            "openpyxl",
+        )
     )
 
 

@@ -22,6 +22,12 @@ CODE_HEADERS = {
     "bop": ("集团一级库编码", 10),
 }
 
+SOURCE_LABELS = {
+    "base": "基础表",
+    "marketing": "营销商品信息查询表",
+    "bop": "BOP资源信息表",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PrecheckResult:
@@ -46,7 +52,7 @@ def precheck_inputs(paths: InputPaths, quote_month: QuoteMonth) -> PrecheckResul
             fatal_issues.append(
                 Issue(
                     code="UNREADABLE_WORKBOOK",
-                    message=f"{source} workbook cannot be read: {path.name}",
+                    message=f"{SOURCE_LABELS[source]}文件无法读取：{path.name}",
                     fatal=True,
                 )
             )
