@@ -162,6 +162,18 @@ def _seed(
         repository.upsert_task(task)
 
 
+def test_scheduler_rejects_noncallable_task_sort_key(
+    repository: SQLiteTaskRepository,
+) -> None:
+    with pytest.raises(ValueError, match="task_sort_key"):
+        BrowserTaskScheduler(
+            repository,
+            "run-1",
+            lambda _task, _token, _control: _technical_failure("unused"),
+            task_sort_key=object(),  # type: ignore[arg-type]
+        )
+
+
 def test_initial_attempt_and_two_technical_retries_are_persisted(
     repository: SQLiteTaskRepository,
 ) -> None:
@@ -632,6 +644,44 @@ def test_reopen_retries_persisted_transient_capture_failure(
 
         assert calls == 1
         assert reopened.task_state(task.task_id) is TaskState.SUCCEEDED
+
+
+def test_reopen_does_not_retry_persisted_nonretryable_result(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    task = _task("jd", channel=WebsiteChannel.JD, output_row=2)
+    with SQLiteTaskRepository(database) as first:
+        first.create_run(_run(tmp_path))
+        _seed(first, task)
+        token = first.start_attempt(task.task_id)
+        first.save_result(
+            _technical_failure(
+                task.task_id,
+                error_code="CAPTURE_ENVIRONMENT",
+            ),
+            token=token,
+        )
+
+    calls = 0
+
+    def should_not_run(task, _token, _control):
+        nonlocal calls
+        calls += 1
+        return _success(tmp_path, task)
+
+    with SQLiteTaskRepository(database) as reopened:
+        BrowserTaskScheduler(
+            reopened,
+            "run-1",
+            should_not_run,
+        ).run_until_idle()
+
+        assert calls == 0
+        assert (
+            reopened.task_state(task.task_id)
+            is TaskState.TECHNICAL_FAILURE
+        )
 
 
 def test_recovered_process_interruption_does_not_consume_retry_budget(

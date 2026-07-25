@@ -83,11 +83,18 @@ _RETRYABLE_CAPTURE_CODES = frozenset(
         "CAPTURE_GEOMETRY",
     }
 )
+_RETRYABLE_EVIDENCE_AUDIT_CODES = frozenset(
+    {
+        "EVIDENCE_MISSING",
+        "EVIDENCE_HASH_MISMATCH",
+    }
+)
 RETRYABLE_ERROR_CODES = (
     frozenset(
         code for _error_type, code, _message in _RETRYABLE_CLASSIFICATIONS
     )
     | _RETRYABLE_CAPTURE_CODES
+    | _RETRYABLE_EVIDENCE_AUDIT_CODES
 )
 _STABLE_ERROR_MESSAGES = {
     code: message for _error_type, code, message in _RETRYABLE_CLASSIFICATIONS

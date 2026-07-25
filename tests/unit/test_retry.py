@@ -109,6 +109,10 @@ def test_only_transient_capture_codes_are_in_persisted_retry_allowlist() -> None
         "CAPTURE_GEOMETRY",
     } <= RETRYABLE_ERROR_CODES
     assert {
+        "EVIDENCE_MISSING",
+        "EVIDENCE_HASH_MISMATCH",
+    } <= RETRYABLE_ERROR_CODES
+    assert {
         "CAPTURE_PERMISSION",
         "CAPTURE_ENVIRONMENT",
     }.isdisjoint(RETRYABLE_ERROR_CODES)

@@ -34,6 +34,10 @@ class AttemptCallback(Protocol):
 
 EventSink = Callable[[WorkerEvent], None]
 ManualLoginCallback = Callable[[str], None]
+TaskSortKey = Callable[
+    [WebsiteTask],
+    tuple[str, str, str, str, str, str, int],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +64,7 @@ class BrowserTaskScheduler:
         control: SchedulerControl | None = None,
         event_sink: EventSink | None = None,
         manual_login_callback: ManualLoginCallback | None = None,
+        task_sort_key: TaskSortKey | None = None,
     ) -> None:
         if not isinstance(repository, SQLiteTaskRepository):
             raise ValueError("repository must be a SQLiteTaskRepository")
@@ -67,6 +72,8 @@ class BrowserTaskScheduler:
             raise ValueError("run_id must not be blank")
         if not callable(attempt_callback):
             raise ValueError("attempt_callback must be callable")
+        if task_sort_key is not None and not callable(task_sort_key):
+            raise ValueError("task_sort_key must be callable")
         self.repository = repository
         self.run_id = run_id.strip()
         self.attempt_callback = attempt_callback
@@ -75,6 +82,7 @@ class BrowserTaskScheduler:
         self.event_sink = event_sink
         self.event_errors: list[EventDeliveryError] = []
         self.manual_login_callback = manual_login_callback
+        self.task_sort_key = task_sort_key
         self._run_lock = threading.Lock()
         self._manual_lock = threading.Lock()
 
@@ -131,11 +139,18 @@ class BrowserTaskScheduler:
             for task in self.repository.select_failed(self.run_id)
             if self._can_retry_persisted_failure(task.task_id)
         )
-        return pending + failed
+        tasks = pending + failed
+        if self.task_sort_key is not None:
+            return tuple(sorted(tasks, key=self.task_sort_key))
+        return tasks
 
     def _can_retry_persisted_failure(self, task_id: str) -> bool:
-        latest = self.repository.latest_attempt(task_id)
-        if latest is None or latest.error_code not in RETRYABLE_ERROR_CODES:
+        result = self.repository.load_result(task_id)
+        error_code = result.error_code if result is not None else None
+        if error_code is None:
+            latest = self.repository.latest_attempt(task_id)
+            error_code = latest.error_code if latest is not None else None
+        if error_code not in RETRYABLE_ERROR_CODES:
             return False
         return self.retry_policy.can_start_technical_attempt(
             self._technical_attempts(task_id)
