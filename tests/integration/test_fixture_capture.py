@@ -55,10 +55,15 @@ class _Probe:
 
 
 class _Page:
-    def __init__(self, fixtures_by_task: dict[str, Path]) -> None:
+    def __init__(
+        self,
+        fixtures_by_task: dict[str, Path],
+        loads: list[str],
+    ) -> None:
         self.fixtures_by_task = fixtures_by_task
         self.current_html = ""
-        self.loads: list[str] = []
+        self.loads = loads
+        self.front_count = 0
 
     def load(self, task_id: str) -> None:
         self.loads.append(task_id)
@@ -66,15 +71,23 @@ class _Page:
             encoding="utf-8"
         )
 
+    def bring_to_front(self) -> None:
+        self.front_count += 1
+
 
 class _Session:
-    def __init__(self, page: _Page) -> None:
-        self.page = page
+    def __init__(self, fixtures_by_task: dict[str, Path]) -> None:
+        self.fixtures_by_task = fixtures_by_task
         self.families: list[str] = []
+        self.loads: list[str] = []
+        self.pages: dict[str, _Page] = {}
 
     def page_for(self, site_family: str) -> _Page:
         self.families.append(site_family)
-        return self.page
+        return self.pages.setdefault(
+            site_family,
+            _Page(self.fixtures_by_task, self.loads),
+        )
 
 
 class _Capture(PlatformEvidenceCapture):
@@ -125,7 +138,7 @@ def _adapter(task: WebsiteTask, page: _Page) -> FixtureObservation:
     assert matched is not None
     state = matched.group(1)
     if state == "login_required":
-        raise LoginRequired("fixture-tmall", "fixture login required")
+        raise LoginRequired("tmall", "fixture login required")
     cases = {
         "normal": (
             BusinessOutcome.PRICE_FOUND,
@@ -236,8 +249,9 @@ def _runner(
     capture: _Capture | None = None,
     adapter=_adapter,
     events: list[WorkerEvent] | None = None,
-) -> tuple[WebsiteTaskRunner, _Page, _Capture]:
-    page = _Page(fixtures_by_task)
+    manual_login_callback=None,
+) -> tuple[WebsiteTaskRunner, _Session, _Capture]:
+    session = _Session(fixtures_by_task)
     selected_capture = capture or _Capture()
 
     def diagnostic(task: WebsiteTask, _error: BaseException, path: Path) -> Path:
@@ -248,15 +262,16 @@ def _runner(
     runner = WebsiteTaskRunner(
         repository=repository,
         run_id="fixture-run",
-        browser_session=_Session(page),
+        browser_session=session,
         adapter=adapter,
         evidence_capture=selected_capture,
         evidence_dir=tmp_path / "evidence",
         diagnostic_capture=diagnostic,
         retry_policy=RetryPolicy(technical_retries=0, retry_delay_seconds=0),
         event_sink=events.append if events is not None else None,
+        manual_login_callback=manual_login_callback,
     )
-    return runner, page, selected_capture
+    return runner, session, selected_capture
 
 
 def test_fixture_outcomes_frames_sorting_and_output_mapping(
@@ -413,11 +428,28 @@ def test_login_parks_without_retry_while_other_task_completes(
     tmp_path: Path,
 ) -> None:
     tasks = (
-        _task("login", output_row=2, brand="A"),
-        _task("normal", output_row=3, brand="B"),
+        _task(
+            "login",
+            output_row=2,
+            brand="A",
+            channel=WebsiteChannel.TMALL,
+        ),
+        _task(
+            "same-site",
+            output_row=3,
+            brand="B",
+            channel=WebsiteChannel.TMALL,
+        ),
+        _task(
+            "normal",
+            output_row=4,
+            brand="C",
+            channel=WebsiteChannel.JD,
+        ),
     )
     fixtures = {
         "login": FIXTURES / "login_required.html",
+        "same-site": FIXTURES / "normal.html",
         "normal": FIXTURES / "normal.html",
     }
     events: list[WorkerEvent] = []
@@ -435,6 +467,8 @@ def test_login_parks_without_retry_while_other_task_completes(
         assert page.loads == ["login", "normal"]
         assert repository.task_state("login") is TaskState.WAITING_FOR_LOGIN
         assert repository.attempt_count("login") == 1
+        assert repository.task_state("same-site") is TaskState.PENDING
+        assert repository.attempt_count("same-site") == 0
         assert repository.task_state("normal") is TaskState.SUCCEEDED
         assert [event.event for event in events] == [
             "progress",
@@ -442,6 +476,114 @@ def test_login_parks_without_retry_while_other_task_completes(
             "progress",
             "result",
         ]
+        assert set(page.pages) == {"tmall", "jd"}
+
+
+def test_manual_login_reuses_preserved_site_page_and_resumes_only_that_site(
+    tmp_path: Path,
+) -> None:
+    tasks = (
+        _task(
+            "login",
+            output_row=2,
+            brand="A",
+            channel=WebsiteChannel.TMALL,
+        ),
+        _task(
+            "same-site",
+            output_row=3,
+            brand="B",
+            channel=WebsiteChannel.TMALL,
+        ),
+        _task(
+            "other-site",
+            output_row=4,
+            brand="C",
+            channel=WebsiteChannel.JD,
+        ),
+    )
+    fixtures = {
+        "login": FIXTURES / "login_required.html",
+        "same-site": FIXTURES / "normal.html",
+        "other-site": FIXTURES / "normal.html",
+    }
+    manual_sites: list[str] = []
+
+    def confirm_fixture_login(site: str) -> None:
+        manual_sites.append(site)
+        fixtures["login"] = FIXTURES / "normal.html"
+
+    with SQLiteTaskRepository(tmp_path / "state.sqlite3") as repository:
+        repository.create_run(_run(tmp_path))
+        runner, session, _capture = _runner(
+            repository,
+            tmp_path,
+            fixtures,
+            manual_login_callback=confirm_fixture_login,
+        )
+        runner.run(tasks)
+        preserved_page = session.pages["tmall"]
+        other_attempts = repository.attempt_count("other-site")
+
+        runner.scheduler.enter_manual_login("tmall")
+        runner.scheduler.confirm_manual_login("tmall")
+        runner.scheduler.run_until_idle()
+
+        assert manual_sites == ["tmall"]
+        assert session.pages["tmall"] is preserved_page
+        assert preserved_page.front_count == 1
+        assert repository.task_state("login") is TaskState.SUCCEEDED
+        assert repository.task_state("same-site") is TaskState.SUCCEEDED
+        assert repository.task_state("other-site") is TaskState.SUCCEEDED
+        assert repository.attempt_count("other-site") == other_attempts
+
+
+def test_official_site_family_isolated_by_brand(tmp_path: Path) -> None:
+    blocked = _task(
+        "blocked",
+        output_row=2,
+        brand="品牌甲",
+        channel=WebsiteChannel.OFFICIAL,
+    )
+    unrelated = _task(
+        "unrelated",
+        output_row=3,
+        brand="品牌乙",
+        channel=WebsiteChannel.OFFICIAL,
+    )
+    fixtures = {
+        "blocked": FIXTURES / "login_required.html",
+        "unrelated": FIXTURES / "normal.html",
+    }
+
+    def official_adapter(
+        task: WebsiteTask,
+        page: _Page,
+    ) -> FixtureObservation:
+        if task.task_id == "blocked":
+            page.load(task.task_id)
+            raise LoginRequired(
+                f"official:{task.brand}",
+                "fixture login required",
+            )
+        return _adapter(task, page)
+
+    with SQLiteTaskRepository(tmp_path / "state.sqlite3") as repository:
+        repository.create_run(_run(tmp_path))
+        runner, session, _capture = _runner(
+            repository,
+            tmp_path,
+            fixtures,
+            adapter=official_adapter,
+        )
+        runner.run((unrelated, blocked))
+
+        assert repository.task_state("blocked") is TaskState.WAITING_FOR_LOGIN
+        assert repository.task_state("unrelated") is TaskState.SUCCEEDED
+        assert set(session.pages) == {
+            "official:品牌甲",
+            "official:品牌乙",
+        }
 
 
 def test_capture_failure_is_diagnostic_only_and_never_business_no(
@@ -507,6 +649,121 @@ def test_adapter_technical_failure_also_gets_diagnostic(
         assert result.diagnostic_path is not None
         assert result.diagnostic_path.exists()
         assert capture.requests == []
+
+
+def test_result_validation_failure_removes_formal_and_records_diagnostic(
+    tmp_path: Path,
+) -> None:
+    task = _task("normal", output_row=2)
+    fixtures = {"normal": FIXTURES / "normal.html"}
+
+    def invalid_result_adapter(
+        task: WebsiteTask,
+        page: _Page,
+    ) -> FixtureObservation:
+        return replace(_adapter(task, page), url="file:///not-http")
+
+    with SQLiteTaskRepository(tmp_path / "state.sqlite3") as repository:
+        repository.create_run(_run(tmp_path))
+        runner, _session, capture = _runner(
+            repository,
+            tmp_path,
+            fixtures,
+            adapter=invalid_result_adapter,
+        )
+        runner.run((task,))
+
+        result = repository.load_result(task.task_id)
+        assert result is not None
+        assert result.state is TaskState.TECHNICAL_FAILURE
+        assert result.evidence is None
+        assert result.diagnostic_path is not None
+        assert len(capture.requests) == 1
+        assert not capture.requests[0].destination.exists()
+
+
+def test_external_diagnostic_path_is_not_persisted(tmp_path: Path) -> None:
+    task = _task("normal", output_row=2)
+    fixtures = {"normal": FIXTURES / "normal.html"}
+    session = _Session(fixtures)
+    capture = _Capture(failing_task="normal")
+    outside = tmp_path / "outside-diagnostic.png"
+
+    def external_diagnostic(
+        _task: WebsiteTask,
+        _error: BaseException,
+        _requested: Path,
+    ) -> Path:
+        outside.write_bytes(b"outside")
+        return outside
+
+    with SQLiteTaskRepository(tmp_path / "state.sqlite3") as repository:
+        repository.create_run(_run(tmp_path))
+        runner = WebsiteTaskRunner(
+            repository=repository,
+            run_id="fixture-run",
+            browser_session=session,
+            adapter=_adapter,
+            evidence_capture=capture,
+            evidence_dir=tmp_path / "evidence",
+            diagnostic_capture=external_diagnostic,
+            retry_policy=RetryPolicy(
+                technical_retries=0,
+                retry_delay_seconds=0,
+            ),
+        )
+        runner.run((task,))
+
+        result = repository.load_result(task.task_id)
+        assert result is not None
+        assert result.diagnostic_path is None
+        assert outside.is_file()
+
+
+def test_retry_diagnostics_are_attempt_scoped_and_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    task = _task("normal", output_row=2)
+    fixtures = {"normal": FIXTURES / "normal.html"}
+    session = _Session(fixtures)
+    capture = _Capture(failing_task="normal")
+    diagnostic_paths: list[Path] = []
+
+    def diagnostic(
+        _task: WebsiteTask,
+        _error: BaseException,
+        requested: Path,
+    ) -> Path:
+        requested.parent.mkdir(parents=True, exist_ok=True)
+        requested.write_bytes(requested.name.encode())
+        diagnostic_paths.append(requested)
+        return requested
+
+    with SQLiteTaskRepository(tmp_path / "state.sqlite3") as repository:
+        repository.create_run(_run(tmp_path))
+        runner = WebsiteTaskRunner(
+            repository=repository,
+            run_id="fixture-run",
+            browser_session=session,
+            adapter=_adapter,
+            evidence_capture=capture,
+            evidence_dir=tmp_path / "evidence",
+            diagnostic_capture=diagnostic,
+            retry_policy=RetryPolicy(
+                technical_retries=1,
+                retry_delay_seconds=0,
+            ),
+        )
+        runner.run((task,))
+
+        assert len(diagnostic_paths) == 2
+        assert diagnostic_paths[0] != diagnostic_paths[1]
+        assert ".a1.png" in diagnostic_paths[0].name
+        assert ".a2.png" in diagnostic_paths[1].name
+        assert all(path.is_file() for path in diagnostic_paths)
+        result = repository.load_result(task.task_id)
+        assert result is not None
+        assert result.diagnostic_path == diagnostic_paths[1].resolve()
 
 
 @pytest.mark.parametrize("damage", ["missing", "hash_mismatch"])

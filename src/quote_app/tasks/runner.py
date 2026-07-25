@@ -39,6 +39,7 @@ from quote_app.tasks.scheduler import (
     BrowserTaskScheduler,
     EventDeliveryError,
     EventSink,
+    ManualLoginCallback,
 )
 
 _OUTCOME_STATES = {
@@ -70,6 +71,7 @@ class FixtureAdapter(Protocol):
 
 
 DiagnosticCapture = Callable[[WebsiteTask, BaseException, Path], Path | None]
+SiteFamilyResolver = Callable[[WebsiteTask], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +155,8 @@ class WebsiteTaskRunner:
         retry_policy: RetryPolicy | None = None,
         control: SchedulerControl | None = None,
         event_sink: EventSink | None = None,
+        manual_login_callback: ManualLoginCallback | None = None,
+        site_family_resolver: SiteFamilyResolver | None = None,
         minimum_stability_interval_seconds: float = 0.15,
     ) -> None:
         if not isinstance(repository, SQLiteTaskRepository):
@@ -169,6 +173,14 @@ class WebsiteTaskRunner:
             raise ValueError("evidence_dir must be a Path")
         if diagnostic_capture is not None and not callable(diagnostic_capture):
             raise ValueError("diagnostic_capture must be callable")
+        if manual_login_callback is not None and not callable(
+            manual_login_callback
+        ):
+            raise ValueError("manual_login_callback must be callable")
+        if site_family_resolver is not None and not callable(
+            site_family_resolver
+        ):
+            raise ValueError("site_family_resolver must be callable")
         if (
             not isinstance(minimum_stability_interval_seconds, int | float)
             or isinstance(minimum_stability_interval_seconds, bool)
@@ -185,6 +197,10 @@ class WebsiteTaskRunner:
         self.evidence_capture = evidence_capture
         self.evidence_dir = evidence_dir.expanduser().resolve()
         self.diagnostic_capture = diagnostic_capture
+        self.site_family_resolver = (
+            site_family_resolver or _default_site_family
+        )
+        self.manual_login_callback = manual_login_callback
         self.minimum_stability_interval_seconds = float(
             minimum_stability_interval_seconds
         )
@@ -196,7 +212,9 @@ class WebsiteTaskRunner:
             retry_policy=retry_policy,
             control=control,
             event_sink=event_sink,
+            manual_login_callback=self._prepare_manual_login,
             task_sort_key=task_sort_key,
+            task_site_resolver=self.site_family_resolver,
         )
 
     @property
@@ -244,8 +262,12 @@ class WebsiteTaskRunner:
             f"{file_stem}.g{token.generation}.a{token.attempt_number}.png"
         )
         with self._page_lock:
+            site_family: str | None = None
             try:
-                page = self.browser_session.page_for("quotation-runner")
+                site_family = self.site_family_resolver(task)
+                if not isinstance(site_family, str) or not site_family.strip():
+                    raise ValueError("site family resolver returned invalid data")
+                page = self.browser_session.page_for(site_family.strip())
                 observation = self.adapter(task, page)
                 if not isinstance(observation, FixtureObservation):
                     raise ValueError(
@@ -264,7 +286,45 @@ class WebsiteTaskRunner:
                 )
                 evidence = self.evidence_capture.capture(request)
                 _require_validated_formal_evidence(evidence, request)
-            except (KeyboardInterrupt, SystemExit, LoginRequired):
+                return WebsiteResult(
+                    task_id=task.task_id,
+                    state=TaskState.SUCCEEDED,
+                    outcome=observation.outcome,
+                    price=observation.price,
+                    url=observation.url,
+                    evidence=evidence,
+                    diagnostic_path=None,
+                    error_code=None,
+                    error_message=None,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except LoginRequired as error:
+                _remove_partial_formal(destination)
+                if site_family is None or error.site != site_family:
+                    classified = classify_attempt_error(
+                        ValueError("login site does not match task site family")
+                    )
+                    if not isinstance(classified, TechnicalError):
+                        raise AssertionError(
+                            "login site mismatch was not technical"
+                        )
+                    diagnostic_path = self._capture_diagnostic(
+                        task,
+                        error,
+                        token,
+                    )
+                    return WebsiteResult(
+                        task_id=task.task_id,
+                        state=TaskState.TECHNICAL_FAILURE,
+                        outcome=None,
+                        price=None,
+                        url=None,
+                        evidence=None,
+                        diagnostic_path=diagnostic_path,
+                        error_code=classified.code,
+                        error_message=classified.message,
+                    )
                 raise
             except Exception as error:
                 _remove_partial_formal(destination)
@@ -278,6 +338,7 @@ class WebsiteTaskRunner:
                 diagnostic_path = self._capture_diagnostic(
                     task,
                     error,
+                    token,
                 )
                 return WebsiteResult(
                     task_id=task.task_id,
@@ -290,29 +351,22 @@ class WebsiteTaskRunner:
                     error_code=classified.code,
                     error_message=classified.message,
                 )
-            return WebsiteResult(
-                task_id=task.task_id,
-                state=TaskState.SUCCEEDED,
-                outcome=observation.outcome,
-                price=observation.price,
-                url=observation.url,
-                evidence=evidence,
-                diagnostic_path=None,
-                error_code=None,
-                error_message=None,
-            )
 
     def _capture_diagnostic(
         self,
         task: WebsiteTask,
         error: BaseException,
+        token: AttemptToken,
     ) -> Path | None:
         if self.diagnostic_capture is None:
             return None
+        diagnostics_root = (self.evidence_dir / "diagnostics").resolve()
         path = (
-            self.evidence_dir
-            / "diagnostics"
-            / f"{safe_task_file_stem(task.task_id)}.png"
+            diagnostics_root
+            / (
+                f"{safe_task_file_stem(task.task_id)}"
+                f".g{token.generation}.a{token.attempt_number}.png"
+            )
         )
         try:
             captured = self.diagnostic_capture(task, error, path)
@@ -323,7 +377,23 @@ class WebsiteTaskRunner:
         if not isinstance(captured, Path):
             return None
         normalized = captured.expanduser().resolve()
-        return normalized if normalized.is_file() else None
+        requested = path.resolve()
+        if normalized != requested or not normalized.is_file():
+            return None
+        try:
+            normalized.relative_to(diagnostics_root)
+        except ValueError:
+            return None
+        return normalized
+
+    def _prepare_manual_login(self, site: str) -> None:
+        with self._page_lock:
+            page = self.browser_session.page_for(site)
+            bring_to_front = getattr(page, "bring_to_front", None)
+            if callable(bring_to_front):
+                bring_to_front()
+            if self.manual_login_callback is not None:
+                self.manual_login_callback(site)
 
 
 def task_sort_key(
@@ -338,6 +408,12 @@ def task_sort_key(
         task.channel.value,
         task.output_row_number,
     )
+
+
+def _default_site_family(task: WebsiteTask) -> str:
+    if task.channel.value == "official":
+        return f"official:{task.brand}"
+    return task.channel.value
 
 
 def safe_task_file_stem(task_id: str) -> str:

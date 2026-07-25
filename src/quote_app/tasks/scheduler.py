@@ -38,6 +38,7 @@ TaskSortKey = Callable[
     [WebsiteTask],
     tuple[str, str, str, str, str, str, int],
 ]
+TaskSiteResolver = Callable[[WebsiteTask], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,7 @@ class BrowserTaskScheduler:
         event_sink: EventSink | None = None,
         manual_login_callback: ManualLoginCallback | None = None,
         task_sort_key: TaskSortKey | None = None,
+        task_site_resolver: TaskSiteResolver | None = None,
     ) -> None:
         if not isinstance(repository, SQLiteTaskRepository):
             raise ValueError("repository must be a SQLiteTaskRepository")
@@ -74,6 +76,10 @@ class BrowserTaskScheduler:
             raise ValueError("attempt_callback must be callable")
         if task_sort_key is not None and not callable(task_sort_key):
             raise ValueError("task_sort_key must be callable")
+        if task_site_resolver is not None and not callable(
+            task_site_resolver
+        ):
+            raise ValueError("task_site_resolver must be callable")
         self.repository = repository
         self.run_id = run_id.strip()
         self.attempt_callback = attempt_callback
@@ -83,6 +89,7 @@ class BrowserTaskScheduler:
         self.event_errors: list[EventDeliveryError] = []
         self.manual_login_callback = manual_login_callback
         self.task_sort_key = task_sort_key
+        self.task_site_resolver = task_site_resolver
         self._run_lock = threading.Lock()
         self._manual_lock = threading.Lock()
 
@@ -96,6 +103,8 @@ class BrowserTaskScheduler:
                 for task in tasks:
                     if not self.control.automated_work_allowed:
                         return
+                    if self._site_is_waiting(task):
+                        continue
                     if self._run_task(task):
                         made_progress = True
                 if not made_progress:
@@ -140,9 +149,37 @@ class BrowserTaskScheduler:
             if self._can_retry_persisted_failure(task.task_id)
         )
         tasks = pending + failed
+        if self.task_site_resolver is not None:
+            waiting_sites = {
+                self._task_site(task)
+                for task in self.repository.select_waiting(self.run_id)
+            }
+            tasks = tuple(
+                task
+                for task in tasks
+                if self._task_site(task) not in waiting_sites
+            )
         if self.task_sort_key is not None:
             return tuple(sorted(tasks, key=self.task_sort_key))
         return tasks
+
+    def _site_is_waiting(self, task: WebsiteTask) -> bool:
+        if self.task_site_resolver is None:
+            return False
+        site = self._task_site(task)
+        return any(
+            self._task_site(waiting) == site
+            for waiting in self.repository.select_waiting(self.run_id)
+        )
+
+    def _task_site(self, task: WebsiteTask) -> str:
+        resolver = self.task_site_resolver
+        if resolver is None:
+            raise AssertionError("task site resolver is not configured")
+        site = resolver(task)
+        if not isinstance(site, str) or not site.strip():
+            raise ValueError("task site resolver returned invalid data")
+        return site.strip()
 
     def _can_retry_persisted_failure(self, task_id: str) -> bool:
         result = self.repository.load_result(task_id)
