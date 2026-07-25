@@ -4,7 +4,7 @@
 
 - 文档版本：V1.0
 - 编制日期：2026-07-25
-- 当前状态：业务设计已确认，待用户审核正式文档
+- 当前状态：用户已确认
 - 第一版目标平台：macOS 测试版、Windows 正式版
 
 ## 1. 项目背景
@@ -159,6 +159,28 @@ flowchart LR
 
 关联时先将编码规范化为文本并进行精确匹配。匹配不到、匹配多条或关键字段相互冲突时，按照行级异常处理，不进行模糊猜测。
 
+精确字段映射：
+
+| 报价表列 | 来源 |
+|---|---|
+| A | 营销商品信息查询表 M |
+| B | 营销商品信息查询表 C |
+| C | 基础表 A |
+| D | 营销商品信息查询表 B |
+| E | 营销商品信息查询表 E |
+| F | BOP 资源信息表 Z；未匹配填“申请配置” |
+| G | BOP 资源信息表 Y；未匹配填“申请配置” |
+| H | 营销商品信息查询表 V |
+| I | 基础表中与报价月份往前 5 个月表头对应的列 |
+| J | 基础表中与报价月份上一个月表头对应的列 |
+| O | 营销商品信息查询表 X |
+| AB | 基础表 I |
+| AC | 基础表 J |
+| AD | 基础表 K |
+| AE | 基础表 L |
+| AF | 基础表 M |
+| AG | 基础表 B |
+
 ### 7.2 BOP 未匹配规则
 
 BOP 资源信息表无法匹配时不视为异常中断，F、G 按既定规则填写“申请配置”，并继续执行该产品的其他处理。
@@ -269,6 +291,18 @@ N 列设置下拉选项：
 - AK、AN：品牌官网价格和截图。
 
 每个品牌分别维护京东、天猫和官网规则，包括入口、搜索、机型识别、容量选择、颜色选择和价格提取。
+
+第一版使用报价说明中指定的直接入口：
+
+| 品牌 | 京东 | 天猫 | 官网 |
+|---|---|---|---|
+| 小米 | `https://mall.jd.com/index-1000004123.html?from=pc` | `https://xiaomi.tmall.com/` | `https://www.mi.com/shop` |
+| HONOR | `https://mall.jd.com/index-1000000904.html` | `https://hihonor.tmall.com/` | `https://www.honor.com/cn/shop/?cid=132355` |
+| 华为 | `https://mall.jd.com/index-1000004259.html?from=pc` | `https://huaweistore.tmall.com/` | `https://www.vmall.com/` |
+| 维沃 | `https://mall.jd.com/index-1000085868.html?from=pc` | `https://vivo.tmall.com/` | `https://shop.vivo.com.cn/` |
+| 欧珀 | `https://mall.jd.com/index-1000004065.html?from=pc` | `https://oppo.tmall.com/` | `https://www.opposhop.cn/cn/web/` |
+| 苹果 | `https://mall.jd.com/index-1000000127.html?from=pc` | `https://apple.tmall.com/` | `https://www.apple.com.cn/iphone/` |
+| ZTE 中兴 | `https://mall.jd.com/index-1000001971.html?from=pc` | `https://zte.tmall.com/` | `https://www.ztemall.com/` |
 
 ### 11.3 查询步骤
 
