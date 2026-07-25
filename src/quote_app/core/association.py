@@ -37,6 +37,13 @@ WEB_QUERY_MAP = {
     "storage": ("marketing", "AR"),
     "color": ("marketing", "AS"),
 }
+WEB_QUERY_LABELS = {
+    "brand": "品牌",
+    "model_name": "型号",
+    "ram": "运行内存",
+    "storage": "存储容量",
+    "color": "颜色",
+}
 
 _MARKETING_FIELDS = tuple(
     dict.fromkeys(
@@ -119,8 +126,8 @@ def associate_records(
                     row.issues.append(
                         _row_issue(
                             "WEB_FIELDS_MISSING",
-                            f"base row {source_row_number} is missing web query fields: "
-                            f"{', '.join(missing_web_fields)}",
+                            f"基础表第{source_row_number}行缺少网站查询字段："
+                            f"{'、'.join(WEB_QUERY_LABELS[name] for name in missing_web_fields)}",
                             source_row_number,
                         )
                     )

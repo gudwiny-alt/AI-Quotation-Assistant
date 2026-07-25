@@ -195,6 +195,7 @@ def test_equivalent_candidates_are_safe_and_missing_web_fields_are_reported() ->
     assert row.cells["F"] == "资源"
     assert row.cells["G"] == "已配置"
     assert _issue_codes(row) == {"WEB_FIELDS_MISSING"}
+    assert row.issues[0].message == "基础表第2行缺少网站查询字段：颜色"
     assert row.web_query == WebQuery(
         brand="维沃",
         model_name="型号",
