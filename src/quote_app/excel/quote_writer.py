@@ -3,8 +3,12 @@ from __future__ import annotations
 from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import count
+import os
 from pathlib import Path
 import re
+from tempfile import NamedTemporaryFile
+from typing import Iterator
 
 from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 from openpyxl.worksheet.datavalidation import (  # type: ignore[import-untyped]
@@ -50,25 +54,35 @@ class QuoteWriteRequest:
 def write_quote_workbook(request: QuoteWriteRequest) -> Path:
     """Generate a new quotation workbook while leaving its template unchanged."""
     output_dir = _ensure_output_directory(Path(request.output_dir))
-    output_path = _available_output_path(output_dir, request.quote_month)
-    workbook = load_clean_template(Path(request.template_path))
+    temporary_path: Path | None = None
     try:
-        if TEMPLATE_SHEET_NAME not in workbook.sheetnames:
-            raise ValueError(f"报价模板缺少工作表：{TEMPLATE_SHEET_NAME}")
-        sheet = workbook[TEMPLATE_SHEET_NAME]
-        for extra_sheet in tuple(workbook.worksheets):
-            if extra_sheet is not sheet:
-                workbook.remove(extra_sheet)
-
-        _update_month_headers(sheet, request.quote_month)
-        _write_rows(sheet, request.rows)
+        workbook = load_clean_template(Path(request.template_path))
         try:
-            workbook.save(output_path)
-        except OSError:
-            raise ValueError(f"报价表无法写入输出目录：{output_dir}") from None
+            if TEMPLATE_SHEET_NAME not in workbook.sheetnames:
+                raise ValueError(f"报价模板缺少工作表：{TEMPLATE_SHEET_NAME}")
+            sheet = workbook[TEMPLATE_SHEET_NAME]
+            for extra_sheet in tuple(workbook.worksheets):
+                if extra_sheet is not sheet:
+                    workbook.remove(extra_sheet)
+
+            _update_month_headers(sheet, request.quote_month)
+            _write_rows(sheet, request.rows)
+            temporary_path = _create_temporary_path(output_dir)
+            try:
+                workbook.save(temporary_path)
+            except OSError:
+                raise ValueError(f"报价表无法写入输出目录：{output_dir}") from None
+        finally:
+            workbook.close()
+
+        return _publish_without_overwrite(
+            temporary_path,
+            output_dir,
+            request.quote_month,
+        )
     finally:
-        workbook.close()
-    return output_path
+        if temporary_path is not None:
+            _remove_temporary_file(temporary_path)
 
 
 def _ensure_output_directory(output_dir: Path) -> Path:
@@ -81,19 +95,55 @@ def _ensure_output_directory(output_dir: Path) -> Path:
     return output_dir
 
 
-def _available_output_path(output_dir: Path, quote_month: QuoteMonth) -> Path:
-    stem = f"{quote_month.year}年{quote_month.month:02d}月终端供货价报价表"
-    exact_path = output_dir / f"{stem}.xlsx"
-    if not exact_path.exists():
-        return exact_path
+def _create_temporary_path(output_dir: Path) -> Path:
+    try:
+        with NamedTemporaryFile(
+            mode="wb",
+            prefix=".quote-",
+            suffix=".tmp.xlsx",
+            dir=output_dir,
+            delete=False,
+        ) as temporary_file:
+            return Path(temporary_file.name)
+    except OSError:
+        raise ValueError(f"报价表无法写入输出目录：{output_dir}") from None
 
+
+def _candidate_output_paths(
+    output_dir: Path,
+    quote_month: QuoteMonth,
+) -> Iterator[Path]:
+    stem = f"{quote_month.year}年{quote_month.month:02d}月终端供货价报价表"
+    yield output_dir / f"{stem}.xlsx"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    timestamped_path = output_dir / f"{stem}-{timestamp}.xlsx"
-    suffix = 2
-    while timestamped_path.exists():
-        timestamped_path = output_dir / f"{stem}-{timestamp}-{suffix}.xlsx"
-        suffix += 1
-    return timestamped_path
+    yield output_dir / f"{stem}-{timestamp}.xlsx"
+    for suffix in count(2):
+        yield output_dir / f"{stem}-{timestamp}-{suffix}.xlsx"
+
+
+def _publish_without_overwrite(
+    temporary_path: Path,
+    output_dir: Path,
+    quote_month: QuoteMonth,
+) -> Path:
+    for candidate in _candidate_output_paths(output_dir, quote_month):
+        try:
+            os.link(temporary_path, candidate)
+        except FileExistsError:
+            continue
+        except OSError:
+            raise ValueError(
+                f"报价表无法安全发布到输出目录：{output_dir}"
+            ) from None
+        return candidate
+    raise AssertionError("unreachable")
+
+
+def _remove_temporary_file(temporary_path: Path) -> None:
+    try:
+        temporary_path.unlink(missing_ok=True)
+    except OSError:
+        raise ValueError(f"报价表临时文件无法清理：{temporary_path}") from None
 
 
 def _update_month_headers(sheet: Worksheet, quote_month: QuoteMonth) -> None:

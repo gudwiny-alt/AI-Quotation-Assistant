@@ -1,12 +1,15 @@
 from hashlib import sha256
+import os
 from pathlib import Path
 import re
 
 from openpyxl import load_workbook  # type: ignore[import-untyped]
+from openpyxl.workbook.workbook import Workbook  # type: ignore[import-untyped]
 from openpyxl.xml.functions import tostring  # type: ignore[import-untyped]
 import pytest
 
 from quote_app.domain.models import QuoteMonth, QuoteRow
+from quote_app.excel import quote_writer
 from quote_app.excel.quote_writer import QuoteWriteRequest, write_quote_workbook
 
 
@@ -275,6 +278,144 @@ def test_writer_uses_safe_timestamped_name_when_exact_target_exists(
     )
     assert sha256(first.read_bytes()).hexdigest() == first_digest
     assert second.is_file()
+
+
+def test_writer_never_overwrites_file_created_during_exclusive_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    competitor_bytes = b"competitor-created-after-candidate-selection"
+    raced_paths: list[Path] = []
+    real_link = os.link
+
+    def link_after_competitor_wins(source: str | Path, destination: str | Path) -> None:
+        destination_path = Path(destination)
+        if not raced_paths:
+            destination_path.write_bytes(competitor_bytes)
+            raced_paths.append(destination_path)
+        real_link(source, destination)
+
+    monkeypatch.setattr(quote_writer.os, "link", link_after_competitor_wins)
+
+    output = write_quote_workbook(
+        QuoteWriteRequest(
+            quote_month=QuoteMonth(2026, 8),
+            rows=_rows()[:1],
+            template_path=TEMPLATE_PATH,
+            output_dir=tmp_path,
+        )
+    )
+
+    assert raced_paths == [tmp_path / "2026年08月终端供货价报价表.xlsx"]
+    assert raced_paths[0].read_bytes() == competitor_bytes
+    assert output != raced_paths[0]
+    assert re.fullmatch(
+        r"2026年08月终端供货价报价表-\d{8}-\d{6}\.xlsx",
+        output.name,
+    )
+    workbook = load_workbook(output, data_only=False)
+    workbook.close()
+    assert list(tmp_path.glob(".*.tmp.xlsx")) == []
+
+
+def test_writer_retries_multiple_exclusive_candidate_conflicts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destinations: list[Path] = []
+    real_link = os.link
+
+    def link_with_two_competitors(
+        source: str | Path,
+        destination: str | Path,
+    ) -> None:
+        destination_path = Path(destination)
+        destinations.append(destination_path)
+        if len(destinations) <= 2:
+            destination_path.write_bytes(f"competitor-{len(destinations)}".encode())
+        real_link(source, destination)
+
+    monkeypatch.setattr(quote_writer.os, "link", link_with_two_competitors)
+
+    output = write_quote_workbook(
+        QuoteWriteRequest(
+            quote_month=QuoteMonth(2026, 8),
+            rows=_rows()[:1],
+            template_path=TEMPLATE_PATH,
+            output_dir=tmp_path,
+        )
+    )
+
+    assert output == destinations[2]
+    assert destinations[0].read_bytes() == b"competitor-1"
+    assert destinations[1].read_bytes() == b"competitor-2"
+    assert re.fullmatch(
+        r"2026年08月终端供货价报价表-\d{8}-\d{6}-2\.xlsx",
+        output.name,
+    )
+    assert list(tmp_path.glob(".*.tmp.xlsx")) == []
+
+
+def test_writer_cleans_temporary_file_when_workbook_save_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_save(self: Workbook, filename: str | Path) -> None:
+        raise OSError("injected save failure")
+
+    monkeypatch.setattr(Workbook, "save", fail_save)
+
+    with pytest.raises(ValueError, match="报价表无法写入输出目录"):
+        write_quote_workbook(
+            QuoteWriteRequest(
+                quote_month=QuoteMonth(2026, 8),
+                rows=_rows()[:1],
+                template_path=TEMPLATE_PATH,
+                output_dir=tmp_path,
+            )
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_writer_cleans_temporary_file_when_exclusive_publish_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_workbook = load_workbook(TEMPLATE_PATH, data_only=False)
+    original_close = loaded_workbook.close
+    close_calls = 0
+
+    def tracked_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        original_close()
+
+    monkeypatch.setattr(loaded_workbook, "close", tracked_close)
+    monkeypatch.setattr(
+        quote_writer,
+        "load_clean_template",
+        lambda path: loaded_workbook,
+    )
+
+    def fail_publish(source: str | Path, destination: str | Path) -> None:
+        assert close_calls == 1
+        raise PermissionError("injected publish failure")
+
+    monkeypatch.setattr(quote_writer.os, "link", fail_publish)
+
+    with pytest.raises(ValueError, match="报价表无法安全发布到输出目录"):
+        write_quote_workbook(
+            QuoteWriteRequest(
+                quote_month=QuoteMonth(2026, 8),
+                rows=_rows()[:1],
+                template_path=TEMPLATE_PATH,
+                output_dir=tmp_path,
+            )
+        )
+
+    assert list(tmp_path.iterdir()) == []
+    assert close_calls == 1
 
 
 def test_writer_with_empty_rows_outputs_header_only_and_no_validation(
