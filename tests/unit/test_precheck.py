@@ -1,12 +1,17 @@
 from pathlib import Path
 
 import pytest
+import msoffcrypto  # type: ignore[import-untyped]
 
 from quote_app.core.precheck import month_header, precheck_inputs
 from quote_app.domain.models import InputPaths, QuoteMonth
 from quote_app.excel.source_reader import read_first_table
 from tests.conftest import ValidInputs
-from tests.factories.workbook_factory import save_workbook
+from tests.factories.workbook_factory import (
+    encrypt_workbook,
+    save_empty_workbook,
+    save_workbook,
+)
 
 
 def _paths(
@@ -59,6 +64,24 @@ def test_history_header_with_halfwidth_parentheses_is_not_an_exact_match(tmp_pat
     base = save_workbook(
         tmp_path / "base.xlsx",
         ["集团一级库物料编码", "2026年3月结算报价(元/台)", "2026年7月结算报价（元/台）"],
+        [["9101", 3999, 3899]],
+    )
+
+    result = precheck_inputs(_paths(tmp_path, base=base), QuoteMonth(2026, 8))
+
+    assert any(issue.code == "MISSING_HISTORY_MONTH" for issue in result.fatal_issues)
+
+
+def test_history_header_with_surrounding_whitespace_is_not_an_exact_match(
+    tmp_path: Path,
+) -> None:
+    base = save_workbook(
+        tmp_path / "base.xlsx",
+        [
+            "集团一级库物料编码",
+            " 2026年3月结算报价（元/台） ",
+            "2026年7月结算报价（元/台）",
+        ],
         [["9101", 3999, 3899]],
     )
 
@@ -153,6 +176,35 @@ def test_missing_file_becomes_fatal_issue(tmp_path: Path) -> None:
 
     assert any(
         issue.code == "UNREADABLE_WORKBOOK" and "marketing" in issue.message
+        for issue in result.fatal_issues
+    )
+
+
+def test_real_empty_workbook_becomes_fatal_issue(tmp_path: Path) -> None:
+    empty = save_empty_workbook(tmp_path / "empty.xlsx")
+
+    result = precheck_inputs(_paths(tmp_path, base=empty), QuoteMonth(2026, 8))
+
+    assert any(
+        issue.code == "UNREADABLE_WORKBOOK" and "base" in issue.message
+        for issue in result.fatal_issues
+    )
+
+
+def test_real_encrypted_workbook_becomes_fatal_issue(tmp_path: Path) -> None:
+    plain = save_workbook(
+        tmp_path / "plain.xlsx",
+        ["集团一级库物料编码", "2026年3月结算报价（元/台）", "2026年7月结算报价（元/台）"],
+        [["9101", 3999, 3899]],
+    )
+    encrypted = encrypt_workbook(plain, tmp_path / "encrypted.xlsx")
+    with encrypted.open("rb") as encrypted_file:
+        assert msoffcrypto.OfficeFile(encrypted_file).is_encrypted()
+
+    result = precheck_inputs(_paths(tmp_path, base=encrypted), QuoteMonth(2026, 8))
+
+    assert any(
+        issue.code == "UNREADABLE_WORKBOOK" and "base" in issue.message
         for issue in result.fatal_issues
     )
 

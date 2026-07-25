@@ -40,7 +40,7 @@ def read_first_table(path: Path) -> SheetTable:
         values = tuple(tuple(row) for row in sheet.iter_rows(values_only=True))
         if not values or not any(value is not None for value in values[0]):
             raise ValueError("first worksheet has no header row")
-        header_values = tuple("" if value is None else str(value).strip() for value in values[0])
+        header_values = tuple("" if value is None else str(value) for value in values[0])
         headers = {
             value: index
             for index, value in enumerate(header_values)
