@@ -1,0 +1,1 @@
+"""Fujian Mobile quotation automation."""
