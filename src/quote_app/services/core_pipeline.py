@@ -31,10 +31,14 @@ class CoreRunResult:
 class CorePipelineError(ValueError):
     """Stable business exception raised before output generation."""
 
-    def __init__(self, issues: tuple[Issue, ...]) -> None:
+    def __init__(
+        self,
+        issues: tuple[Issue, ...],
+        heading: str = "输入预检查未通过",
+    ) -> None:
         self.issues = issues
         messages = "；".join(issue.message for issue in issues)
-        super().__init__(f"输入预检查未通过：{messages}")
+        super().__init__(f"{heading}：{messages}")
 
 
 def run_core_pipeline(
@@ -65,29 +69,66 @@ def run_core_pipeline(
         )
 
     _merge_base_precheck_issues(rows, precheck.row_issues)
-    quote_path = write_quote_workbook(
-        QuoteWriteRequest(
-            quote_month=quote_month,
-            rows=rows,
-            template_path=template_path,
-            output_dir=paths.output_dir,
+    try:
+        quote_path = write_quote_workbook(
+            QuoteWriteRequest(
+                quote_month=quote_month,
+                rows=rows,
+                template_path=template_path,
+                output_dir=paths.output_dir,
+            )
         )
-    )
+    except Exception:
+        raise _output_error(
+            "OUTPUT_PAIR_FAILED",
+            "报价表生成失败，未产生本次报价输出和执行报告",
+        ) from None
+
     summary = summarize_rows(rows)
-    report_path = write_execution_report(
-        ReportWriteRequest(
-            quote_month=quote_month,
-            rows=rows,
-            output_dir=paths.output_dir,
-            input_paths=paths,
-            quote_path=quote_path,
+    try:
+        report_path = write_execution_report(
+            ReportWriteRequest(
+                quote_month=quote_month,
+                rows=rows,
+                output_dir=paths.output_dir,
+                input_paths=paths,
+                quote_path=quote_path,
+            )
         )
-    )
+    except Exception:
+        try:
+            quote_path.unlink(missing_ok=True)
+        except OSError:
+            raise _output_error(
+                "ROLLBACK_FAILED",
+                (
+                    "执行报告生成失败，且本次报价表无法自动回滚；"
+                    f"请手工删除孤立文件：{quote_path}"
+                ),
+            ) from None
+        raise _output_error(
+            "OUTPUT_PAIR_FAILED",
+            "执行报告生成失败，本次报价表已自动回滚，未留下不完整输出",
+        ) from None
+
     return CoreRunResult(
         quote_path=quote_path,
         report_path=report_path,
         summary=summary,
         rows=rows,
+    )
+
+
+def _output_error(code: str, message: str) -> CorePipelineError:
+    return CorePipelineError(
+        (
+            Issue(
+                code=code,
+                message=message,
+                fatal=True,
+            ),
+        ),
+        heading="报价输出未完成",
     )
 
 

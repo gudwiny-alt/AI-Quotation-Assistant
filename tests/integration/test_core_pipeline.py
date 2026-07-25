@@ -5,6 +5,8 @@ from openpyxl import load_workbook  # type: ignore[import-untyped]
 import pytest
 
 from quote_app.domain.models import InputPaths, QuoteMonth
+from quote_app.excel import report_writer
+from quote_app.services import core_pipeline
 from quote_app.services.core_pipeline import CorePipelineError, run_core_pipeline
 from tests.factories.workbook_factory import save_workbook
 
@@ -256,3 +258,126 @@ def test_all_blank_base_codes_stop_without_outputs(tmp_path: Path) -> None:
 
     assert caught.value.issues[0].code == "NO_QUOTABLE_ROWS"
     assert not paths.output_dir.exists() or list(paths.output_dir.iterdir()) == []
+
+
+def test_quote_writer_failure_produces_neither_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _inputs(tmp_path)
+    report_called = False
+
+    def fail_quote(*args: object, **kwargs: object) -> Path:
+        raise ValueError("internal quote failure detail")
+
+    def record_report(*args: object, **kwargs: object) -> Path:
+        nonlocal report_called
+        report_called = True
+        raise AssertionError("report must not run")
+
+    monkeypatch.setattr(core_pipeline, "write_quote_workbook", fail_quote)
+    monkeypatch.setattr(core_pipeline, "write_execution_report", record_report)
+
+    with pytest.raises(CorePipelineError) as caught:
+        run_core_pipeline(paths, QuoteMonth(2026, 8), TEMPLATE_PATH)
+
+    assert caught.value.issues[0].code == "OUTPUT_PAIR_FAILED"
+    assert "internal quote failure detail" not in str(caught.value)
+    assert report_called is False
+    assert not paths.output_dir.exists() or list(paths.output_dir.iterdir()) == []
+
+
+def test_report_failure_rolls_back_exact_quote_from_this_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _inputs(tmp_path)
+
+    def fail_report(*args: object, **kwargs: object) -> Path:
+        raise ValueError("internal report failure detail")
+
+    monkeypatch.setattr(core_pipeline, "write_execution_report", fail_report)
+
+    with pytest.raises(CorePipelineError) as caught:
+        run_core_pipeline(paths, QuoteMonth(2026, 8), TEMPLATE_PATH)
+
+    assert caught.value.issues[0].code == "OUTPUT_PAIR_FAILED"
+    assert "internal report failure detail" not in str(caught.value)
+    assert paths.output_dir.is_dir()
+    assert list(paths.output_dir.iterdir()) == []
+
+
+def test_real_report_publication_failure_cleans_temporary_and_rolls_back_quote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _inputs(tmp_path)
+
+    def fail_publish(*args: object, **kwargs: object) -> Path:
+        raise ValueError("internal publication detail")
+
+    monkeypatch.setattr(report_writer, "_publish_without_overwrite", fail_publish)
+
+    with pytest.raises(CorePipelineError) as caught:
+        run_core_pipeline(paths, QuoteMonth(2026, 8), TEMPLATE_PATH)
+
+    assert caught.value.issues[0].code == "OUTPUT_PAIR_FAILED"
+    assert "internal publication detail" not in str(caught.value)
+    assert list(paths.output_dir.iterdir()) == []
+    assert list(paths.output_dir.glob(".*.tmp.xlsx")) == []
+
+
+def test_pair_rollback_preserves_preexisting_collisions_and_removes_only_new_quote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _inputs(tmp_path)
+    paths.output_dir.mkdir()
+    historical_quote = paths.output_dir / "2026年08月终端供货价报价表.xlsx"
+    historical_report = paths.output_dir / "2026年08月报价执行报告.xlsx"
+    historical_quote.write_bytes(b"historical-quote")
+    historical_report.write_bytes(b"historical-report")
+
+    def fail_report(*args: object, **kwargs: object) -> Path:
+        raise ValueError("report stopped")
+
+    monkeypatch.setattr(core_pipeline, "write_execution_report", fail_report)
+
+    with pytest.raises(CorePipelineError):
+        run_core_pipeline(paths, QuoteMonth(2026, 8), TEMPLATE_PATH)
+
+    assert historical_quote.read_bytes() == b"historical-quote"
+    assert historical_report.read_bytes() == b"historical-report"
+    assert set(paths.output_dir.iterdir()) == {historical_quote, historical_report}
+
+
+def test_rollback_delete_failure_reports_exact_orphan_without_internal_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _inputs(tmp_path)
+    real_unlink = Path.unlink
+
+    def fail_report(*args: object, **kwargs: object) -> Path:
+        raise ValueError("internal report error")
+
+    def fail_quote_unlink(
+        self: Path,
+        missing_ok: bool = False,
+    ) -> None:
+        if self.name == "2026年08月终端供货价报价表.xlsx":
+            raise OSError("secret unlink failure")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(core_pipeline, "write_execution_report", fail_report)
+    monkeypatch.setattr(Path, "unlink", fail_quote_unlink)
+
+    with pytest.raises(CorePipelineError) as caught:
+        run_core_pipeline(paths, QuoteMonth(2026, 8), TEMPLATE_PATH)
+
+    orphan = paths.output_dir / "2026年08月终端供货价报价表.xlsx"
+    assert caught.value.issues[0].code == "ROLLBACK_FAILED"
+    assert str(orphan) in str(caught.value)
+    assert "internal report error" not in str(caught.value)
+    assert "secret unlink failure" not in str(caught.value)
+    assert orphan.exists()
