@@ -923,6 +923,7 @@ def test_unverified_windows_dpi_fails_before_geometry_provider_is_called() -> No
 @pytest.mark.parametrize(
     ("scale", "dpi", "native_dpi"),
     [
+        (1.0, 96.0, 96),
         (1.25, 120.0, 120),
         (1.5, 144.0, 144),
     ],
