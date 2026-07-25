@@ -29,17 +29,31 @@ def _request(tmp_path: Path) -> ReportWriteRequest:
         QuoteRow(
             2,
             "9101",
-            {"B": "小米", "C": "9101", "E": "手机甲", "G": "12+256", "AB": "经理甲"},
+            {
+                "B": "小米",
+                "C": "9101",
+                "E": "手机甲",
+                "G": "12+256",
+                "AB": "特殊情况备注甲",
+                "AG": "经理甲",
+            },
         ),
         QuoteRow(
             3,
             "9102",
-            {"B": "其他品牌", "C": "9102", "E": "手机乙", "G": "8+128", "AB": "经理乙"},
+            {
+                "B": "其他品牌",
+                "C": "9102",
+                "E": "手机乙",
+                "G": "8+128",
+                "AB": "特殊情况备注乙",
+                "AG": "经理乙",
+            },
         ),
         QuoteRow(
             4,
             "9103",
-            {"C": "9103", "AB": "经理甲"},
+            {"C": "9103", "AB": "特殊情况备注丙", "AG": "经理甲"},
             [Issue("MARKETING_NOT_FOUND", "未找到营销记录", False, 4)],
         ),
     ]
@@ -175,6 +189,46 @@ def test_report_has_reconciled_overview_breakdowns_detail_and_formatting(
         workbook.close()
 
 
+def test_report_manager_uses_ag_and_never_treats_ab_special_note_as_manager(
+    tmp_path: Path,
+) -> None:
+    special_note = "这是特殊情况备注，不是产品经理；内容很长，绝不能进入经理汇总。"
+    row = QuoteRow(
+        2,
+        "00009101",
+        {
+            "B": "小米",
+            "C": "00009101",
+            "E": "手机甲",
+            "AB": special_note,
+            "AG": "产品经理甲",
+        },
+    )
+
+    output = write_execution_report(
+        ReportWriteRequest(QuoteMonth(2026, 8), [row], tmp_path)
+    )
+
+    workbook = load_workbook(output)
+    try:
+        overview_values = [
+            [cell.value for cell in overview_row]
+            for overview_row in workbook["运行总览"].iter_rows()
+        ]
+        detail = workbook["处理明细"]
+        assert detail["A2"].value == "产品经理甲"
+        assert detail["C2"].value == "00009101"
+        assert detail["C2"].number_format == "@"
+        assert _find_row(overview_values, "产品经理甲")[:2] == ["产品经理甲", 1]
+        assert all(
+            special_note not in str(cell)
+            for overview_row in overview_values
+            for cell in overview_row
+        )
+    finally:
+        workbook.close()
+
+
 def test_report_naming_is_collision_safe_and_existing_file_is_unchanged(
     tmp_path: Path,
 ) -> None:
@@ -228,7 +282,8 @@ def test_report_marks_fully_populated_channels_completed_and_green(
             "B": "小米",
             "C": "9101",
             "E": "手机甲",
-            "AB": "经理甲",
+            "AB": "特殊情况备注",
+            "AG": "经理甲",
             "AI": 3999,
             "AJ": 3998,
             "AK": 3997,

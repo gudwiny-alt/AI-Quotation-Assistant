@@ -166,7 +166,7 @@ def write_execution_report(request: ReportWriteRequest) -> Path:
 def _assess_row(row: QuoteRow) -> RowAssessment:
     issue_codes = {issue.code for issue in row.issues}
     brand = normalize_text(row.cells.get("B")) or "未识别"
-    manager = normalize_text(row.cells.get("AB")) or "未分配"
+    manager = normalize_text(row.cells.get("AG")) or "未分配"
     issue_reason = "；".join(f"{issue.code}：{issue.message}" for issue in row.issues)
     channel_states = _channel_states(row)
 
@@ -380,6 +380,7 @@ def _write_detail(sheet: Worksheet, assessments: list[RowAssessment]) -> None:
         )
         status_cell = sheet.cell(sheet.max_row, 12)
         status_cell.fill = STATUS_FILLS[assessment.status]
+        sheet.cell(sheet.max_row, 3).number_format = "@"
 
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = f"A1:O{max(1, sheet.max_row)}"

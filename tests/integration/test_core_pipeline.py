@@ -53,8 +53,8 @@ def _inputs(
         base_rows
         if base_rows is not None
         else [
-            _row(13, A="9101", B="基地甲", C=3999, D=3899, I="经理甲"),
-            _row(13, A="9102", B="基地乙", C="无", D="无", I="经理乙"),
+            _row(13, A="9101", B="经理甲", C=3999, D=3899, I="特殊情况备注甲"),
+            _row(13, A="9102", B="经理乙", C="无", D="无", I="特殊情况备注乙"),
         ],
     )
     marketing = save_workbook(
@@ -162,9 +162,9 @@ def test_blank_base_rows_are_excluded_and_duplicate_nonblank_rows_are_preserved(
     paths = _inputs(
         tmp_path,
         base_rows=[
-            _row(13, A="9101", C=3999, D=3899, I="经理甲"),
-            _row(13, A="", C=3888, D=3788, I="经理空"),
-            _row(13, A=" 9101 ", C=3777, D=3677, I="经理乙"),
+            _row(13, A="9101", B="经理甲", C=3999, D=3899, I="特殊情况备注甲"),
+            _row(13, A="", B="经理空", C=3888, D=3788, I="特殊情况备注空"),
+            _row(13, A=" 9101 ", B="经理乙", C=3777, D=3677, I="特殊情况备注乙"),
         ],
         marketing_rows=[
             _row(
@@ -248,8 +248,8 @@ def test_all_blank_base_codes_stop_without_outputs(tmp_path: Path) -> None:
     paths = _inputs(
         tmp_path,
         base_rows=[
-            _row(13, A="", C=3999, D=3899, I="经理甲"),
-            _row(13, A=None, C=3888, D=3788, I="经理乙"),
+            _row(13, A="", B="经理甲", C=3999, D=3899, I="特殊情况备注甲"),
+            _row(13, A=None, B="经理乙", C=3888, D=3788, I="特殊情况备注乙"),
         ],
     )
 
