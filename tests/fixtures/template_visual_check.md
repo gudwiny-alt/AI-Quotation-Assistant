@@ -23,7 +23,27 @@ The generated package contains no `xl/media`, `xl/drawings`, or
 
 ## Manual visual comparison
 
-Not executed in this environment because no Excel/WPS desktop session was
-available. Before production acceptance, open the approved source and generated
-template side by side in Excel or WPS and visually verify the header rendering,
-row-2 style skeleton, A:AN widths, freeze panes, and print preview.
+Status: **Passed**
+
+- Checked at: 2026-07-25 18:59 CST
+- Application: WPS Office for macOS 12.1.26026
+- Source: `2026年8月终端供货价报价表.xlsx`
+- Template inspection copy: `quote_template_task6.xlsx`
+
+Side-by-side inspection confirmed:
+
+- The left and middle header sections render consistently in the source and
+  template, including colors, wrapping, filter arrows, and A:AN column
+  positions and widths.
+- The template contains only the row-1 header and empty row-2 style skeleton.
+  The instruction row and later sample data are absent, and `5G手机` is the
+  only worksheet.
+- After scrolling the template to row 56, row 1 remained visible, confirming
+  the A2 freeze pane.
+- Print Preview reported A4, portrait orientation, 100% normal size, active
+  worksheet, and nine pages for both workbooks. Header column boundaries in
+  the page thumbnails matched; the only differences were the intentionally
+  cleared sample and instruction content.
+
+Conclusion: the generated clean template passed the required WPS visual
+acceptance.
