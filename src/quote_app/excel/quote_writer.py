@@ -23,6 +23,7 @@ from quote_app.core.formulas import (
     needs_six_month_adjustment,
 )
 from quote_app.core.months import required_price_months
+from quote_app.core.normalization import normalize_code
 from quote_app.core.precheck import month_header
 from quote_app.domain.models import QuoteMonth, QuoteRow
 from quote_app.excel.template_builder import (
@@ -200,6 +201,8 @@ def _write_rows(sheet: Worksheet, rows: list[QuoteRow]) -> None:
             if column in _TEMPLATE_COLUMNS and column not in MANUAL_COLUMNS:
                 sheet[f"{column}{row_number}"] = value
 
+        sheet[f"C{row_number}"] = normalize_code(quote_row.material_code)
+        sheet[f"C{row_number}"].number_format = "@"
         sheet[f"T{row_number}"] = "无"
         sheet[f"U{row_number}"] = "无"
         sheet[f"V{row_number}"] = is_new(

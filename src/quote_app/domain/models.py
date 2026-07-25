@@ -35,6 +35,16 @@ class Issue:
     message: str
     fatal: bool
     row_number: int | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WebQuery:
+    brand: str | None = None
+    model_name: str | None = None
+    ram: str | None = None
+    storage: str | None = None
+    color: str | None = None
 
 
 @dataclass(slots=True)
@@ -43,3 +53,4 @@ class QuoteRow:
     material_code: str
     cells: dict[str, Any] = field(default_factory=dict)
     issues: list[Issue] = field(default_factory=list)
+    web_query: WebQuery = field(default_factory=WebQuery)

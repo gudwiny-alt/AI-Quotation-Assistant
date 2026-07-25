@@ -138,7 +138,7 @@ def _merge_base_precheck_issues(
 ) -> None:
     base_issues_by_row: dict[int, list[Issue]] = {}
     for issue in row_issues:
-        if issue.row_number is None or not issue.message.startswith("base row "):
+        if issue.row_number is None or issue.source != "base":
             continue
         base_issues_by_row.setdefault(issue.row_number, []).append(issue)
     for row in rows:

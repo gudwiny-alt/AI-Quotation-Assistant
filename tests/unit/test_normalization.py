@@ -11,3 +11,5 @@ def test_brand_aliases_use_approved_names() -> None:
     assert normalize_brand("荣耀") == "HONOR"
     assert normalize_brand(" vivo ") == "维沃"
     assert normalize_brand("OPPO") == "欧珀"
+    assert normalize_brand("ZTE 中兴") == "ZTE中兴"
+    assert normalize_brand(" ZTE　中兴 ") == "ZTE中兴"

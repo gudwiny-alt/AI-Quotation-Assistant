@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from quote_app.core.association import associate_records, associate_rows
-from quote_app.domain.models import QuoteMonth
+from quote_app.domain.models import QuoteMonth, WebQuery
 from quote_app.excel.source_reader import SheetTable
 
 
@@ -82,6 +82,20 @@ def test_base_rows_drive_count_order_and_all_exact_source_mappings() -> None:
         "AF": "备注二",
         "AG": "基地二",
     }
+    assert rows[0].web_query == WebQuery(
+        brand="小米",
+        model_name="小米17",
+        ram="12GB",
+        storage="256GB",
+        color="雪山粉",
+    )
+    assert rows[1].web_query == WebQuery(
+        brand="HONOR",
+        model_name="HONOR 500",
+        ram="12GB",
+        storage="256GB",
+        color="月光银",
+    )
     assert rows[1].cells["B"] == "HONOR"
     assert rows[1].cells["F"] == "BOP-F1"
     assert rows[1].cells["G"] == "BOP-G1"
@@ -181,6 +195,13 @@ def test_equivalent_candidates_are_safe_and_missing_web_fields_are_reported() ->
     assert row.cells["F"] == "资源"
     assert row.cells["G"] == "已配置"
     assert _issue_codes(row) == {"WEB_FIELDS_MISSING"}
+    assert row.web_query == WebQuery(
+        brand="维沃",
+        model_name="型号",
+        ram="12GB",
+        storage="256GB",
+        color=None,
+    )
 
 
 def test_sheet_tables_resolve_dynamic_month_headers_at_arbitrary_columns() -> None:

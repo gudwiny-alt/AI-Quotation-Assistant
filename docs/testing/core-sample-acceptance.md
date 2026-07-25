@@ -22,14 +22,18 @@ Status: **Passed**
 - Execution-report detail rows: 7
 - Source order: exact match
 - Quotation worksheets: only `5G手机`
-- Summary: 0 completed, 6 partial, 0 failed, 1 unsupported, 7 requiring
+- Summary: 0 completed, 7 partial, 0 failed, 0 unsupported, 7 requiring
   manual website supplementation
+- Sample row 7: `WEB_FIELDS_MISSING` (brand and color), classified as partial
+  source-data supplementation rather than unsupported brand
 - Product managers: 杨旭佳、林旭明、许自骋、罗慧玲、杨春、庄映、陆少美
 - Manual columns K, L, M, N, P, and Q: blank for all generated rows
 - Rolling headers: March 2026, July 2026, and August 2026
 - X2 formula:
   `=IF(K2="","",IF(J2="无","无",(K2-J2)/J2))`
 - Quote rows, report detail rows, and report summary totals reconcile
+- All seven quotation C cells use normalized material codes in source order
+  and Excel text number format (`@`)
 - SHA-256 digests of all three inputs and the clean template were identical
   before and after the run
 
@@ -47,4 +51,3 @@ Visual inspection confirmed that the report contains the actual product-manager
 names from quotation column AG; the long special-situation notes from AB do not
 enter the manager detail or manager summary. Material-code cells are stored as
 text, including support for leading zeroes.
-

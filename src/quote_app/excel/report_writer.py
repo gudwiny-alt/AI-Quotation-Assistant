@@ -176,6 +176,12 @@ def _assess_row(row: QuoteRow) -> RowAssessment:
         failed_step = "营销商品信息关联"
         reason = issue_reason
         recommendation = "核对营销商品信息查询表中的物料编码及重复记录后重新运行"
+    elif "WEB_FIELDS_MISSING" in issue_codes:
+        status = RowStatus.PARTIAL
+        manual_supplement = True
+        failed_step = "营销商品信息完整性"
+        reason = issue_reason
+        recommendation = "补齐营销商品信息中的品牌、型号、内存、存储和颜色字段后重新运行"
     elif brand not in SUPPORTED_BRANDS:
         status = RowStatus.UNSUPPORTED
         manual_supplement = True

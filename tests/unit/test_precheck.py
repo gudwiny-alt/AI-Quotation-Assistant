@@ -116,7 +116,10 @@ def test_required_code_header_must_be_at_approved_position(
 
     result = precheck_inputs(_paths(tmp_path, **{source: invalid}), QuoteMonth(2026, 8))
 
-    assert any(issue.code == expected_code and source in issue.message for issue in result.fatal_issues)
+    assert any(
+        issue.code == expected_code and issue.source == source
+        for issue in result.fatal_issues
+    )
     assert source not in result.identified_sheets
 
 
@@ -154,7 +157,10 @@ def test_swapped_marketing_and_bop_files_are_both_fatal(valid_inputs: ValidInput
     invalid_sources = {
         source
         for source in ("marketing", "bop")
-        if any(issue.code == "INVALID_SOURCE_TABLE" and source in issue.message for issue in result.fatal_issues)
+        if any(
+            issue.code == "INVALID_SOURCE_TABLE" and issue.source == source
+            for issue in result.fatal_issues
+        )
     }
     assert invalid_sources == {"marketing", "bop"}
 
@@ -228,7 +234,7 @@ def test_too_few_columns_is_fatal_even_when_last_header_looks_valid(tmp_path: Pa
     result = precheck_inputs(_paths(tmp_path, marketing=marketing), QuoteMonth(2026, 8))
 
     assert any(
-        issue.code == "INVALID_SOURCE_TABLE" and "marketing" in issue.message
+        issue.code == "INVALID_SOURCE_TABLE" and issue.source == "marketing"
         for issue in result.fatal_issues
     )
 
@@ -269,7 +275,10 @@ def test_row_issues_cover_fixed_code_columns_in_every_source(tmp_path: Path) -> 
         QuoteMonth(2026, 8),
     )
 
-    messages = {(issue.code, issue.row_number, issue.message.split()[0]) for issue in result.row_issues}
+    messages = {
+        (issue.code, issue.row_number, issue.source)
+        for issue in result.row_issues
+    }
     assert messages == {
         ("BLANK_MATERIAL_CODE", 2, "marketing"),
         ("DUPLICATE_MATERIAL_CODE", 3, "marketing"),
@@ -298,3 +307,41 @@ def test_source_table_exposes_rows_by_excel_column_letter(tmp_path: Path) -> Non
         {"A": "9101", "B": 3999},
         {"A": "9102", "B": "无"},
     )
+
+
+def test_precheck_business_messages_are_chinese_and_keep_machine_source(
+    tmp_path: Path,
+) -> None:
+    base = save_workbook(
+        tmp_path / "base.xlsx",
+        ["集团一级库物料编码", "2026年3月结算报价（元/台）", "2026年7月结算报价（元/台）"],
+        [["9101", 3999, 3899], [" 9101 ", 3888, 3788], ["", 3777, 3677]],
+    )
+    invalid_marketing = save_workbook(
+        tmp_path / "marketing.xlsx",
+        ["错误列"],
+        [["9101"]],
+    )
+
+    result = precheck_inputs(
+        _paths(tmp_path, base=base, marketing=invalid_marketing),
+        QuoteMonth(2026, 8),
+    )
+
+    issues = (*result.fatal_issues, *result.row_issues)
+    assert all(issue.source in {"base", "marketing"} for issue in issues)
+    assert all(
+        english not in issue.message
+        for issue in issues
+            for english in (
+                "base workbook",
+                "marketing workbook",
+                "base row",
+                "marketing row",
+                "material code",
+                "history column",
+                "must have",
+        )
+    )
+    assert any("基础表第2行重复物料编码9101" in issue.message for issue in issues)
+    assert any("营销商品信息查询表至少需要9列" in issue.message for issue in issues)

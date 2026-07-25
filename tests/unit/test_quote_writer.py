@@ -129,6 +129,34 @@ def test_writer_keeps_rows_order_formulas_decisions_and_manual_blanks(
         workbook.close()
 
 
+def test_writer_uses_normalized_material_code_as_text_instead_of_raw_cell_c(
+    tmp_path: Path,
+) -> None:
+    row = QuoteRow(
+        source_row_number=2,
+        material_code="　0000 9101　",
+        cells={"B": "小米", "C": "　0000 9101　"},
+    )
+
+    output = write_quote_workbook(
+        QuoteWriteRequest(
+            quote_month=QuoteMonth(2026, 8),
+            rows=[row],
+            template_path=TEMPLATE_PATH,
+            output_dir=tmp_path,
+        )
+    )
+
+    workbook = load_workbook(output)
+    try:
+        cell = workbook["5G手机"]["C2"]
+        assert cell.value == "00009101"
+        assert cell.number_format == "@"
+        assert cell.data_type == "s"
+    finally:
+        workbook.close()
+
+
 def test_writer_replicates_complete_a_to_ap_format_and_page_properties(
     tmp_path: Path,
 ) -> None:

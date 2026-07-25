@@ -34,4 +34,8 @@ def normalize_code(value: Any) -> str:
 
 def normalize_brand(value: Any) -> str:
     text = normalize_text(value).upper()
-    return BRAND_ALIASES.get(text, normalize_text(value))
+    compact = re.sub(r"\s+", "", text)
+    return BRAND_ALIASES.get(
+        text,
+        BRAND_ALIASES.get(compact, normalize_text(value)),
+    )

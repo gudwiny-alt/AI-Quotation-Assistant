@@ -196,8 +196,12 @@ def test_blank_base_rows_are_excluded_and_duplicate_nonblank_rows_are_preserved(
     try:
         assert [quote["5G手机"][f"C{row}"].value for row in (2, 3)] == [
             "9101",
-            " 9101 ",
+            "9101",
         ]
+        assert all(
+            quote["5G手机"][f"C{row}"].number_format == "@"
+            for row in (2, 3)
+        )
     finally:
         quote.close()
 

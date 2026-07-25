@@ -9,8 +9,8 @@
 Programmatic comparison with openpyxl found no differences for:
 
 - row 1 and row 2 font, fill, border, alignment, protection, and number
-  format across A:AN (80 cells);
-- A:AN column dimensions and row 1/row 2 dimensions;
+  format across A:AP (84 cells);
+- A:AP column dimensions and row 1/row 2 dimensions;
 - merged cells, freeze panes, sheet view, gridline setting, sheet format,
   sheet properties, margins, page setup, print options, print titles, and
   print area.
@@ -33,7 +33,7 @@ Status: **Passed**
 Side-by-side inspection confirmed:
 
 - The left and middle header sections render consistently in the source and
-  template, including colors, wrapping, filter arrows, and A:AN column
+  template, including colors, wrapping, filter arrows, and A:AP column
   positions and widths.
 - The template contains only the row-1 header and empty row-2 style skeleton.
   The instruction row and later sample data are absent, and `5G手机` is the

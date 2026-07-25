@@ -54,6 +54,7 @@ def precheck_inputs(paths: InputPaths, quote_month: QuoteMonth) -> PrecheckResul
                     code="UNREADABLE_WORKBOOK",
                     message=f"{SOURCE_LABELS[source]}文件无法读取：{path.name}",
                     fatal=True,
+                    source=source,
                 )
             )
             continue
@@ -64,11 +65,12 @@ def precheck_inputs(paths: InputPaths, quote_month: QuoteMonth) -> PrecheckResul
                 Issue(
                     code="INVALID_SOURCE_TABLE",
                     message=(
-                        f"{source} workbook must have at least {MINIMUM_COLUMNS[source]} "
-                        f"columns and {expected_header!r} in column "
-                        f"{expected_index + 1}: {path.name}"
+                        f"{SOURCE_LABELS[source]}至少需要{MINIMUM_COLUMNS[source]}列，"
+                        f"且第{expected_index + 1}列标题必须为"
+                        f"“{expected_header}”：{path.name}"
                     ),
                     fatal=True,
+                    source=source,
                 )
             )
             continue
@@ -80,8 +82,9 @@ def precheck_inputs(paths: InputPaths, quote_month: QuoteMonth) -> PrecheckResul
                     fatal_issues.append(
                         Issue(
                             code="MISSING_HISTORY_MONTH",
-                            message=f"base workbook is missing history column {expected!r}: {path.name}",
+                            message=f"基础表缺少历史报价列“{expected}”：{path.name}",
                             fatal=True,
+                            source=source,
                         )
                     )
 
@@ -123,9 +126,10 @@ def _code_row_issues(source: str, table: SheetTable) -> list[Issue]:
             issues.append(
                 Issue(
                     code="BLANK_MATERIAL_CODE",
-                    message=f"{source} row {row_number} has a blank material code",
+                    message=f"{SOURCE_LABELS[source]}第{row_number}行物料编码为空",
                     fatal=False,
                     row_number=row_number,
+                    source=source,
                 )
             )
             continue
@@ -137,9 +141,10 @@ def _code_row_issues(source: str, table: SheetTable) -> list[Issue]:
         issues.extend(
             Issue(
                 code="DUPLICATE_MATERIAL_CODE",
-                message=f"{source} row {row_number} repeats material code {code}",
+                message=f"{SOURCE_LABELS[source]}第{row_number}行重复物料编码{code}",
                 fatal=False,
                 row_number=row_number,
+                source=source,
             )
             for row_number in row_numbers
         )

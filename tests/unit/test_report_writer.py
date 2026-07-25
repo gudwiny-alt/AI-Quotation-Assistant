@@ -229,6 +229,44 @@ def test_report_manager_uses_ag_and_never_treats_ab_special_note_as_manager(
         workbook.close()
 
 
+def test_missing_web_fields_are_source_data_partial_not_unsupported_brand(
+    tmp_path: Path,
+) -> None:
+    row = QuoteRow(
+        7,
+        "9107",
+        {"C": "9107", "E": "待补资料机型", "AG": "产品经理庚"},
+        [
+            Issue(
+                "WEB_FIELDS_MISSING",
+                "基础表第7行缺少网站查询字段：brand, color",
+                False,
+                7,
+            )
+        ],
+    )
+
+    output = write_execution_report(
+        ReportWriteRequest(QuoteMonth(2026, 8), [row], tmp_path)
+    )
+
+    workbook = load_workbook(output)
+    try:
+        detail = workbook["处理明细"]
+        overview = [
+            [cell.value for cell in overview_row]
+            for overview_row in workbook["运行总览"].iter_rows()
+        ]
+        assert detail["L2"].value == "部分完成"
+        assert detail["M2"].value == "营销商品信息完整性"
+        assert "补齐营销商品信息" in str(detail["O2"].value)
+        assert _find_row(overview, "不支持品牌")[1] == 0
+        assert _find_row(overview, "部分完成")[1] == 1
+        assert _find_row(overview, "待人工补充")[1] == 1
+    finally:
+        workbook.close()
+
+
 def test_report_naming_is_collision_safe_and_existing_file_is_unchanged(
     tmp_path: Path,
 ) -> None:

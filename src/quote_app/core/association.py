@@ -9,7 +9,7 @@ from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 from quote_app.core.months import required_price_months
 from quote_app.core.normalization import normalize_brand, normalize_code, normalize_text
 from quote_app.core.precheck import month_header
-from quote_app.domain.models import Issue, QuoteMonth, QuoteRow
+from quote_app.domain.models import Issue, QuoteMonth, QuoteRow, WebQuery
 from quote_app.excel.source_reader import SheetTable
 
 FIXED_COLUMN_MAP = {
@@ -109,6 +109,7 @@ def associate_records(
             else:
                 _copy_fixed_cells(row.cells, "marketing", selected_marketing)
                 row.cells["B"] = normalize_brand(row.cells["B"])
+                row.web_query = _build_web_query(selected_marketing)
                 missing_web_fields = [
                     name
                     for name, (_, source_column) in WEB_QUERY_MAP.items()
@@ -202,3 +203,19 @@ def _row_issue(code: str, message: str, row_number: int) -> Issue:
         fatal=False,
         row_number=row_number,
     )
+
+
+def _build_web_query(record: Mapping[str, Any]) -> WebQuery:
+    brand_value = normalize_text(record.get(WEB_QUERY_MAP["brand"][1]))
+    return WebQuery(
+        brand=normalize_brand(brand_value) if brand_value else None,
+        model_name=_optional_text(record.get(WEB_QUERY_MAP["model_name"][1])),
+        ram=_optional_text(record.get(WEB_QUERY_MAP["ram"][1])),
+        storage=_optional_text(record.get(WEB_QUERY_MAP["storage"][1])),
+        color=_optional_text(record.get(WEB_QUERY_MAP["color"][1])),
+    )
+
+
+def _optional_text(value: Any) -> str | None:
+    normalized = normalize_text(value)
+    return normalized or None
