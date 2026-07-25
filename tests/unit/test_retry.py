@@ -15,6 +15,7 @@ from quote_app.tasks.retry import (
     LoginRequired,
     NonRetryableTechnicalError,
     RetryPolicy,
+    RETRYABLE_ERROR_CODES,
     RetryableTechnicalError,
     SchedulerControl,
     SecurityVerificationRequired,
@@ -97,6 +98,20 @@ def test_retry_delay_must_be_finite(delay: float) -> None:
 def test_sensitive_or_malformed_technical_code_is_rejected() -> None:
     with pytest.raises(ValueError, match="code"):
         RetryableTechnicalError("token=secret", "网络连接失败")
+
+
+def test_only_transient_capture_codes_are_in_persisted_retry_allowlist() -> None:
+    assert {
+        "CAPTURE_BLANK",
+        "CAPTURE_UNREADABLE",
+        "CAPTURE_OBSCURED",
+        "CAPTURE_UNSTABLE",
+        "CAPTURE_GEOMETRY",
+    } <= RETRYABLE_ERROR_CODES
+    assert {
+        "CAPTURE_PERMISSION",
+        "CAPTURE_ENVIRONMENT",
+    }.isdisjoint(RETRYABLE_ERROR_CODES)
 
 
 @pytest.mark.parametrize("control_action", ["pause", "stop"])

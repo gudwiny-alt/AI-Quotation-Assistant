@@ -74,8 +74,20 @@ _RETRYABLE_CLASSIFICATIONS: tuple[
     (CaptureError, "CAPTURE_FAILED", "屏幕证据截图失败"),
 )
 
-RETRYABLE_ERROR_CODES = frozenset(
-    code for _error_type, code, _message in _RETRYABLE_CLASSIFICATIONS
+_RETRYABLE_CAPTURE_CODES = frozenset(
+    {
+        "CAPTURE_BLANK",
+        "CAPTURE_UNREADABLE",
+        "CAPTURE_OBSCURED",
+        "CAPTURE_UNSTABLE",
+        "CAPTURE_GEOMETRY",
+    }
+)
+RETRYABLE_ERROR_CODES = (
+    frozenset(
+        code for _error_type, code, _message in _RETRYABLE_CLASSIFICATIONS
+    )
+    | _RETRYABLE_CAPTURE_CODES
 )
 _STABLE_ERROR_MESSAGES = {
     code: message for _error_type, code, message in _RETRYABLE_CLASSIFICATIONS

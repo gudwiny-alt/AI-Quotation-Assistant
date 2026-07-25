@@ -126,7 +126,11 @@ def _success(tmp_path: Path, task: WebsiteTask) -> WebsiteResult:
     )
 
 
-def _technical_failure(task_id: str) -> WebsiteResult:
+def _technical_failure(
+    task_id: str,
+    *,
+    error_code: str = "NETWORK_ERROR",
+) -> WebsiteResult:
     return WebsiteResult(
         task_id=task_id,
         state=TaskState.TECHNICAL_FAILURE,
@@ -135,8 +139,8 @@ def _technical_failure(task_id: str) -> WebsiteResult:
         url=None,
         evidence=None,
         diagnostic_path=None,
-        error_code="NETWORK_ERROR",
-        error_message="网站网络连接失败",
+        error_code=error_code,
+        error_message="网站技术处理失败",
     )
 
 
@@ -597,6 +601,37 @@ def test_reopen_after_one_technical_failure_has_only_two_attempts_remaining(
 
         assert calls == 2
         assert len(reopened.list_attempts(task.task_id)) == 3
+
+
+def test_reopen_retries_persisted_transient_capture_failure(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    task = _task("jd", channel=WebsiteChannel.JD, output_row=2)
+    with SQLiteTaskRepository(database) as first:
+        first.create_run(_run(tmp_path))
+        _seed(first, task)
+        token = first.start_attempt(task.task_id)
+        first.save_result(
+            _technical_failure(
+                task.task_id,
+                error_code="CAPTURE_BLANK",
+            ),
+            token=token,
+        )
+
+    calls = 0
+
+    def succeed(task, _token, _control):
+        nonlocal calls
+        calls += 1
+        return _success(tmp_path, task)
+
+    with SQLiteTaskRepository(database) as reopened:
+        BrowserTaskScheduler(reopened, "run-1", succeed).run_until_idle()
+
+        assert calls == 1
+        assert reopened.task_state(task.task_id) is TaskState.SUCCEEDED
 
 
 def test_recovered_process_interruption_does_not_consume_retry_budget(
