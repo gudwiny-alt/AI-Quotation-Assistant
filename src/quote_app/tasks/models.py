@@ -230,6 +230,38 @@ class WebsiteTask:
 
 
 @dataclass(frozen=True, slots=True)
+class WebsiteObservationCheckpoint:
+    task_id: str
+    outcome: BusinessOutcome
+    price: Decimal | None
+    url: str
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, str):
+            raise ValueError("task_id must be a string")
+        if not isinstance(self.outcome, BusinessOutcome):
+            raise ValueError("outcome must be a BusinessOutcome")
+        if self.price is not None and not isinstance(self.price, Decimal):
+            raise ValueError("price must be a Decimal")
+        if not isinstance(self.url, str):
+            raise ValueError("url must be a string")
+        if not isinstance(self.observed_at, datetime):
+            raise ValueError("observed_at must be a datetime")
+        if not self.task_id.strip():
+            raise ValueError("task_id must not be blank")
+        if not _is_http_url(self.url) or url_contains_credentials(self.url):
+            raise ValueError("observation requires a credential-free HTTP(S) URL")
+        if not _is_timezone_aware(self.observed_at):
+            raise ValueError("observed_at must be timezone-aware")
+        if self.outcome is BusinessOutcome.PRICE_FOUND:
+            if self.price is None or not self.price.is_finite() or self.price < 0:
+                raise ValueError("PRICE_FOUND requires a non-negative price")
+        elif self.price is not None:
+            raise ValueError("legal no requires price to be None")
+
+
+@dataclass(frozen=True, slots=True)
 class WebsiteResult:
     task_id: str
     state: TaskState

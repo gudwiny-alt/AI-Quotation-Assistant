@@ -15,12 +15,19 @@ from typing import BinaryIO, Protocol, TypeVar, cast
 from quote_app.tasks.models import (
     RunRecord,
     TaskState,
+    WebsiteObservationCheckpoint,
     WebsiteResult,
     WebsiteTask,
 )
 from quote_app.tasks.serialization import PayloadError, from_payload, to_payload
 
-_T = TypeVar("_T", RunRecord, WebsiteTask, WebsiteResult)
+_T = TypeVar(
+    "_T",
+    RunRecord,
+    WebsiteTask,
+    WebsiteObservationCheckpoint,
+    WebsiteResult,
+)
 
 _DB_SCHEMA_VERSION = 1
 _LOCK_SUFFIX = ".quotation.lock"
@@ -316,6 +323,53 @@ class SQLiteTaskRepository:
         if row is None:
             return None
         return _decode(cast(str, row["result_json"]), WebsiteResult)
+
+    def load_observation(
+        self,
+        task_id: str,
+    ) -> WebsiteObservationCheckpoint | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT o.payload_json
+                FROM website_observations AS o
+                JOIN website_tasks AS t
+                  ON t.task_id = o.task_id AND t.generation = o.generation
+                WHERE o.task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _decode(
+            cast(str, row["payload_json"]),
+            WebsiteObservationCheckpoint,
+        )
+
+    def save_observation(
+        self,
+        checkpoint: WebsiteObservationCheckpoint,
+        *,
+        token: AttemptToken,
+    ) -> None:
+        if not isinstance(token, AttemptToken) or token.task_id != checkpoint.task_id:
+            raise RepositoryError("尝试令牌与观察任务不匹配")
+        payload = _encode(checkpoint)
+        updated_at = _utc_now().isoformat()
+        with self._transaction() as connection:
+            self._require_current_attempt(connection, token, action="保存观察")
+            connection.execute(
+                """
+                INSERT INTO website_observations(
+                    task_id, generation, payload_json, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    generation = excluded.generation,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (checkpoint.task_id, token.generation, payload, updated_at),
+            )
 
     def save_result(
         self,
@@ -817,6 +871,8 @@ class SQLiteTaskRepository:
         if state is not TaskState.RUNNING:
             if action == "等待登录":
                 raise RepositoryError("只有正在执行的任务才能等待登录")
+            if action == "保存观察":
+                raise RepositoryError("只有正在执行的任务才能保存观察")
             raise RepositoryError("只有正在执行的任务才能保存结果")
         if (
             cast(int, row["generation"]) != token.generation
@@ -900,6 +956,7 @@ class SQLiteTaskRepository:
                     f"数据库版本 {version} 需要显式迁移，不能自动打开"
                 )
             if version == _DB_SCHEMA_VERSION:
+                connection.execute(_OBSERVATION_SCHEMA_STATEMENT)
                 self._verify_schema(connection)
                 return
             existing_tables = {
@@ -1074,6 +1131,15 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS website_observations (
+        task_id TEXT PRIMARY KEY,
+        generation INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(task_id) REFERENCES website_tasks(task_id)
+    )
+    """,
+    """
     CREATE TABLE website_result_history (
         history_id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL,
@@ -1124,6 +1190,12 @@ _EXPECTED_COLUMNS = {
         "result_json": ("TEXT", 1, 0),
         "updated_at": ("TEXT", 1, 0),
     },
+    "website_observations": {
+        "task_id": ("TEXT", 0, 1),
+        "generation": ("INTEGER", 1, 0),
+        "payload_json": ("TEXT", 1, 0),
+        "updated_at": ("TEXT", 1, 0),
+    },
     "website_result_history": {
         "history_id": ("INTEGER", 0, 1),
         "task_id": ("TEXT", 1, 0),
@@ -1139,8 +1211,11 @@ _EXPECTED_FOREIGN_KEYS = {
     "website_tasks": {("quotation_runs", "run_id", "run_id")},
     "website_attempts": {("website_tasks", "task_id", "task_id")},
     "website_results": {("website_tasks", "task_id", "task_id")},
+    "website_observations": {("website_tasks", "task_id", "task_id")},
     "website_result_history": {("website_tasks", "task_id", "task_id")},
 }
+
+_OBSERVATION_SCHEMA_STATEMENT = _SCHEMA_STATEMENTS[4]
 
 
 def _open_connection(database_path: Path) -> sqlite3.Connection:

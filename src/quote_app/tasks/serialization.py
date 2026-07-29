@@ -21,6 +21,7 @@ from quote_app.tasks.models import (
     RunState,
     TaskState,
     WebsiteChannel,
+    WebsiteObservationCheckpoint,
     WebsiteResult,
     WebsiteTask,
     url_contains_credentials,
@@ -70,6 +71,8 @@ def to_payload(value: object) -> Payload:
         data = _run_to_data(value)
     elif isinstance(value, WebsiteTask):
         data = _task_to_data(value)
+    elif isinstance(value, WebsiteObservationCheckpoint):
+        data = _observation_to_data(value)
     elif isinstance(value, WebsiteResult):
         data = _result_to_data(value)
     elif isinstance(value, EvidenceRecord):
@@ -106,6 +109,7 @@ def from_payload(payload: object) -> object:
         "InputFingerprint": _fingerprint_from_data,
         "RunRecord": _run_from_data,
         "WebsiteTask": _task_from_data,
+        "WebsiteObservationCheckpoint": _observation_from_data,
         "WebsiteResult": _result_from_data,
         "EvidenceRecord": _evidence_from_data,
     }
@@ -267,6 +271,28 @@ def _task_from_data(data: dict[str, Any]) -> WebsiteTask:
         storage=_string(data["storage"]),
         color=_string(data["color"]),
         channel=WebsiteChannel(_string(data["channel"])),
+    )
+
+
+def _observation_to_data(value: WebsiteObservationCheckpoint) -> dict[str, JsonValue]:
+    return {
+        "task_id": value.task_id,
+        "outcome": value.outcome.value,
+        "price": str(value.price) if value.price is not None else None,
+        "url": value.url,
+        "observed_at": value.observed_at.isoformat(),
+    }
+
+
+def _observation_from_data(data: dict[str, Any]) -> WebsiteObservationCheckpoint:
+    _require_keys(data, {"task_id", "outcome", "price", "url", "observed_at"})
+    raw_price = data["price"]
+    return WebsiteObservationCheckpoint(
+        task_id=_string(data["task_id"]),
+        outcome=BusinessOutcome(_string(data["outcome"])),
+        price=Decimal(_string(raw_price)) if raw_price is not None else None,
+        url=_string(data["url"]),
+        observed_at=_datetime(data["observed_at"]),
     )
 
 

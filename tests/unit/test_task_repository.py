@@ -20,6 +20,7 @@ from quote_app.tasks.models import (
     RunState,
     TaskState,
     WebsiteChannel,
+    WebsiteObservationCheckpoint,
     WebsiteResult,
     WebsiteTask,
 )
@@ -124,6 +125,16 @@ def _failure_result(
         diagnostic_path=tmp_path / f"{task_id}-diagnostic.png",
         error_code="LAYOUT_CHANGED",
         error_message="页面结构发生变化",
+    )
+
+
+def _observation(task_id: str = "task-1") -> WebsiteObservationCheckpoint:
+    return WebsiteObservationCheckpoint(
+        task_id=task_id,
+        outcome=BusinessOutcome.PRICE_FOUND,
+        price=Decimal("3999.00"),
+        url="https://example.test/product",
+        observed_at=NOW,
     )
 
 
@@ -327,6 +338,33 @@ def test_upsert_and_resume_never_reset_succeeded_task(
 
     assert repository.task_state(task.task_id) is TaskState.SUCCEEDED
     assert repository.load_result(task.task_id) == result
+
+
+def test_observation_survives_a_later_capture_failure(
+    repository: SQLiteTaskRepository,
+    tmp_path: Path,
+) -> None:
+    _seed_task(repository, tmp_path)
+    token = repository.start_attempt("task-1")
+    checkpoint = _observation()
+    repository.save_observation(checkpoint, token=token)
+    repository.save_result(_failure_result(tmp_path), token=token)
+
+    assert repository.load_observation("task-1") == checkpoint
+
+
+def test_new_task_generation_hides_previous_observation(
+    repository: SQLiteTaskRepository,
+    tmp_path: Path,
+) -> None:
+    original = _seed_task(repository, tmp_path)
+    token = repository.start_attempt("task-1")
+    repository.save_observation(_observation(), token=token)
+    repository.save_result(_failure_result(tmp_path), token=token)
+
+    repository.upsert_task(replace(original, color="白色"), generation=1)
+
+    assert repository.load_observation("task-1") is None
 
 
 def test_pending_failed_waiting_and_success_selections_are_disjoint(

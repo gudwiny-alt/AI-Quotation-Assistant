@@ -17,6 +17,7 @@ from quote_app.tasks.models import (
     RunState,
     TaskState,
     WebsiteChannel,
+    WebsiteObservationCheckpoint,
     WebsiteResult,
     WebsiteTask,
 )
@@ -62,6 +63,90 @@ def test_versioned_payload_round_trips_paths_decimal_and_enums(sample_result) ->
     assert payload["schema_version"] == SCHEMA_VERSION
     assert payload["data"]["price"] == "4499.50"
     assert payload["data"]["state"] == "succeeded"
+
+
+def test_observation_checkpoint_round_trips_without_formal_evidence() -> None:
+    observed_at = datetime(2026, 7, 30, 0, 15, tzinfo=timezone.utc)
+    checkpoint = WebsiteObservationCheckpoint(
+        task_id="task-honor-official",
+        outcome=BusinessOutcome.PRICE_FOUND,
+        price=Decimal("4999"),
+        url="https://www.honor.com/cn/shop/product/10086252969809.html",
+        observed_at=observed_at,
+    )
+
+    assert from_payload(to_payload(checkpoint)) == checkpoint
+
+
+@pytest.mark.parametrize(
+    "price",
+    [None, Decimal("NaN"), Decimal("Infinity"), Decimal("-0.01")],
+)
+def test_observation_checkpoint_price_found_requires_a_finite_non_negative_price(
+    price: Decimal | None,
+) -> None:
+    with pytest.raises(ValueError, match="PRICE_FOUND requires a non-negative price"):
+        WebsiteObservationCheckpoint(
+            task_id="task-honor-official",
+            outcome=BusinessOutcome.PRICE_FOUND,
+            price=price,
+            url="https://www.honor.com/cn/shop/product/10086252969809.html",
+            observed_at=datetime(2026, 7, 30, 0, 15, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        BusinessOutcome.NO_MODEL,
+        BusinessOutcome.CAPACITY_UNAVAILABLE,
+        BusinessOutcome.COLOR_UNAVAILABLE,
+        BusinessOutcome.SOLD_OUT,
+    ],
+)
+def test_observation_checkpoint_legal_no_forbids_a_price(
+    outcome: BusinessOutcome,
+) -> None:
+    with pytest.raises(ValueError, match="legal no requires price to be None"):
+        WebsiteObservationCheckpoint(
+            task_id="task-honor-official",
+            outcome=outcome,
+            price=Decimal("4999"),
+            url="https://www.honor.com/cn/shop/product/10086252969809.html",
+            observed_at=datetime(2026, 7, 30, 0, 15, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://www.honor.com/product",
+        "https://user:password@www.honor.com/product",
+        "https://www.honor.com/product?access_token=secret",
+    ],
+)
+def test_observation_checkpoint_url_must_be_credential_free_http(
+    url: str,
+) -> None:
+    with pytest.raises(ValueError):
+        WebsiteObservationCheckpoint(
+            task_id="task-honor-official",
+            outcome=BusinessOutcome.NO_MODEL,
+            price=None,
+            url=url,
+            observed_at=datetime(2026, 7, 30, 0, 15, tzinfo=timezone.utc),
+        )
+
+
+def test_observation_checkpoint_timestamp_must_be_timezone_aware() -> None:
+    with pytest.raises(ValueError, match="observed_at must be timezone-aware"):
+        WebsiteObservationCheckpoint(
+            task_id="task-honor-official",
+            outcome=BusinessOutcome.NO_MODEL,
+            price=None,
+            url="https://www.honor.com/product",
+            observed_at=datetime(2026, 7, 30, 0, 15),
+        )
 
 
 def test_all_contract_types_round_trip(tmp_path: Path) -> None:
