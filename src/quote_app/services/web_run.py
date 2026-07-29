@@ -318,13 +318,18 @@ def _event_sink_for_request(
 ) -> EventSink | None:
     if request.event_sink is None and request.checkpoint_sink is None:
         return None
+    snapshot_index = (
+        _WebsiteRunSnapshotIndex(request.tasks, repository)
+        if request.checkpoint_sink is not None
+        else None
+    )
 
     def sink(event: WorkerEvent) -> None:
         if request.checkpoint_sink is not None and _is_checkpoint_event(event):
             try:
-                request.checkpoint_sink(
-                    _load_snapshot(request.tasks, repository)
-                )
+                if snapshot_index is None:
+                    raise AssertionError("checkpoint snapshot index is unavailable")
+                request.checkpoint_sink(snapshot_index.update(event.task_id))
             finally:
                 if request.event_sink is not None:
                     request.event_sink(event)
@@ -335,6 +340,58 @@ def _event_sink_for_request(
     return sink
 
 
+class _WebsiteRunSnapshotIndex:
+    """Read the workload once, then refresh only the task named by an event."""
+
+    def __init__(
+        self,
+        tasks: tuple[WebsiteTask, ...],
+        repository: SQLiteTaskRepository,
+    ) -> None:
+        self._tasks = tuple(tasks)
+        self._repository = repository
+        self._task_ids = frozenset(task.task_id for task in self._tasks)
+        self._observations: dict[str, WebsiteObservationCheckpoint] = {}
+        self._results: dict[str, WebsiteResult] = {}
+        self._waiting: set[str] = set()
+        for task in self._tasks:
+            self._refresh(task.task_id)
+
+    def update(self, task_id: str) -> WebsiteRunSnapshot:
+        if task_id not in self._task_ids:
+            raise ValueError("checkpoint event does not belong to the requested run")
+        self._refresh(task_id)
+        return WebsiteRunSnapshot(
+            observations=tuple(
+                self._observations[task.task_id]
+                for task in self._tasks
+                if task.task_id in self._observations
+            ),
+            results=tuple(
+                self._results[task.task_id]
+                for task in self._tasks
+                if task.task_id in self._results
+            ),
+            waiting_task_ids=frozenset(self._waiting),
+        )
+
+    def _refresh(self, task_id: str) -> None:
+        observation = self._repository.load_observation(task_id)
+        if observation is None:
+            self._observations.pop(task_id, None)
+        else:
+            self._observations[task_id] = observation
+        result = self._repository.load_result(task_id)
+        if result is None:
+            self._results.pop(task_id, None)
+        else:
+            self._results[task_id] = result
+        if self._repository.task_state(task_id) is TaskState.WAITING_FOR_LOGIN:
+            self._waiting.add(task_id)
+        else:
+            self._waiting.discard(task_id)
+
+
 def _is_checkpoint_event(event: WorkerEvent) -> bool:
     if event.event in {"observation", "result", "waiting_for_login"}:
         return True
@@ -343,34 +400,6 @@ def _is_checkpoint_event(event: WorkerEvent) -> bool:
     retryable = event.data.get("retryable")
     retry_remaining = event.data.get("retry_remaining")
     return retryable is False or retry_remaining == 0
-
-
-def _load_snapshot(
-    tasks: tuple[WebsiteTask, ...],
-    repository: SQLiteTaskRepository,
-) -> WebsiteRunSnapshot:
-    observations = tuple(
-        checkpoint
-        for task in tasks
-        if (
-            checkpoint := repository.load_observation(task.task_id)
-        ) is not None
-    )
-    results = tuple(
-        result
-        for task in tasks
-        if (result := repository.load_result(task.task_id)) is not None
-    )
-    waiting_task_ids = frozenset(
-        task.task_id
-        for task in tasks
-        if repository.task_state(task.task_id) is TaskState.WAITING_FOR_LOGIN
-    )
-    return WebsiteRunSnapshot(
-        observations=observations,
-        results=results,
-        waiting_task_ids=waiting_task_ids,
-    )
 
 
 def _validated_evidence_path(

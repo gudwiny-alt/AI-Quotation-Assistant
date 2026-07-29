@@ -1,0 +1,23 @@
+[
+  {"brand":"小米","channel":"jd","entry_url":"https://mall.jd.com/index-1000004123.html?from=pc","store_name":"小米京东自营旗舰店","price_policy":"highest"},
+  {"brand":"HONOR","channel":"jd","entry_url":"https://mall.jd.com/index-1000000904.html","store_name":"荣耀京东自营旗舰店","price_policy":"highest"},
+  {"brand":"华为","channel":"jd","entry_url":"https://mall.jd.com/index-1000004259.html?from=pc","store_name":"华为京东自营官方旗舰店","price_policy":"highest"},
+  {"brand":"维沃","channel":"jd","entry_url":"https://mall.jd.com/index-1000085868.html?from=pc","store_name":"vivo京东自营官方旗舰店","price_policy":"highest"},
+  {"brand":"欧珀","channel":"jd","entry_url":"https://mall.jd.com/index-1000004065.html?from=pc","store_name":"OPPO京东自营官方旗舰店","price_policy":"highest"},
+  {"brand":"苹果","channel":"jd","entry_url":"https://mall.jd.com/index-1000000127.html?from=pc","store_name":"Apple产品京东自营旗舰店","price_policy":"highest"},
+  {"brand":"ZTE中兴","channel":"jd","entry_url":"https://mall.jd.com/index-1000001971.html?from=pc","store_name":"中兴京东自营官方旗舰店","price_policy":"highest"},
+  {"brand":"小米","channel":"tmall","entry_url":"https://xiaomi.tmall.com/","store_name":"小米官方旗舰店","price_policy":"highest"},
+  {"brand":"HONOR","channel":"tmall","entry_url":"https://hihonor.tmall.com/","store_name":"荣耀官方旗舰店","price_policy":"highest"},
+  {"brand":"华为","channel":"tmall","entry_url":"https://huaweistore.tmall.com/","store_name":"华为官方旗舰店","price_policy":"highest"},
+  {"brand":"维沃","channel":"tmall","entry_url":"https://vivo.tmall.com/","store_name":"vivo官方旗舰店","price_policy":"highest"},
+  {"brand":"欧珀","channel":"tmall","entry_url":"https://oppo.tmall.com/","store_name":"OPPO官方旗舰店","price_policy":"highest"},
+  {"brand":"苹果","channel":"tmall","entry_url":"https://apple.tmall.com/","store_name":"Apple Store官方旗舰店","price_policy":"highest"},
+  {"brand":"ZTE中兴","channel":"tmall","entry_url":"https://zte.tmall.com/","store_name":"ZTE中兴官方旗舰店","price_policy":"highest"},
+  {"brand":"小米","channel":"official","entry_url":"https://www.mi.com/shop","store_name":"小米商城","price_policy":"red_selling"},
+  {"brand":"HONOR","channel":"official","entry_url":"https://www.honor.com/cn/shop/?cid=132355","store_name":"荣耀商城","price_policy":"lowest"},
+  {"brand":"华为","channel":"official","entry_url":"https://www.vmall.com/","store_name":"华为商城","price_policy":"lowest"},
+  {"brand":"维沃","channel":"official","entry_url":"https://shop.vivo.com.cn/","store_name":"vivo官方商城","price_policy":"lowest"},
+  {"brand":"欧珀","channel":"official","entry_url":"https://www.opposhop.cn/cn/web/","store_name":"OPPO商城","price_policy":"lowest"},
+  {"brand":"苹果","channel":"official","entry_url":"https://www.apple.com.cn/iphone/","store_name":"Apple iPhone","price_policy":"highest"},
+  {"brand":"ZTE中兴","channel":"official","entry_url":"https://www.ztemall.com/","store_name":"中兴商城","price_policy":"lowest"}
+]

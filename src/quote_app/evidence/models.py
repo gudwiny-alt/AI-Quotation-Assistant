@@ -18,6 +18,45 @@ class EvidenceState(StrEnum):
     SOLD_OUT = "sold_out"
 
 
+class MacCapturePolicy(StrEnum):
+    """Code-selected policy for macOS formal evidence capture."""
+
+    STRICT = "strict"
+    MAC_VISUAL_REVIEW_BETA = "mac_visual_review_beta"
+
+
+def accepts_capture_validation(
+    validation_code: str,
+    *,
+    policy: MacCapturePolicy,
+    platform_name: str,
+) -> bool:
+    """Accept only formal codes that are valid for the explicit policy."""
+    if validation_code == "CAPTURE_OK":
+        return True
+    return (
+        validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
+        and policy is MacCapturePolicy.MAC_VISUAL_REVIEW_BETA
+        and platform_name == "Darwin"
+    )
+
+
+def validate_mac_capture_policy(
+    policy: MacCapturePolicy,
+    *,
+    platform_name: str,
+) -> None:
+    if not isinstance(policy, MacCapturePolicy):
+        raise ValueError("policy must be a MacCapturePolicy")
+    if (
+        policy is MacCapturePolicy.MAC_VISUAL_REVIEW_BETA
+        and platform_name != "Darwin"
+    ):
+        raise ValueError(
+            "macOS visual-review beta policy is supported only on Darwin"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceRectangle:
     """One final annotation rectangle in captured-screen physical pixels."""

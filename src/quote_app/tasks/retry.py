@@ -46,8 +46,26 @@ class NonRetryableTechnicalError(TechnicalError):
     """A technical failure that should be persisted without another attempt."""
 
 
+_SAFE_LAYOUT_STAGES = frozenset(
+    {
+        "京东店铺页",
+        "京东搜索页",
+        "京东商品详情页",
+        "天猫店铺页",
+        "天猫搜索页",
+        "天猫商品详情页",
+    }
+)
+
+
 class LayoutRecognitionError(RuntimeError):
     """The expected product-page layout could not be recognized."""
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        if stage is not None and stage not in _SAFE_LAYOUT_STAGES:
+            raise ValueError("layout stage must be an approved safe label")
+        self.stage = stage
+        super().__init__(message)
 
 
 class CoordinateConversionError(RuntimeError):
@@ -128,6 +146,11 @@ def classify_attempt_error(error: BaseException) -> AttemptError:
         )
     if _looks_like_playwright_network_error(error):
         return RetryableTechnicalError("NETWORK_ERROR", "网站网络连接失败")
+    if isinstance(error, LayoutRecognitionError) and error.stage is not None:
+        return RetryableTechnicalError(
+            "LAYOUT_CHANGED",
+            f"网页结构无法识别（{error.stage}）",
+        )
     for error_type, code, message in _RETRYABLE_CLASSIFICATIONS:
         if isinstance(error, error_type):
             return RetryableTechnicalError(code, message)
@@ -135,7 +158,7 @@ def classify_attempt_error(error: BaseException) -> AttemptError:
         return RetryableTechnicalError("NETWORK_ERROR", "网站网络连接失败")
     return NonRetryableTechnicalError(
         "UNEXPECTED_BROWSER_ERROR",
-        "浏览器任务发生未识别的技术错误",
+        _unexpected_error_message(error),
     )
 
 
@@ -151,6 +174,15 @@ def credential_free_error_message(code: str, message: str) -> str:
 
 def contains_explicit_credentials(value: str) -> bool:
     return any(pattern.search(value) for pattern in _EXPLICIT_CREDENTIAL_PATTERNS)
+
+
+def _unexpected_error_message(error: BaseException) -> str:
+    """Keep a bounded diagnostic hint without ever publishing credentials."""
+    fallback = "浏览器任务发生未识别的技术错误"
+    detail = " ".join(str(error).split())
+    if not detail or contains_explicit_credentials(detail):
+        return fallback
+    return f"{fallback}（{type(error).__name__}：{detail[:240]}）"
 
 
 @dataclass(frozen=True, slots=True)

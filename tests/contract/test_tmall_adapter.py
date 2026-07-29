@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
@@ -14,7 +15,12 @@ from quote_app.sites.catalog import SUPPORTED_BRANDS, SiteSpec, load_site_catalo
 from quote_app.sites.protocol import SiteObservationAdapter
 from quote_app.sites.registry import AdapterRegistry, RegisteredSiteAdapter
 from quote_app.sites.tmall import TmallAdapter
-from quote_app.tasks.models import BusinessOutcome, WebsiteChannel, WebsiteTask
+from quote_app.tasks.models import (
+    BusinessOutcome,
+    WebsiteChannel,
+    WebsiteObservationCheckpoint,
+    WebsiteTask,
+)
 from quote_app.tasks.retry import (
     LayoutRecognitionError,
     LoginRequired,
@@ -307,6 +313,8 @@ class _FixturePage:
             self.activate("product")
             if self.detail_redirect_url is not None:
                 self._url = self.detail_redirect_url
+        elif urlsplit(url).hostname == "xiaomi.tmall.com" and urlsplit(url).query:
+            self.activate("results")
         else:
             self._active = "store"
 
@@ -1543,6 +1551,44 @@ def test_tmall_scrolls_options_before_clicking_and_positions_capacity_for_captur
     assert page.capture_view_positions == ["capacity"]
     assert page.window_scroll_offsets == [-120]
     assert 500 in page.wait_timeout_milliseconds
+
+
+def test_tmall_resume_goes_directly_to_saved_detail_without_store_search() -> None:
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    original = adapter.observe(task, cast(Any, _FixturePage()))
+    checkpoint = WebsiteObservationCheckpoint(
+        task_id=task.task_id,
+        outcome=original.outcome,
+        price=original.price,
+        url=original.url,
+        observed_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+    resumed_page = _FixturePage()
+
+    resumed = adapter.resume(task, cast(Any, resumed_page), checkpoint)
+
+    assert resumed == original
+    assert resumed_page.goto_calls == [checkpoint.url]
+
+
+def test_tmall_resume_revalidates_saved_no_model_without_search_submit() -> None:
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    original = adapter.observe(task, cast(Any, _FixturePage("no_model.html")))
+    checkpoint = WebsiteObservationCheckpoint(
+        task_id=task.task_id,
+        outcome=original.outcome,
+        price=original.price,
+        url=original.url,
+        observed_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+    resumed_page = _FixturePage("no_model.html")
+
+    resumed = adapter.resume(task, cast(Any, resumed_page), checkpoint)
+
+    assert resumed == original
+    assert resumed_page.goto_calls == [checkpoint.url]
 
 
 def test_async_selected_state_is_confirmed() -> None:

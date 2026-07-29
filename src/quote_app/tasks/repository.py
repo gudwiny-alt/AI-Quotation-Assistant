@@ -625,6 +625,89 @@ class SQLiteTaskRepository:
             )
         return tasks
 
+    def requeue_exact_waiting_task(
+        self,
+        run_id: str,
+        expected_task: WebsiteTask,
+        expected_site: str,
+        *,
+        expected_token: AttemptToken,
+        updated_at: datetime | None = None,
+    ) -> WebsiteTask:
+        if not isinstance(expected_task, WebsiteTask):
+            raise ValueError("expected_task must be a WebsiteTask")
+        if expected_task.run_id != run_id:
+            raise ValueError("expected_task must belong to run_id")
+        if (
+            not isinstance(expected_token, AttemptToken)
+            or expected_token.task_id != expected_task.task_id
+        ):
+            raise ValueError("expected_token must belong to expected_task")
+        if not isinstance(expected_site, str) or not expected_site.strip():
+            raise ValueError("expected_site must not be blank")
+        site = expected_site.strip()
+        expected_payload = _encode(expected_task)
+        timestamp = _timestamp(updated_at)
+        with self._transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id, payload_json, waiting_site, generation,
+                       attempt_count
+                FROM website_tasks
+                WHERE run_id = ? AND state = ?
+                ORDER BY rowid
+                """,
+                (run_id, TaskState.WAITING_FOR_LOGIN.value),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RepositoryError(
+                    "当前人工处理任务状态已变化，请重新开始报价"
+                )
+            row = rows[0]
+            persisted_site = row["waiting_site"]
+            persisted_task = _decode(
+                cast(str, row["payload_json"]),
+                WebsiteTask,
+            )
+            if (
+                cast(str, row["task_id"]) != expected_task.task_id
+                or persisted_task != expected_task
+                or not isinstance(persisted_site, str)
+                or not persisted_site.strip()
+                or persisted_site.strip() != site
+                or cast(int, row["generation"]) != expected_token.generation
+                or cast(int, row["attempt_count"])
+                != expected_token.attempt_number
+            ):
+                raise RepositoryError(
+                    "当前人工处理任务状态已变化，请重新开始报价"
+                )
+            cursor = connection.execute(
+                """
+                UPDATE website_tasks
+                SET state = ?, waiting_site = NULL, updated_at = ?
+                WHERE task_id = ? AND run_id = ? AND state = ?
+                  AND payload_json = ? AND waiting_site = ?
+                  AND generation = ? AND attempt_count = ?
+                """,
+                (
+                    TaskState.PENDING.value,
+                    timestamp,
+                    expected_task.task_id,
+                    run_id,
+                    TaskState.WAITING_FOR_LOGIN.value,
+                    expected_payload,
+                    site,
+                    expected_token.generation,
+                    expected_token.attempt_number,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RepositoryError(
+                    "当前人工处理任务状态已变化，请重新开始报价"
+                )
+        return persisted_task
+
     def recover_interrupted_tasks(
         self,
         *,
@@ -712,6 +795,30 @@ class SQLiteTaskRepository:
         with self._connection() as connection:
             row = self._task_row(connection, task_id)
             return _task_state(cast(str, row["state"]))
+
+    def waiting_site(self, task_id: str) -> str | None:
+        with self._connection() as connection:
+            row = self._task_row(connection, task_id)
+            if _task_state(cast(str, row["state"])) is not TaskState.WAITING_FOR_LOGIN:
+                return None
+            site = row["waiting_site"]
+        if not isinstance(site, str) or not site.strip():
+            raise RepositoryError("等待人工处理的任务缺少站点信息")
+        return site.strip()
+
+    def waiting_attempt_token(self, task_id: str) -> AttemptToken | None:
+        with self._connection() as connection:
+            row = self._task_row(connection, task_id)
+            if _task_state(cast(str, row["state"])) is not TaskState.WAITING_FOR_LOGIN:
+                return None
+            generation = cast(int, row["generation"])
+            attempt_number = cast(int, row["attempt_count"])
+        try:
+            return AttemptToken(task_id, generation, attempt_number)
+        except ValueError as exc:
+            raise RepositoryError(
+                "等待人工处理的任务缺少有效尝试令牌"
+            ) from exc
 
     def attempt_count(self, task_id: str) -> int:
         with self._connection() as connection:

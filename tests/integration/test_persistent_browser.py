@@ -178,7 +178,10 @@ def test_context_startup_failure_stops_playwright_and_releases_lock(
                 "executable_path": str((tmp_path / "chrome").resolve()),
                 "headless": False,
                 "viewport": None,
-                "args": ["--start-maximized"],
+                "args": [
+                    "--start-maximized",
+                    "--force-renderer-accessibility",
+                ],
             },
         )
     ]
@@ -193,6 +196,77 @@ def test_context_startup_failure_stops_playwright_and_releases_lock(
         pass
     session.close()
     session.close()
+
+
+def test_beta_launch_args_and_startup_preflight_run_before_page_use(
+    tmp_path: Path,
+) -> None:
+    context = _FakeContext()
+    initial_session, manager, fake_context = _fake_session(
+        tmp_path,
+        context=context,
+    )
+    received_contexts: list[_FakeContext] = []
+
+    session = PersistentBrowserSession(
+        tmp_path / "beta-profile",
+        browser_choice=_browser_choice(tmp_path),
+        playwright_factory=initial_session._playwright_factory,
+        launch_args=(
+            "--window-position=48,72",
+            "--window-size=1024,640",
+        ),
+        startup_preflight=received_contexts.append,
+    )
+
+    with session as started:
+        assert received_contexts == [fake_context]
+        assert started.page_for("official:HONOR") is fake_context.pages[0]
+
+    assert fake_context is context
+    assert manager.playwright.chromium.calls == [
+        (
+            str((tmp_path / "beta-profile").resolve()),
+            {
+                "executable_path": str((tmp_path / "chrome").resolve()),
+                "headless": False,
+                "viewport": None,
+                "args": [
+                    "--window-position=48,72",
+                    "--window-size=1024,640",
+                    "--force-renderer-accessibility",
+                ],
+            },
+        )
+    ]
+
+
+def test_startup_preflight_failure_closes_browser_resources(
+    tmp_path: Path,
+) -> None:
+    context = _FakeContext()
+    initial_session, manager, _ = _fake_session(
+        tmp_path,
+        context=context,
+    )
+
+    def fail_preflight(_context: _FakeContext) -> None:
+        raise RuntimeError("startup window is not unique")
+
+    session = PersistentBrowserSession(
+        tmp_path / "beta-profile",
+        browser_choice=_browser_choice(tmp_path),
+        playwright_factory=initial_session._playwright_factory,
+        startup_preflight=fail_preflight,
+    )
+
+    with pytest.raises(RuntimeError, match="startup window is not unique"):
+        session.start()
+
+    assert context.close_calls == 1
+    assert manager.playwright.stop_calls == 1
+    with BrowserProfileLock(tmp_path / "beta-profile"):
+        pass
 
 
 def test_nonempty_unmarked_profile_is_rejected_before_playwright_starts(
@@ -428,6 +502,24 @@ def test_page_for_reuses_family_isolates_families_and_replaces_closed_page(
         assert replacement is not jd
         assert replacement is not tmall
         assert context.new_page_calls == 2
+    finally:
+        session.close()
+
+
+def test_automation_page_is_reused_and_unassigned_popup_is_closed(
+    tmp_path: Path,
+) -> None:
+    session, _, context = _fake_session(tmp_path)
+    session.start()
+    try:
+        original = session.automation_page()
+        popup = context.new_page()
+
+        closed = session.close_unassigned_pages()
+
+        assert closed == 1
+        assert session.automation_page() is original
+        assert popup.is_closed()
     finally:
         session.close()
 

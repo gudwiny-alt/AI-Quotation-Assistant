@@ -508,6 +508,12 @@ def test_result_price_requires_decimal_and_enum_outcome(tmp_path: Path) -> None:
         "https://example.test/product?token=secret",
         "https://example.test/product?access_token=secret",
         "https://example.test/product?password=secret",
+        "https://example.test/product?client_secret=secret",
+        "https://example.test/product?api-key=secret",
+        "https://example.test/product?apikey=secret",
+        "https://example.test/product?SESSION_ID=secret",
+        "https://example.test/product?checkout_credential=secret",
+        "https://example.test/product?client%255Fsecret=secret",
         "https://example.test/access_token/secret/product",
         "https://example.test/product#access_token/secret",
     ],
@@ -526,6 +532,26 @@ def test_result_allows_ordinary_security_words_in_url(tmp_path: Path) -> None:
         ),
     )
     assert "access_token-case" in result.url
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "sku=token-case",
+        "color=secret-red",
+        "session_style=summer",
+        "secretary_model=pro",
+    ],
+)
+def test_result_allows_normal_product_parameter_names(
+    tmp_path: Path,
+    query: str,
+) -> None:
+    result = replace(
+        _result(tmp_path),
+        url=f"https://example.test/product?{query}",
+    )
+    assert result.url.endswith(query)
 
 
 @pytest.mark.parametrize(

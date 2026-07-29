@@ -3,20 +3,27 @@ from __future__ import annotations
 import threading
 import time
 import math
+import platform as host_platform
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 from quote_app.evidence.geometry import GeometryError
-from quote_app.evidence.models import EvidenceRecord
+from quote_app.evidence.models import (
+    EvidenceRecord,
+    MacCapturePolicy,
+    validate_mac_capture_policy,
+)
 from quote_app.evidence.platform import (
     BrowserWindowIdentity,
     CaptureEnvironmentUnavailable,
     CaptureGeometrySnapshot,
     CaptureRequest,
+    EvidenceCaptureError,
     EvidenceCapturePipeline,
     SystemUIProof,
+    revalidate_capture_error,
 )
 
 GeometrySnapshotProvider = Callable[
@@ -26,6 +33,7 @@ GeometrySnapshotProvider = Callable[
 ForegroundProvider = Callable[[], BrowserWindowIdentity]
 PrepareCallback = Callable[[BrowserWindowIdentity], None]
 SystemUIProvider = Callable[[CaptureGeometrySnapshot], SystemUIProof]
+PostCaptureValidator = Callable[[CaptureGeometrySnapshot], None]
 
 _MSS_DARWIN_OPTIONS_LOCK = threading.Lock()
 
@@ -41,17 +49,27 @@ class MacOSCaptureEnvironment:
         prepare_callback: PrepareCallback | None = None,
         permission_provider: Callable[[], bool] | None = None,
         system_ui_proof_provider: SystemUIProvider | None = None,
+        post_capture_validator: PostCaptureValidator | None = None,
+        validate_capture_scale_dpr: bool = True,
     ) -> None:
         self._geometry_snapshot_provider = geometry_snapshot_provider
         self._foreground_provider = foreground_provider
         self._prepare_callback = prepare_callback
         self._permission_provider = permission_provider
         self._system_ui_proof_provider = system_ui_proof_provider
+        self._post_capture_validator = post_capture_validator
+        self._validate_capture_scale_dpr = validate_capture_scale_dpr
 
     def screen_capture_permission(self) -> bool:
         if self._permission_provider is not None:
             try:
                 result = self._permission_provider()
+            except EvidenceCaptureError as error:
+                raise revalidate_capture_error(
+                    error,
+                    fallback_code="CAPTURE_ENVIRONMENT",
+                    safe_message="macOS screen permission provider failed",
+                ) from None
             except Exception:
                 raise CaptureEnvironmentUnavailable(
                     "macOS screen permission provider failed"
@@ -81,6 +99,12 @@ class MacOSCaptureEnvironment:
             )
         try:
             result = self._prepare_callback(expected)
+        except EvidenceCaptureError as error:
+            raise revalidate_capture_error(
+                error,
+                fallback_code="CAPTURE_ENVIRONMENT",
+                safe_message="browser preparation callback failed",
+            ) from None
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception:
@@ -102,6 +126,12 @@ class MacOSCaptureEnvironment:
             )
         try:
             snapshot = self._geometry_snapshot_provider(expected)
+        except EvidenceCaptureError as error:
+            raise revalidate_capture_error(
+                error,
+                fallback_code="CAPTURE_ENVIRONMENT",
+                safe_message="capture geometry snapshot provider failed",
+            ) from None
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception:
@@ -126,6 +156,12 @@ class MacOSCaptureEnvironment:
             )
         try:
             proof = self._system_ui_proof_provider(snapshot)
+        except EvidenceCaptureError as error:
+            raise revalidate_capture_error(
+                error,
+                fallback_code="CAPTURE_ENVIRONMENT",
+                safe_message="macOS system UI proof provider failed",
+            ) from None
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception:
@@ -145,6 +181,12 @@ class MacOSCaptureEnvironment:
             )
         try:
             foreground = self._foreground_provider()
+        except EvidenceCaptureError as error:
+            raise revalidate_capture_error(
+                error,
+                fallback_code="CAPTURE_ENVIRONMENT",
+                safe_message="macOS foreground provider failed",
+            ) from None
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception:
@@ -183,7 +225,33 @@ class MacOSCaptureEnvironment:
                 snapshot.viewport_geometry.scale_y,
             ),
             expected_device_pixel_ratio=snapshot.device_pixel_ratio,
+            validate_scale_dpr=self._validate_capture_scale_dpr,
         )
+        self._validate_post_capture(snapshot)
+
+    def _validate_post_capture(
+        self,
+        snapshot: CaptureGeometrySnapshot,
+    ) -> None:
+        validator = self._post_capture_validator
+        if validator is None:
+            return
+        try:
+            result = validator(snapshot)
+        except EvidenceCaptureError as error:
+            raise revalidate_capture_error(
+                error,
+                fallback_code="CAPTURE_ENVIRONMENT",
+                safe_message="macOS post-capture validation failed",
+            ) from None
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise RuntimeError("macOS post-capture validation failed") from None
+        if result is not None:
+            raise CaptureEnvironmentUnavailable(
+                "macOS post-capture validator returned invalid data"
+            )
 
 
 class MacOSEvidenceCapture:
@@ -193,12 +261,22 @@ class MacOSEvidenceCapture:
         *,
         sleeper: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None,
+        policy: MacCapturePolicy = MacCapturePolicy.STRICT,
     ) -> None:
+        validate_mac_capture_policy(
+            policy,
+            platform_name=host_platform.system(),
+        )
         self._pipeline = EvidenceCapturePipeline(
             environment or MacOSCaptureEnvironment(),
             sleeper=sleeper or time.sleep,
             now=now,
+            policy=policy,
         )
+
+    @property
+    def policy(self) -> MacCapturePolicy:
+        return self._pipeline.policy
 
     def capture(self, request: CaptureRequest) -> EvidenceRecord:
         return self._pipeline.capture(request)
@@ -237,6 +315,7 @@ def capture_macos_primary_display(
     expected_physical_size: tuple[int, int],
     expected_scale: tuple[float, float],
     expected_device_pixel_ratio: float,
+    validate_scale_dpr: bool = True,
     mss_factory: Callable[[], Any] | None = None,
     png_writer: Callable[..., Any] | None = None,
     darwin_module: Any | None = None,
@@ -311,32 +390,33 @@ def capture_macos_primary_display(
         expected_physical_size[0] / logical_width,
         expected_physical_size[1] / logical_height,
     )
-    for observed, expected in zip(
-        observed_scale,
-        expected_scale,
-        strict=True,
-    ):
-        if not math.isclose(
-            observed,
-            expected,
-            rel_tol=0.03,
-            abs_tol=0.03,
+    if validate_scale_dpr:
+        for observed, expected in zip(
+            observed_scale,
+            expected_scale,
+            strict=True,
+        ):
+            if not math.isclose(
+                observed,
+                expected,
+                rel_tol=0.03,
+                abs_tol=0.03,
+            ):
+                raise GeometryError(
+                    "mss logical-to-physical scale disagrees with geometry snapshot"
+                )
+        if any(
+            not math.isclose(
+                observed,
+                expected_device_pixel_ratio,
+                rel_tol=0.03,
+                abs_tol=0.03,
+            )
+            for observed in observed_scale
         ):
             raise GeometryError(
-                "mss logical-to-physical scale disagrees with geometry snapshot"
+                "mss logical-to-physical scale disagrees with JavaScript DPR"
             )
-    if any(
-        not math.isclose(
-            observed,
-            expected_device_pixel_ratio,
-            rel_tol=0.03,
-            abs_tol=0.03,
-        )
-        for observed in observed_scale
-    ):
-        raise GeometryError(
-            "mss logical-to-physical scale disagrees with JavaScript DPR"
-        )
     png_writer(
         screenshot.rgb,
         screenshot.size,
@@ -347,6 +427,7 @@ def capture_macos_primary_display(
 def _macos_main_display_physical_size() -> tuple[int, int]:
     try:
         import ctypes
+        import AppKit  # type: ignore[import-untyped]
 
         core_graphics = ctypes.CDLL(
             "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
@@ -362,7 +443,14 @@ def _macos_main_display_physical_size() -> tuple[int, int]:
             int(core_graphics.CGDisplayPixelsWide(display_id)),
             int(core_graphics.CGDisplayPixelsHigh(display_id)),
         )
-    except (AttributeError, OSError) as error:
+        screen = AppKit.NSScreen.mainScreen()
+        if screen is None:
+            raise AttributeError("macOS main screen is unavailable")
+        scale = float(screen.backingScaleFactor())
+        if not math.isfinite(scale) or scale <= 0:
+            raise AttributeError("macOS main screen backing scale is invalid")
+        size = (round(size[0] * scale), round(size[1] * scale))
+    except (AttributeError, OSError, TypeError, ValueError) as error:
         raise CaptureEnvironmentUnavailable(
             "cannot prove macOS main display physical size"
         ) from error

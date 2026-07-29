@@ -211,9 +211,9 @@ def test_eligible_row_builds_three_channels_from_web_query_only(
 
     assert result.issues == ()
     assert tuple(task.channel for task in result.tasks) == (
+        WebsiteChannel.OFFICIAL,
         WebsiteChannel.JD,
         WebsiteChannel.TMALL,
-        WebsiteChannel.OFFICIAL,
     )
     assert len(result.tasks) == 3
     for task in result.tasks:
@@ -254,6 +254,30 @@ def test_sparse_source_rows_still_receive_contiguous_output_rows(
         for task in result.tasks
         if task.channel is WebsiteChannel.JD
     ] == [(2, 2), (19, 3), (41, 4)]
+
+
+def test_multiple_rows_are_built_channel_major_in_input_order(
+    input_paths: dict[str, Path],
+) -> None:
+    rows = [
+        _eligible_row(source_row_number=2, material_code="000001"),
+        _eligible_row(source_row_number=19, material_code="000002"),
+    ]
+    run = _run(input_paths, rows)
+
+    result = build_website_tasks(run, rows)
+
+    assert [
+        (task.channel, task.output_row_number)
+        for task in result.tasks
+    ] == [
+        (WebsiteChannel.OFFICIAL, 2),
+        (WebsiteChannel.OFFICIAL, 3),
+        (WebsiteChannel.JD, 2),
+        (WebsiteChannel.JD, 3),
+        (WebsiteChannel.TMALL, 2),
+        (WebsiteChannel.TMALL, 3),
+    ]
 
 
 def test_duplicate_material_codes_remain_independent_and_task_ids_are_stable(

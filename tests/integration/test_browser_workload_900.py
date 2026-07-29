@@ -37,7 +37,11 @@ from quote_app.tasks.retry import (
     NonRetryableTechnicalError,
     RetryPolicy,
 )
-from quote_app.tasks.runner import FixtureObservation, WebsiteTaskRunner
+from quote_app.tasks.runner import (
+    FixtureObservation,
+    WebsiteTaskRunner,
+    task_sort_key,
+)
 
 NOW = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
 CHANNELS = (
@@ -223,6 +227,26 @@ def _observation(
     )
 
 
+class _ResumableWorkloadAdapter:
+    def __call__(
+        self,
+        task: WebsiteTask,
+        page: object,
+    ) -> FixtureObservation:
+        return _observation(task, page)
+
+    def resume(
+        self,
+        task: WebsiteTask,
+        page: object,
+        _checkpoint: object,
+    ) -> FixtureObservation:
+        return _observation(task, page)
+
+
+_WORKLOAD_ADAPTER = _ResumableWorkloadAdapter()
+
+
 def _runner(
     repository: SQLiteTaskRepository,
     data_dir: Path,
@@ -243,7 +267,7 @@ def _runner(
         repository=repository,
         run_id="workload-900",
         browser_session=session,
-        adapter=_observation,
+        adapter=_WORKLOAD_ADAPTER,
         evidence_capture=capture,
         evidence_dir=data_dir / "evidence",
         diagnostic_capture=diagnostic,
@@ -269,15 +293,7 @@ def test_900_task_workload_restart_audit_and_locality(
     ordered_tasks = tuple(
         sorted(
             tasks,
-            key=lambda task: (
-                task.brand,
-                task.model_name,
-                task.ram,
-                task.storage,
-                task.color,
-                task.channel.value,
-                task.output_row_number,
-            ),
+            key=task_sort_key,
         )
     )
     login_position = next(
@@ -285,10 +301,14 @@ def test_900_task_workload_restart_audit_and_locality(
         for index, task in enumerate(ordered_tasks)
         if task.task_id == LOGIN_TASK_ID
     )
-    blocked_tmall_ids = {
+    blocked_after_login_ids = {
         task.task_id
         for task in ordered_tasks[login_position + 1 :]
-        if task.channel is WebsiteChannel.TMALL
+    }
+    technical_failure_ids_before_login = {
+        task.task_id
+        for task in ordered_tasks[:login_position]
+        if task.task_id in TECHNICAL_FAILURE_IDS
     }
     assert len(tasks) == 900
     assert len({task.task_id for task in tasks}) == 900
@@ -378,24 +398,23 @@ def test_900_task_workload_restart_audit_and_locality(
         } == {LOGIN_TASK_ID}
         assert {
             task.task_id for task in repository.select_failed("workload-900")
-        } == TECHNICAL_FAILURE_IDS
+        } == technical_failure_ids_before_login
         assert {
             task.task_id for task in repository.select_pending("workload-900")
-        } == blocked_tmall_ids
+        } == blocked_after_login_ids
         assert all(
             repository.task_state(task.task_id) is TaskState.SUCCEEDED
             for task in tasks
             if task.task_id
             not in (
-                TECHNICAL_FAILURE_IDS
+                technical_failure_ids_before_login
                 | {LOGIN_TASK_ID}
-                | blocked_tmall_ids
+                | blocked_after_login_ids
             )
         )
         assert all(
-            repository.task_state(task.task_id) is not TaskState.PENDING
-            for task in tasks
-            if task.channel is not WebsiteChannel.TMALL
+            repository.task_state(task.task_id) is TaskState.PENDING
+            for task in ordered_tasks[login_position + 1 :]
         )
         assert repository.audit_evidence("workload-900") == ()
 
@@ -403,7 +422,7 @@ def test_900_task_workload_restart_audit_and_locality(
         for task in tasks:
             result = repository.load_result(task.task_id)
             if result is None:
-                assert task.task_id in blocked_tmall_ids | {LOGIN_TASK_ID}
+                assert task.task_id in blocked_after_login_ids | {LOGIN_TASK_ID}
                 continue
             if result.evidence is not None:
                 persisted_outcomes[result.outcome] += 1
@@ -420,13 +439,13 @@ def test_900_task_workload_restart_audit_and_locality(
             ]
             for task in tasks
             if task.task_id
-            not in TECHNICAL_FAILURE_IDS
+            not in technical_failure_ids_before_login
             | {LOGIN_TASK_ID}
-            | blocked_tmall_ids
+            | blocked_after_login_ids
         )
         assert persisted_outcomes == expected_outcomes
 
-        for task_id in TECHNICAL_FAILURE_IDS:
+        for task_id in technical_failure_ids_before_login:
             result = repository.load_result(task_id)
             assert result is not None
             assert result.state is TaskState.TECHNICAL_FAILURE
@@ -458,11 +477,7 @@ def test_900_task_workload_restart_audit_and_locality(
     assert database_size_bytes < 64 * 1024 * 1024
     _assert_under(database, data_dir)
     assert set(first_session.pages) | set(second_session.pages) == {
-        "jd",
-        "tmall",
-        "official:小米",
-        "official:华为",
-        "official:荣耀",
+        "quotation-automation"
     }
     waiting_events = [
         event for event in events if event.event == "waiting_for_login"
@@ -473,12 +488,15 @@ def test_900_task_workload_restart_audit_and_locality(
         "site": "tmall",
         "condition": "login_required",
     }
-    assert sum(event.event == "technical_failure" for event in events) == 3
+    assert (
+        sum(event.event == "technical_failure" for event in events)
+        == len(technical_failure_ids_before_login)
+    )
     successful_count = (
         900
-        - len(TECHNICAL_FAILURE_IDS)
+        - len(technical_failure_ids_before_login)
         - 1
-        - len(blocked_tmall_ids)
+        - len(blocked_after_login_ids)
     )
     assert sum(event.event == "result" for event in events) == successful_count
     assert first_capture.interrupted is True
@@ -495,8 +513,8 @@ def test_900_task_workload_restart_audit_and_locality(
         f"database_bytes={database_size_bytes} "
         f"capture_count={capture_count} "
         f"succeeded={successful_count} "
-        f"technical_failed={len(TECHNICAL_FAILURE_IDS)} "
-        f"waiting_login=1 pending_same_site={len(blocked_tmall_ids)} "
+        f"technical_failed={len(technical_failure_ids_before_login)} "
+        f"waiting_login=1 pending_after_login={len(blocked_after_login_ids)} "
         f"evidence_files={len(evidence_files)} "
         f"evidence_bytes={evidence_total_bytes} "
         f"python={platform.python_version()} "

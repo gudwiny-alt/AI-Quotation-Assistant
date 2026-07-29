@@ -27,7 +27,11 @@ from quote_app.evidence.platform import (
 )
 from quote_app.evidence.quality import SemanticHashProbe
 from quote_app.evidence.semantic_state import VerifiedSemanticState
-from quote_app.sites.protocol import AdapterObservation, SiteObservationAdapter
+from quote_app.sites.protocol import (
+    AdapterObservation,
+    ResumableSiteObservationAdapter,
+    SiteObservationAdapter,
+)
 from quote_app.sites.catalog import site_session_family
 from quote_app.sites.registry import AdapterRegistry
 from quote_app.tasks.models import (
@@ -45,6 +49,7 @@ from quote_app.tasks.repository import (
 )
 from quote_app.tasks.retry import (
     LoginRequired,
+    NonRetryableTechnicalError,
     RetryPolicy,
     SchedulerControl,
     TechnicalError,
@@ -332,19 +337,36 @@ class WebsiteTaskRunner:
                 self._close_unassigned_pages()
                 page = self._automation_page()
                 observation: FixtureObservation | AdapterObservation
+                saved_checkpoint = self.repository.load_observation(task.task_id)
                 if self.adapter_registry is None:
-                    observation = self._fixture_observation(task, page)
+                    if saved_checkpoint is not None:
+                        observation = self._resume_fixture_observation(
+                            task,
+                            page,
+                            saved_checkpoint,
+                        )
+                    else:
+                        observation = self._fixture_observation(task, page)
                 else:
-                    observation = self._site_observation(task, page)
-                checkpoint = WebsiteObservationCheckpoint(
-                    task_id=task.task_id,
-                    outcome=observation.outcome,
-                    price=observation.price,
-                    url=observation.url,
-                    observed_at=datetime.now(timezone.utc),
-                )
-                self.repository.save_observation(checkpoint, token=token)
-                self.scheduler.publish_observation(task, checkpoint)
+                    observation = (
+                        self._resume_site_observation(
+                            task,
+                            page,
+                            saved_checkpoint,
+                        )
+                        if saved_checkpoint is not None
+                        else self._site_observation(task, page)
+                    )
+                if saved_checkpoint is None:
+                    checkpoint = WebsiteObservationCheckpoint(
+                        task_id=task.task_id,
+                        outcome=observation.outcome,
+                        price=observation.price,
+                        url=observation.url,
+                        observed_at=datetime.now(timezone.utc),
+                    )
+                    self.repository.save_observation(checkpoint, token=token)
+                    self.scheduler.publish_observation(task, checkpoint)
                 evidence = self._capture_current_observation(
                     task,
                     page,
@@ -427,6 +449,76 @@ class WebsiteTaskRunner:
         observation = self.adapter(task, page)
         if not isinstance(observation, FixtureObservation):
             raise ValueError("adapter returned an invalid observation")
+        return observation
+
+    def _resume_fixture_observation(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        checkpoint: WebsiteObservationCheckpoint,
+    ) -> FixtureObservation:
+        resume = getattr(self.adapter, "resume", None)
+        if not callable(resume):
+            raise NonRetryableTechnicalError(
+                "RECOVERY_UNSUPPORTED",
+                "已保存价格，但当前适配器无法安全恢复截图；旧价格已保留",
+            )
+        observation = resume(task, page, checkpoint)
+        if not isinstance(observation, FixtureObservation):
+            raise NonRetryableTechnicalError(
+                "RECOVERY_INVALID",
+                "恢复页面未返回可验证的产品状态；旧价格已保留",
+            )
+        if (
+            observation.outcome is not checkpoint.outcome
+            or observation.price != checkpoint.price
+            or observation.url != checkpoint.url
+        ):
+            raise NonRetryableTechnicalError(
+                "RECOVERY_CHECKPOINT_MISMATCH",
+                "恢复页面与已保存价格或产品链接不一致；旧价格已保留",
+            )
+        return observation
+
+    def _resume_site_observation(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        checkpoint: WebsiteObservationCheckpoint,
+    ) -> AdapterObservation:
+        if self.adapter_registry is None:
+            raise AssertionError("registry observation dependencies are unavailable")
+        adapter = self.adapter_registry.adapter_for(task.brand, task.channel)
+        if not isinstance(adapter, ResumableSiteObservationAdapter):
+            raise NonRetryableTechnicalError(
+                "RECOVERY_UNSUPPORTED",
+                "已保存价格，但当前网站无法安全恢复截图；旧价格已保留",
+            )
+        try:
+            observation = adapter.resume(task, page, checkpoint)
+        except LoginRequired:
+            raise
+        except NonRetryableTechnicalError:
+            raise
+        except Exception as error:
+            raise NonRetryableTechnicalError(
+                "RECOVERY_REVALIDATION_FAILED",
+                "恢复页面未通过产品、配置、店铺和价格复核；旧价格已保留",
+            ) from error
+        if not isinstance(observation, AdapterObservation):
+            raise NonRetryableTechnicalError(
+                "RECOVERY_INVALID",
+                "恢复页面未返回可验证的产品状态；旧价格已保留",
+            )
+        if (
+            observation.outcome is not checkpoint.outcome
+            or observation.price != checkpoint.price
+            or observation.url != checkpoint.url
+        ):
+            raise NonRetryableTechnicalError(
+                "RECOVERY_CHECKPOINT_MISMATCH",
+                "恢复页面与已保存价格或产品链接不一致；旧价格已保留",
+            )
         return observation
 
     def _site_observation(

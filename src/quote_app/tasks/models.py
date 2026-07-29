@@ -14,6 +14,9 @@ from quote_app.evidence.models import EvidenceRecord, EvidenceState
 
 SCHEMA_VERSION = 1
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_KNOWN_FORMAL_VALIDATION_CODES = frozenset(
+    ("CAPTURE_OK", "CAPTURE_OK_MAC_VISUAL_REVIEW")
+)
 
 
 class WebsiteChannel(StrEnum):
@@ -338,8 +341,13 @@ class WebsiteResult:
             raise ValueError("business success requires an outcome")
         if not _is_http_url(self.url):
             raise ValueError("business success requires a URL")
-        if self.evidence is None or not self.evidence.is_validated:
-            raise ValueError("business success requires validated evidence")
+        if (
+            self.evidence is None
+            or self.evidence.validation_code not in _KNOWN_FORMAL_VALIDATION_CODES
+        ):
+            raise ValueError(
+                "business success requires validated evidence or known formal beta evidence"
+            )
         if self.error_code is not None or self.error_message is not None:
             raise ValueError("business success cannot carry a technical error")
 
@@ -393,7 +401,26 @@ _SENSITIVE_QUERY_KEYS = {
     "id_token",
     "api_token",
     "auth_token",
+    "client_secret",
+    "api_key",
+    "apikey",
+    "session",
+    "session_id",
+    "session_key",
+    "session_token",
+    "credential",
+    "credentials",
+    "credential_id",
 }
+_SENSITIVE_QUERY_KEY_SUFFIXES = (
+    "_token",
+    "_secret",
+    "_credential",
+    "_credentials",
+    "_session",
+    "_session_id",
+    "_session_key",
+)
 _EXPLICIT_CREDENTIAL_PATTERNS = (
     re.compile(r"(?i)\bauthorization\s*:\s*\S+"),
     re.compile(r"(?i)\b(?:set-cookie|cookie)\s*:\s*[\w.-]+\s*=\s*\S+"),
@@ -431,8 +458,17 @@ def _url_component_has_credentials(value: str) -> bool:
 
 
 def _is_sensitive_credential_name(value: str) -> bool:
-    normalized = value.strip().lower().replace("-", "_")
-    return normalized in _SENSITIVE_QUERY_KEYS
+    normalized = value
+    for _ in range(2):
+        decoded = unquote(normalized)
+        if decoded == normalized:
+            break
+        normalized = decoded
+    normalized = normalized.strip().lower().replace("-", "_")
+    return (
+        normalized in _SENSITIVE_QUERY_KEYS
+        or normalized.endswith(_SENSITIVE_QUERY_KEY_SUFFIXES)
+    )
 
 
 def _contains_explicit_credentials(value: str) -> bool:

@@ -19,7 +19,7 @@ from quote_app.evidence.geometry import (
     GeometryError,
     ViewportGeometry,
 )
-from quote_app.evidence.models import EvidenceState
+from quote_app.evidence.models import EvidenceState, MacCapturePolicy
 from quote_app.evidence.platform import (
     BrowserWindowIdentity,
     CaptureEnvironment,
@@ -29,6 +29,8 @@ from quote_app.evidence.platform import (
     EvidenceCaptureError,
     EvidenceCapturePipeline,
     NativeScreenPermissionDenied,
+    NonRetryableEvidenceCaptureError,
+    RetryableEvidenceCaptureError,
     SystemUIProof,
     make_capture_error,
 )
@@ -68,6 +70,24 @@ def test_capture_codes_have_explicit_retry_semantics(
     assert isinstance(error, EvidenceCaptureError)
     assert isinstance(error, expected_type)
     assert classify_attempt_error(error) is error
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "CAPTURE_ACCESSIBILITY",
+        "CAPTURE_WINDOW_IDENTITY",
+        "CAPTURE_FOREGROUND",
+        "CAPTURE_SYSTEM_UI",
+    ],
+)
+def test_mac_runtime_errors_are_non_retryable_environment_failures(
+    code: str,
+) -> None:
+    error = make_capture_error(code, "macOS provider proof is unavailable")
+
+    assert isinstance(error, NonRetryableEvidenceCaptureError)
+    assert error.code == code
 
 
 class _Probe:
@@ -309,6 +329,292 @@ def _pipeline(environment: _Environment) -> EvidenceCapturePipeline:
     )
 
 
+def test_macos_visual_review_beta_allows_only_missing_date_time(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(
+        tmp_path,
+        proof=SystemUIProof(
+            expected_window=BrowserWindowIdentity("test", 42, "window-7"),
+            system_bar_visible=True,
+            date_time_visible=False,
+            intersects_primary_display=True,
+            authoritative=True,
+            source="macos-visual-review",
+            visual_review_required=True,
+        ),
+    )
+
+    record = EvidenceCapturePipeline(
+        environment,
+        sleeper=lambda _seconds: None,
+        now=lambda: NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    ).capture(_request(tmp_path / "visual-review.png", environment))
+
+    assert record.validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
+
+
+def test_macos_visual_review_beta_still_requires_visual_review_flag(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(
+        tmp_path,
+        proof=SystemUIProof(
+            expected_window=BrowserWindowIdentity("test", 42, "window-7"),
+            system_bar_visible=True,
+            date_time_visible=False,
+            intersects_primary_display=True,
+            authoritative=True,
+            source="macos-no-visual-review",
+            visual_review_required=False,
+        ),
+    )
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        EvidenceCapturePipeline(
+            environment,
+            sleeper=lambda _seconds: None,
+            now=lambda: NOW,
+            policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+        ).capture(_request(tmp_path / "no-visual-review.png", environment))
+
+    assert captured.value.code == "CAPTURE_ENVIRONMENT"
+
+
+def test_pipeline_policy_cannot_be_reassigned_after_construction(
+    tmp_path: Path,
+) -> None:
+    pipeline = _pipeline(_Environment(tmp_path))
+
+    with pytest.raises(AttributeError):
+        pipeline.policy = "invalid"  # type: ignore[assignment]
+
+
+def test_pipeline_fails_closed_when_its_policy_storage_is_tampered(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(tmp_path)
+    pipeline = _pipeline(environment)
+    pipeline._policy = "invalid"  # type: ignore[attr-defined, assignment]
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        pipeline.capture(_request(tmp_path / "invalid-policy.png", environment))
+
+    assert captured.value.code == "CAPTURE_ENVIRONMENT"
+    assert not (tmp_path / "invalid-policy.png").exists()
+
+
+@pytest.mark.parametrize(
+    "proof_change",
+    [
+        {"authoritative": False},
+        {"system_bar_visible": False},
+        {"intersects_primary_display": False},
+        {
+            "expected_window": BrowserWindowIdentity(
+                "test",
+                42,
+                "other-window",
+            )
+        },
+    ],
+)
+def test_macos_visual_review_beta_keeps_all_non_date_time_proof_requirements(
+    tmp_path: Path,
+    proof_change: dict[str, object],
+) -> None:
+    environment = _Environment(
+        tmp_path,
+        proof=SystemUIProof(
+            expected_window=proof_change.get(
+                "expected_window",
+                BrowserWindowIdentity("test", 42, "window-7"),
+            ),
+            system_bar_visible=proof_change.get("system_bar_visible", True),
+            date_time_visible=False,
+            intersects_primary_display=proof_change.get(
+                "intersects_primary_display",
+                True,
+            ),
+            authoritative=proof_change.get("authoritative", True),
+            source="macos-visual-review-required-proof",
+            visual_review_required=True,
+        ),
+    )
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        EvidenceCapturePipeline(
+            environment,
+            sleeper=lambda _seconds: None,
+            now=lambda: NOW,
+            policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+        ).capture(_request(tmp_path / "incomplete-beta-proof.png", environment))
+
+    assert captured.value.code == "CAPTURE_ENVIRONMENT"
+
+
+class _ClassifiedProviderEnvironment(_Environment):
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        error_stage: str,
+        provider_error: EvidenceCaptureError,
+    ) -> None:
+        self.error_stage = error_stage
+        self.provider_error = provider_error
+        super().__init__(
+            tmp_path,
+            prepare_error=(
+                provider_error if error_stage == "prepare" else None
+            ),
+            snapshot_error=(
+                provider_error if error_stage == "geometry" else None
+            ),
+            capture_error=(
+                provider_error if error_stage == "capture" else None
+            ),
+        )
+
+    def screen_capture_permission(self) -> bool:
+        if self.error_stage == "permission":
+            raise self.provider_error
+        return super().screen_capture_permission()
+
+    def system_ui_proof(
+        self,
+        snapshot: CaptureGeometrySnapshot,
+    ) -> SystemUIProof:
+        if self.error_stage == "system-ui":
+            raise self.provider_error
+        return super().system_ui_proof(snapshot)
+
+    def foreground_window(self) -> BrowserWindowIdentity:
+        if self.error_stage == "foreground":
+            raise self.provider_error
+        return super().foreground_window()
+
+
+@pytest.mark.parametrize(
+    ("error_stage", "code"),
+    [
+        ("permission", "CAPTURE_PERMISSION"),
+        ("prepare", "CAPTURE_FOREGROUND"),
+        ("geometry", "CAPTURE_GEOMETRY"),
+        ("system-ui", "CAPTURE_SYSTEM_UI"),
+        ("foreground", "CAPTURE_FOREGROUND"),
+        ("capture", "CAPTURE_FAILED"),
+    ],
+)
+def test_pipeline_preserves_revalidated_provider_capture_classification(
+    tmp_path: Path,
+    error_stage: str,
+    code: str,
+) -> None:
+    error_type = (
+        RetryableEvidenceCaptureError
+        if code in {
+            "CAPTURE_GEOMETRY",
+            "CAPTURE_FAILED",
+        }
+        else NonRetryableEvidenceCaptureError
+    )
+    provider_error = error_type(code, "token=provider-secret")
+    environment = _ClassifiedProviderEnvironment(
+        tmp_path,
+        error_stage=error_stage,
+        provider_error=provider_error,
+    )
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        _pipeline(environment).capture(
+            _request(tmp_path / f"{error_stage}.png", environment)
+        )
+
+    assert captured.value.code == code
+    assert "secret" not in captured.value.message
+
+
+def test_pipeline_invalid_provider_capture_code_falls_back_safely(
+    tmp_path: Path,
+) -> None:
+    environment = _ClassifiedProviderEnvironment(
+        tmp_path,
+        error_stage="geometry",
+        provider_error=NonRetryableEvidenceCaptureError(
+            "INJECTED_FAILURE",
+            "token=invalid-secret",
+        ),
+    )
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        _pipeline(environment).capture(
+            _request(tmp_path / "invalid-code.png", environment)
+        )
+
+    assert captured.value.code == "CAPTURE_ENVIRONMENT"
+    assert "secret" not in captured.value.message
+
+
+@pytest.mark.parametrize("injection_point", ["sleeper", "now"])
+@pytest.mark.parametrize(
+    ("provider_error", "expected_code", "expected_type"),
+    [
+        (
+            NonRetryableEvidenceCaptureError(
+                "INJECTED_FAILURE",
+                "token=outer-invalid-secret",
+            ),
+            "CAPTURE_ENVIRONMENT",
+            NonRetryableEvidenceCaptureError,
+        ),
+        (
+            RetryableEvidenceCaptureError(
+                "CAPTURE_GEOMETRY",
+                "token=outer-valid-secret",
+            ),
+            "CAPTURE_GEOMETRY",
+            RetryableEvidenceCaptureError,
+        ),
+    ],
+)
+def test_pipeline_outer_boundary_revalidates_nonprovider_capture_errors(
+    tmp_path: Path,
+    injection_point: str,
+    provider_error: EvidenceCaptureError,
+    expected_code: str,
+    expected_type: type[EvidenceCaptureError],
+) -> None:
+    environment = _Environment(tmp_path)
+
+    def sleeper(_seconds: float) -> None:
+        if injection_point == "sleeper":
+            raise provider_error
+
+    def now() -> datetime:
+        if injection_point == "now":
+            raise provider_error
+        return NOW
+
+    pipeline = EvidenceCapturePipeline(
+        environment,
+        sleeper=sleeper,
+        now=now,
+    )
+    destination = tmp_path / f"outer-{injection_point}.png"
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        pipeline.capture(_request(destination, environment))
+
+    assert captured.value.code == expected_code
+    assert isinstance(captured.value, expected_type)
+    assert captured.value.message == "正式截图流程失败"
+    assert "secret" not in captured.value.message
+    assert classify_attempt_error(captured.value) is captured.value
+    assert not destination.exists()
+
+
 def test_missing_screen_recording_permission_has_stable_retry_code(
     tmp_path: Path,
 ) -> None:
@@ -376,6 +682,55 @@ def test_nonmaximized_or_outside_browser_bounds_are_environment_failure(
 
     assert captured.value.code == "CAPTURE_ENVIRONMENT"
     assert isinstance(captured.value, NonRetryableTechnicalError)
+    assert environment.captured_paths == []
+
+
+def test_macos_normal_window_geometry_is_not_rejected_as_nonmaximized(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(tmp_path)
+    mac_identity = BrowserWindowIdentity("macos", 42, "window-7")
+    environment.expected = mac_identity
+    environment.snapshot = replace(
+        environment.snapshot,
+        expected_window=mac_identity,
+        maximized=False,
+    )
+    environment.proof = replace(
+        environment.proof,
+        expected_window=mac_identity,
+    )
+    environment.foreground = [mac_identity, mac_identity]
+    request = _request(tmp_path / "formal.png", environment)
+
+    record = _pipeline(environment).capture(request)
+
+    assert record.validation_code == "CAPTURE_OK"
+
+
+def test_windows_geometry_still_rejects_nonmaximized_window(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(tmp_path)
+    windows_identity = BrowserWindowIdentity("windows", 42, "window-7")
+    environment.expected = windows_identity
+    environment.snapshot = replace(
+        environment.snapshot,
+        expected_window=windows_identity,
+        maximized=False,
+    )
+    environment.proof = replace(
+        environment.proof,
+        expected_window=windows_identity,
+    )
+    environment.foreground = [windows_identity, windows_identity]
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        _pipeline(environment).capture(
+            _request(tmp_path / "formal.png", environment)
+        )
+
+    assert captured.value.code == "CAPTURE_ENVIRONMENT"
     assert environment.captured_paths == []
 
 
@@ -535,6 +890,121 @@ def test_pipeline_draws_validated_business_frames_before_hashing(
     )
     with Image.open(destination) as image:
         assert image.convert("RGB").getpixel((20, 80)) == (255, 0, 0)
+
+
+def test_beta_capture_keeps_unmappable_request_data_without_annotations(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(
+        tmp_path,
+        proof=SystemUIProof(
+            expected_window=BrowserWindowIdentity("test", 42, "window-7"),
+            system_bar_visible=True,
+            date_time_visible=True,
+            intersects_primary_display=True,
+            authoritative=True,
+            source="beta-system-ui",
+            visual_review_required=True,
+        ),
+    )
+    destination = tmp_path / "beta-full-display.png"
+    rectangles = (CssRect(390, 250, 40, 40, "capacity"),)
+
+    record = EvidenceCapturePipeline(
+        environment,
+        sleeper=lambda _seconds: None,
+        now=lambda: NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    ).capture(
+        _request(
+            destination,
+            environment,
+            state=EvidenceState.CAPACITY_UNAVAILABLE,
+            rectangles=rectangles,
+            roles=("capacity",),
+        )
+    )
+
+    assert record.validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
+    assert record.annotations == ()
+    with Image.open(destination) as image:
+        assert image.convert("RGB").getpixel((390, 250)) != (255, 0, 0)
+
+
+def test_strict_capture_rejects_the_same_unmappable_request_data(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(tmp_path)
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        _pipeline(environment).capture(
+            _request(
+                tmp_path / "strict-coordinate-error.png",
+                environment,
+                state=EvidenceState.CAPACITY_UNAVAILABLE,
+                rectangles=(CssRect(390, 250, 40, 40, "capacity"),),
+                roles=("capacity",),
+            )
+        )
+
+    assert captured.value.code == "CAPTURE_GEOMETRY"
+
+
+@pytest.mark.parametrize("failure", ["foreground", "system-ui", "semantic"])
+def test_beta_capture_keeps_foreground_system_ui_and_semantic_checks(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    expected = BrowserWindowIdentity("test", 42, "window-7")
+    beta_proof = SystemUIProof(
+        expected_window=expected,
+        system_bar_visible=True,
+        date_time_visible=True,
+        intersects_primary_display=True,
+        authoritative=True,
+        source="beta-system-ui",
+        visual_review_required=True,
+    )
+    environment = _Environment(
+        tmp_path,
+        foreground=(
+            (BrowserWindowIdentity("test", 99, "other"), expected)
+            if failure == "foreground"
+            else None
+        ),
+        proof=(
+            SystemUIProof(
+                expected_window=expected,
+                system_bar_visible=False,
+                date_time_visible=True,
+                intersects_primary_display=True,
+                authoritative=True,
+                source="hidden-system-ui",
+                visual_review_required=True,
+            )
+            if failure == "system-ui"
+            else beta_proof
+        ),
+    )
+    probe = (
+        _Probe("one", "two", "three")
+        if failure == "semantic"
+        else None
+    )
+
+    with pytest.raises(EvidenceCaptureError) as captured:
+        EvidenceCapturePipeline(
+            environment,
+            sleeper=lambda _seconds: None,
+            now=lambda: NOW,
+            policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+        ).capture(_request(tmp_path / f"beta-{failure}.png", environment, probe=probe))
+
+    assert captured.value.code == {
+        "foreground": "CAPTURE_OBSCURED",
+        "system-ui": "CAPTURE_ENVIRONMENT",
+        "semantic": "CAPTURE_UNSTABLE",
+    }[failure]
 
 
 def test_unstable_probe_and_geometry_failure_leave_no_formal_file(
@@ -732,6 +1202,33 @@ def test_macos_retina_uses_logical_primary_but_validates_physical_scale(
     }
     assert darwin.IMAGE_OPTIONS == 123
     assert writes == [((2880, 1800), str(tmp_path / "retina.png"))]
+
+
+def test_macos_visual_review_capture_allows_browser_dpr_to_differ_from_retina_scale(
+    tmp_path: Path,
+) -> None:
+    from quote_app.evidence.macos import capture_macos_primary_display
+
+    darwin = SimpleNamespace(IMAGE_OPTIONS=123)
+    fake = _FakeMSS(darwin, size=(2880, 1800))
+    writes: list[tuple[tuple[int, int], str]] = []
+
+    capture_macos_primary_display(
+        tmp_path / "retina-visual-review.png",
+        expected_physical_size=(2880, 1800),
+        expected_scale=(1, 1),
+        expected_device_pixel_ratio=1,
+        validate_scale_dpr=False,
+        mss_factory=lambda: fake,
+        png_writer=lambda _rgb, size, *, output: writes.append(
+            (tuple(size), output)
+        ),
+        darwin_module=darwin,
+    )
+
+    assert writes == [
+        ((2880, 1800), str(tmp_path / "retina-visual-review.png"))
+    ]
 
 
 @pytest.mark.parametrize(

@@ -14,7 +14,10 @@ from quote_app.domain.models import InputPaths, Issue, QuoteMonth, QuoteRow
 from quote_app.evidence.models import MacCapturePolicy
 from quote_app.excel.report_writer import RunSummary
 from quote_app.services.core_pipeline import CorePipelineError
-from quote_app.services.incremental_publication import IncrementalExcelPublisher
+from quote_app.services.incremental_publication import (
+    CoalescingPublicationWorker,
+    IncrementalExcelPublisher,
+)
 from quote_app.services.readiness import ReadinessCheck
 from quote_app.services.web_run import (
     WebsiteRunController,
@@ -146,8 +149,22 @@ def run_full_pipeline(
         )
     )
 
+    publication_worker = (
+        CoalescingPublicationWorker(
+            publisher,
+            task_count=len(task_build.tasks),
+        )
+        if len(task_build.tasks) >= 100
+        else None
+    )
+
     def publish_checkpoint(snapshot: WebsiteRunSnapshot) -> None:
-        publisher.publish(snapshot)
+        if publication_worker is None:
+            publisher.publish(snapshot)
+            return
+        publication_worker.submit(snapshot)
+        if snapshot.waiting_task_ids:
+            publication_worker.flush()
 
     website_request = WebsiteRunRequest(
         run_id=run.run_id,
@@ -159,20 +176,28 @@ def run_full_pipeline(
         event_sink=ui_event_sink,
         checkpoint_sink=publish_checkpoint,
     )
-    website_summary = _run_or_skip(website_request, website_runner)
+    try:
+        website_summary = _run_or_skip(website_request, website_runner)
+    except BaseException:
+        if publication_worker is not None:
+            publication_worker.close(suppress_error=True)
+        raise
     results = _load_saved_results(request.database_path, task_build.tasks)
     observations = _load_saved_observations(request.database_path, task_build.tasks)
     waiting_task_ids = _load_waiting_task_ids(
         request.database_path,
         task_build.tasks,
     )
-    publisher.publish(
-        WebsiteRunSnapshot(
-            observations=observations,
-            results=results,
-            waiting_task_ids=waiting_task_ids,
-        )
+    final_snapshot = WebsiteRunSnapshot(
+        observations=observations,
+        results=results,
+        waiting_task_ids=waiting_task_ids,
     )
+    if publication_worker is None:
+        publisher.publish(final_snapshot)
+    else:
+        publication_worker.submit(final_snapshot)
+        publication_worker.close()
     output = write_web_results_to_excel(
         WebToExcelRequest(
             quote_month=request.quote_month,

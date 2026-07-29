@@ -128,7 +128,7 @@ def test_validated_honor_mac_evidence_is_standard_embedded_image(
             for name in members
             if name.endswith((".xml", ".rels"))
         )
-    assert "xl/media/image1.png" in members
+    assert "xl/media/image1.jpeg" in members
     assert b"<a:blip" in drawing
     assert b"r:embed=" in drawing
     assert b"/relationships/image" in relationships
@@ -215,19 +215,39 @@ class _SuccessfulRecoveryCapture:
         )
 
 
-def _recovery_observation(
-    _task: object,
-    _page: object,
-) -> FixtureObservation:
-    return FixtureObservation(
-        outcome=BusinessOutcome.PRICE_FOUND,
-        price=Decimal("4999"),
-        url=HONOR_DETAIL_URL,
-        css_rectangles=(),
-        expected_roles=(),
-        expected_window=BrowserWindowIdentity("macos", 42, "honor-window"),
-        stability_probe=_StableRecoveryProbe(),
-    )
+class _RecoveryObservationAdapter:
+    def __init__(self) -> None:
+        self.observe_calls = 0
+        self.resume_calls = 0
+
+    def __call__(
+        self,
+        _task: object,
+        _page: object,
+    ) -> FixtureObservation:
+        self.observe_calls += 1
+        return self._observation()
+
+    def resume(
+        self,
+        _task: object,
+        _page: object,
+        _checkpoint: object,
+    ) -> FixtureObservation:
+        self.resume_calls += 1
+        return self._observation()
+
+    @staticmethod
+    def _observation() -> FixtureObservation:
+        return FixtureObservation(
+            outcome=BusinessOutcome.PRICE_FOUND,
+            price=Decimal("4999"),
+            url=HONOR_DETAIL_URL,
+            css_rectangles=(),
+            expected_roles=(),
+            expected_window=BrowserWindowIdentity("macos", 42, "honor-window"),
+            stability_probe=_StableRecoveryProbe(),
+        )
 
 
 def test_official_observation_recovery_reuses_generation_and_updates_same_partial(
@@ -269,6 +289,7 @@ def test_official_observation_recovery_reuses_generation_and_updates_same_partia
         input_paths=None,
         capture_acceptance_policy=MacCapturePolicy.STRICT,
     )
+    recovery_adapter = _RecoveryObservationAdapter()
 
     def runner_for(
         repository: SQLiteTaskRepository,
@@ -291,7 +312,7 @@ def test_official_observation_recovery_reuses_generation_and_updates_same_partia
             repository=repository,
             run_id=run.run_id,
             browser_session=_RecoverySession(),
-            adapter=_recovery_observation,
+            adapter=recovery_adapter,
             evidence_capture=capture,
             evidence_dir=tmp_path / "evidence",
             event_sink=publish_stage,
@@ -326,6 +347,8 @@ def test_official_observation_recovery_reuses_generation_and_updates_same_partia
         recovered_runner.run((task,))
         assert repository.task_state(task.task_id) is TaskState.SUCCEEDED
         assert repository.task_generation(task.task_id) == generation_before_restart
+        assert recovery_adapter.observe_calls == 1
+        assert recovery_adapter.resume_calls == 1
 
     assert publisher.paths.quote_path == partial_path
     price_plus_image = load_workbook(partial_path)

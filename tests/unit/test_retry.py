@@ -49,11 +49,38 @@ def test_browser_failures_receive_stable_retryable_codes(
     assert classified.retry_cost == 1
 
 
+def test_layout_error_with_safe_stage_keeps_stable_code_and_stage_message() -> None:
+    classified = classify_attempt_error(
+        LayoutRecognitionError("store controls are missing", stage="京东店铺页")
+    )
+
+    assert isinstance(classified, RetryableTechnicalError)
+    assert classified.code == "LAYOUT_CHANGED"
+    assert classified.message == "网页结构无法识别（京东店铺页）"
+
+
 def test_explicit_non_retryable_error_keeps_its_stable_code() -> None:
     error = NonRetryableTechnicalError("SITE_NOT_SUPPORTED", "站点暂不支持")
 
     assert classify_attempt_error(error) is error
     assert error.retry_cost == 1
+
+
+def test_unexpected_browser_error_keeps_a_safe_exception_hint() -> None:
+    classified = classify_attempt_error(RuntimeError("search button detached"))
+
+    assert isinstance(classified, NonRetryableTechnicalError)
+    assert classified.code == "UNEXPECTED_BROWSER_ERROR"
+    assert "RuntimeError" in classified.message
+    assert "search button detached" in classified.message
+
+
+def test_unexpected_browser_error_never_echoes_credential_shaped_text() -> None:
+    classified = classify_attempt_error(RuntimeError("password=secret-value"))
+
+    assert isinstance(classified, NonRetryableTechnicalError)
+    assert classified.code == "UNEXPECTED_BROWSER_ERROR"
+    assert "secret-value" not in classified.message
 
 
 @pytest.mark.parametrize(

@@ -30,10 +30,13 @@ SOURCE_ROLES = ("base", "marketing", "bop")
 SNAPSHOT_TYPE = "quote_rows"
 
 _CHANNEL_ORDER = (
+    WebsiteChannel.OFFICIAL,
     WebsiteChannel.JD,
     WebsiteChannel.TMALL,
-    WebsiteChannel.OFFICIAL,
 )
+_CHANNEL_PRIORITY = {
+    channel: priority for priority, channel in enumerate(_CHANNEL_ORDER)
+}
 _WEB_QUERY_FIELDS = ("brand", "model_name", "ram", "storage", "color")
 _WEB_QUERY_FIELD_LABELS = {
     "brand": "品牌",
@@ -186,6 +189,12 @@ def build_website_tasks(
                 )
             )
 
+    tasks.sort(
+        key=lambda task: (
+            _CHANNEL_PRIORITY[task.channel],
+            task.output_row_number,
+        )
+    )
     return TaskBuildResult(tasks=tuple(tasks), issues=tuple(issues))
 
 

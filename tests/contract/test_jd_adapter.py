@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
@@ -14,7 +15,12 @@ from quote_app.sites.catalog import SUPPORTED_BRANDS, SiteSpec, load_site_catalo
 from quote_app.sites.jd import JDAdapter
 from quote_app.sites.protocol import SiteObservationAdapter
 from quote_app.sites.registry import AdapterRegistry, RegisteredSiteAdapter
-from quote_app.tasks.models import BusinessOutcome, WebsiteChannel, WebsiteTask
+from quote_app.tasks.models import (
+    BusinessOutcome,
+    WebsiteChannel,
+    WebsiteObservationCheckpoint,
+    WebsiteTask,
+)
 from quote_app.tasks.retry import (
     LayoutRecognitionError,
     LoginRequired,
@@ -228,6 +234,7 @@ class _FixturePage:
         store_controls_ready_after: int | None = None,
         result_region_ready_after: int | None = None,
         detail_ready_after: int | None = None,
+        detail_seller_ready_after: int | None = None,
     ) -> None:
         parser = _DocumentParser()
         parser.feed(html if html is not None else (FIXTURES / fixture).read_text("utf-8"))
@@ -254,6 +261,7 @@ class _FixturePage:
         self.store_controls_ready_after = store_controls_ready_after
         self.result_region_ready_after = result_region_ready_after
         self.detail_ready_after = detail_ready_after
+        self.detail_seller_ready_after = detail_seller_ready_after
         self.pending_capacity_context: int | None = None
         self.color_access_before_capacity_context = False
         if capacity_context_mode in {"async", "never"}:
@@ -272,6 +280,11 @@ class _FixturePage:
             self.activate("product")
             if self.detail_redirect_url is not None:
                 self._url = self.detail_redirect_url
+        elif (
+            urlsplit(url).hostname == "mall.jd.com"
+            and urlsplit(url).path.startswith("/view_search-")
+        ):
+            self.activate("results")
         else:
             self._active = "store"
 
@@ -369,6 +382,13 @@ class _FixturePage:
                     if "data-delayed-detail" in node.attrs:
                         node.attrs.pop("hidden", None)
                 self.detail_ready_after = None
+        if self.detail_seller_ready_after is not None:
+            self.detail_seller_ready_after -= 1
+            if self.detail_seller_ready_after <= 0:
+                for node in self.root.descendants():
+                    if "data-delayed-detail-seller" in node.attrs:
+                        node.attrs.pop("hidden", None)
+                self.detail_seller_ready_after = None
         return None
 
     def evaluate(self, script: str) -> None:
@@ -756,6 +776,71 @@ def test_jd_waits_for_the_modern_detail_title_before_selecting_layout() -> None:
     assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
 
 
+def test_jd_waits_for_modern_detail_seller_after_title_is_visible() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace(
+        'class="shop-plugin"',
+        'class="shop-plugin" data-delayed-detail-seller hidden',
+        1,
+    )
+
+    observation = _observe(
+        html=html,
+        task=_task(ram="16GB", storage="512GB"),
+        detail_seller_ready_after=2,
+    )
+
+    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+
+
+def test_jd_waits_for_legacy_detail_seller_after_title_is_visible() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'class="shop-name"',
+        'class="shop-name" data-delayed-detail-seller hidden',
+        1,
+    )
+
+    observation = _observe(
+        html=html,
+        detail_seller_ready_after=2,
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_jd_detail_seller_wait_surfaces_authentication_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'class="shop-name"',
+        'class="shop-name" data-delayed-detail-seller hidden',
+        1,
+    )
+    page = _FixturePage(html=html, detail_seller_ready_after=5)
+    adapter = JDAdapter(_xiaomi_spec())
+    checks = 0
+    original = adapter._raise_if_authentication_blocked
+
+    def authentication_check(candidate: object) -> None:
+        nonlocal checks
+        checks += 1
+        if page.wait_timeout_milliseconds:
+            raise LoginRequired("jd", "京东需要人工登录")
+        original(candidate)
+
+    monkeypatch.setattr(
+        adapter,
+        "_raise_if_authentication_blocked",
+        authentication_check,
+    )
+
+    with pytest.raises(LoginRequired):
+        adapter.observe(_task(), cast(Any, page))
+
+    assert page.wait_timeout_milliseconds
+
+
 def test_modern_detail_selects_available_configuration_and_reads_valid_price() -> None:
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
@@ -807,6 +892,45 @@ def test_jd_modern_scrolls_options_before_clicking_and_positions_capacity_for_ca
     assert page.capture_view_positions == ["modern-capacity"]
     assert page.window_scroll_offsets == [-120]
     assert 500 in page.wait_timeout_milliseconds
+
+
+def test_jd_resume_goes_directly_to_saved_detail_without_store_search() -> None:
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    first_page = _FixturePage()
+    original = adapter.observe(task, cast(Any, first_page))
+    checkpoint = WebsiteObservationCheckpoint(
+        task_id=task.task_id,
+        outcome=original.outcome,
+        price=original.price,
+        url=original.url,
+        observed_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+    resumed_page = _FixturePage()
+
+    resumed = adapter.resume(task, cast(Any, resumed_page), checkpoint)
+
+    assert resumed == original
+    assert resumed_page.goto_calls == [checkpoint.url]
+
+
+def test_jd_resume_revalidates_saved_no_model_search_without_search_submit() -> None:
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    original = adapter.observe(task, cast(Any, _FixturePage("no_model.html")))
+    checkpoint = WebsiteObservationCheckpoint(
+        task_id=task.task_id,
+        outcome=original.outcome,
+        price=original.price,
+        url=original.url,
+        observed_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+    resumed_page = _FixturePage("no_model.html")
+
+    resumed = adapter.resume(task, cast(Any, resumed_page), checkpoint)
+
+    assert resumed == original
+    assert resumed_page.goto_calls == [checkpoint.url]
 
 
 def test_jd_legacy_scrolls_options_before_clicking_and_positions_capacity_for_capture() -> None:

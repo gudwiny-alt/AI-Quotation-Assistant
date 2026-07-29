@@ -35,6 +35,7 @@ from quote_app.tasks.models import (
     RunState,
     TaskState,
     WebsiteChannel,
+    WebsiteObservationCheckpoint,
     WebsiteTask,
 )
 from quote_app.tasks.repository import SQLiteTaskRepository
@@ -147,6 +148,24 @@ class _ObservationAdapter:
     def execute(self, *args: Any, **kwargs: Any) -> None:
         self.execute_called = True
         raise AssertionError("runner must not use direct adapter execution")
+
+
+class _ResumableObservationAdapter(_ObservationAdapter):
+    def __init__(self, spec: SiteSpec, observation: AdapterObservation) -> None:
+        super().__init__(spec, observation)
+        self.resumed: list[
+            tuple[WebsiteTask, BrowserPage, WebsiteObservationCheckpoint]
+        ] = []
+
+    def resume(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        checkpoint: WebsiteObservationCheckpoint,
+    ) -> AdapterObservation:
+        self.resumed.append((task, page, checkpoint))
+        page.goto(checkpoint.url)  # type: ignore[attr-defined]
+        return self.observation
 
 
 class _OfficialObservationAdapter(_ObservationAdapter):
@@ -458,6 +477,53 @@ def test_capture_failure_keeps_the_saved_observation_and_retries_same_page(
     assert checkpoint.price == Decimal("4999")
     assert runner_case.page.goto_calls == [runner_case.official_detail_url]
     assert results[0].state is TaskState.SUCCEEDED
+
+
+def test_restart_resumes_saved_observation_without_repeating_store_search(
+    tmp_path: Path,
+) -> None:
+    """Break caught: restart silently overwrites a durable observation by searching again."""
+    task = _task()
+    spec = _xiaomi_jd_spec()
+    observation = _observation(BusinessOutcome.PRICE_FOUND)
+    adapter = _ResumableObservationAdapter(spec, observation)
+    database = tmp_path / "state.sqlite3"
+    session = _Session()
+
+    class InterruptCapture:
+        def capture(self, _request: CaptureRequest) -> EvidenceRecord:
+            raise SystemExit("process stopped after observation")
+
+    with SQLiteTaskRepository(database) as repository:
+        repository.create_run(_run(tmp_path))
+        interrupted = WebsiteTaskRunner(
+            repository=repository,
+            run_id="run-1",
+            browser_session=session,
+            adapter_registry=_registry(adapter),
+            capture_context_provider=_context,
+            evidence_capture=InterruptCapture(),
+            evidence_dir=tmp_path / "evidence",
+        )
+        with pytest.raises(SystemExit, match="process stopped"):
+            interrupted.run((task,))
+        saved = repository.load_observation(task.task_id)
+        assert saved is not None
+
+    with SQLiteTaskRepository(database) as repository:
+        recovered = _runner(
+            repository,
+            tmp_path,
+            adapter_registry=_registry(adapter),
+            capture=_RecordingCapture(),
+            browser_session=session,
+        )
+        result = recovered.run((task,))
+        assert repository.load_observation(task.task_id) == saved
+
+    assert result[0].state is TaskState.SUCCEEDED
+    assert len(adapter.observed) == 1
+    assert [call[2] for call in adapter.resumed] == [saved]
 
 
 @pytest.mark.parametrize("failures", [2, 3], ids=("then-success", "exhausted"))

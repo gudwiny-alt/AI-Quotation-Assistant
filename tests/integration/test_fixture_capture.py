@@ -186,6 +186,26 @@ def _adapter(task: WebsiteTask, page: _Page) -> FixtureObservation:
     )
 
 
+class _ResumableFixtureAdapter:
+    def __call__(
+        self,
+        task: WebsiteTask,
+        page: _Page,
+    ) -> FixtureObservation:
+        return _adapter(task, page)
+
+    def resume(
+        self,
+        task: WebsiteTask,
+        page: _Page,
+        _checkpoint: object,
+    ) -> FixtureObservation:
+        return _adapter(task, page)
+
+
+_RESUMABLE_ADAPTER = _ResumableFixtureAdapter()
+
+
 def _run(tmp_path: Path, run_id: str = "fixture-run") -> RunRecord:
     fingerprints = tuple(
         InputFingerprint(
@@ -247,7 +267,7 @@ def _runner(
     fixtures_by_task: dict[str, Path],
     *,
     capture: _Capture | None = None,
-    adapter=_adapter,
+    adapter=_RESUMABLE_ADAPTER,
     events: list[WorkerEvent] | None = None,
     manual_login_callback=None,
 ) -> tuple[WebsiteTaskRunner, _Session, _Capture]:
@@ -348,7 +368,7 @@ def test_fixture_outcomes_frames_sorting_and_output_mapping(
         }
 
 
-def test_stable_sort_uses_every_business_key_and_row_tie_break(
+def test_stable_sort_is_brand_channel_row_and_preserves_exact_ties(
     tmp_path: Path,
 ) -> None:
     tasks = (
@@ -413,13 +433,13 @@ def test_stable_sort_uses_every_business_key_and_row_tie_break(
         runner.run(tuple(reversed(tasks)))
 
         assert page.loads == [
-            "row-earlier",
-            "row-later",
-            "channel",
             "color",
             "storage",
             "ram",
             "model",
+            "row-earlier",
+            "row-later",
+            "channel",
             "brand",
         ]
 
@@ -464,22 +484,21 @@ def test_login_parks_without_retry_while_other_task_completes(
 
         runner.run(tasks)
 
-        assert page.loads == ["login", "normal"]
+        assert page.loads == ["login"]
         assert repository.task_state("login") is TaskState.WAITING_FOR_LOGIN
         assert repository.attempt_count("login") == 1
         assert repository.task_state("same-site") is TaskState.PENDING
         assert repository.attempt_count("same-site") == 0
-        assert repository.task_state("normal") is TaskState.SUCCEEDED
+        assert repository.task_state("normal") is TaskState.PENDING
+        assert repository.attempt_count("normal") == 0
         assert [event.event for event in events] == [
             "progress",
             "waiting_for_login",
-            "progress",
-            "result",
         ]
-        assert set(page.pages) == {"tmall", "jd"}
+        assert set(page.pages) == {"quotation-automation"}
 
 
-def test_manual_login_reuses_preserved_site_page_and_resumes_only_that_site(
+def test_manual_login_reuses_the_single_automation_page_and_resumes_only_that_site(
     tmp_path: Path,
 ) -> None:
     tasks = (
@@ -522,23 +541,34 @@ def test_manual_login_reuses_preserved_site_page_and_resumes_only_that_site(
             manual_login_callback=confirm_fixture_login,
         )
         runner.run(tasks)
-        preserved_page = session.pages["tmall"]
-        other_attempts = repository.attempt_count("other-site")
+        preserved_page = session.pages["quotation-automation"]
+        assert preserved_page.loads == ["login"]
+        assert repository.task_state("login") is TaskState.WAITING_FOR_LOGIN
+        assert repository.task_state("same-site") is TaskState.PENDING
+        assert repository.task_state("other-site") is TaskState.PENDING
 
         runner.scheduler.enter_manual_login("tmall")
-        runner.scheduler.confirm_manual_login("tmall")
+        runner.scheduler.continue_current_task()
         runner.scheduler.run_until_idle()
 
         assert manual_sites == ["tmall"]
-        assert session.pages["tmall"] is preserved_page
+        assert session.pages["quotation-automation"] is preserved_page
         assert preserved_page.front_count == 1
+        assert preserved_page.loads == [
+            "login",
+            "login",
+            "same-site",
+            "other-site",
+        ]
         assert repository.task_state("login") is TaskState.SUCCEEDED
         assert repository.task_state("same-site") is TaskState.SUCCEEDED
         assert repository.task_state("other-site") is TaskState.SUCCEEDED
-        assert repository.attempt_count("other-site") == other_attempts
+        assert repository.attempt_count("login") == 2
+        assert repository.attempt_count("same-site") == 1
+        assert repository.attempt_count("other-site") == 1
 
 
-def test_official_site_family_isolated_by_brand(tmp_path: Path) -> None:
+def test_official_brands_reuse_the_single_automation_page(tmp_path: Path) -> None:
     blocked = _task(
         "blocked",
         output_row=2,
@@ -580,10 +610,7 @@ def test_official_site_family_isolated_by_brand(tmp_path: Path) -> None:
 
         assert repository.task_state("blocked") is TaskState.WAITING_FOR_LOGIN
         assert repository.task_state("unrelated") is TaskState.SUCCEEDED
-        assert set(session.pages) == {
-            "official:品牌甲",
-            "official:品牌乙",
-        }
+        assert set(session.pages) == {"quotation-automation"}
 
 
 def test_capture_failure_is_diagnostic_only_and_never_business_no(

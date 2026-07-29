@@ -17,13 +17,61 @@ from quote_app.browser.profile_lock import BrowserProfileLock, PROFILE_LOCK_NAME
 PROFILE_MARKER_NAME = ".quotation-browser-profile.json"
 PROFILE_MARKER_MAGIC = "fujian-mobile-quotation-browser-profile"
 PROFILE_MARKER_SCHEMA_VERSION = 1
+AUTOMATION_PAGE_KEY = "quotation-automation"
 _PROFILE_MARKER_TEMP_PATTERN = re.compile(
     rf"^{re.escape(PROFILE_MARKER_NAME)}\.[a-z0-9_]{{8}}\.tmp$"
 )
+_CHROME_SINGLETON_LOCK_NAME = "SingletonLock"
+_CHROME_SINGLETON_PID_PATTERN = re.compile(r"-(\d+)$")
 
 
 class ProfileValidationError(RuntimeError):
     pass
+
+
+class BrowserProfileInUseError(RuntimeError):
+    """The dedicated Chrome process has not been fully quit yet."""
+
+
+def ensure_browser_profile_available(profile_dir: Path) -> None:
+    """Reject only a live Chrome process holding this exact profile directory."""
+    profile = Path(profile_dir).expanduser().resolve()
+    singleton_lock = profile / _CHROME_SINGLETON_LOCK_NAME
+    if not singleton_lock.is_symlink():
+        return
+    try:
+        target = os.readlink(singleton_lock)
+    except OSError:
+        return
+    match = _CHROME_SINGLETON_PID_PATTERN.search(target)
+    if match is None:
+        return
+    if _process_exists(int(match.group(1))):
+        raise BrowserProfileInUseError(
+            "程序专用 Chrome 仍在运行。请在菜单栏选择“Google Chrome → 退出 Google Chrome”（⌘Q），等待数秒后重试。"
+        )
+
+
+def _process_exists(process_id: int) -> bool:
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def prepare_dedicated_profile(profile_dir: Path) -> Path:
+    """Create or validate the application-owned browser profile before Chrome opens it."""
+    normalized = Path(profile_dir).expanduser().resolve()
+    _preflight_dedicated_profile(normalized)
+    ensure_browser_profile_available(normalized)
+    with BrowserProfileLock(normalized) as profile_lock:
+        _ensure_dedicated_profile(normalized, lock_name=profile_lock.lock_path.name)
+    return normalized
 
 
 class PersistentBrowserSession:
@@ -35,10 +83,21 @@ class PersistentBrowserSession:
         *,
         browser_choice: BrowserChoice | None = None,
         playwright_factory: Callable[[], Any] = sync_playwright,
+        launch_args: tuple[str, ...] | None = None,
+        startup_preflight: Callable[[Any], None] | None = None,
     ) -> None:
         self.profile_dir = Path(profile_dir).expanduser().resolve()
         self.browser_choice = browser_choice
         self._playwright_factory = playwright_factory
+        if launch_args is not None and (
+            not isinstance(launch_args, tuple)
+            or not all(isinstance(arg, str) and arg.strip() for arg in launch_args)
+        ):
+            raise ValueError("launch_args must contain nonblank strings")
+        if startup_preflight is not None and not callable(startup_preflight):
+            raise ValueError("startup_preflight must be callable")
+        self._launch_args = launch_args
+        self._startup_preflight = startup_preflight
         self._profile_lock = BrowserProfileLock(self.profile_dir)
         self._playwright: Any | None = None
         self._context: Any | None = None
@@ -59,6 +118,7 @@ class PersistentBrowserSession:
         self._owner_thread_id = threading.get_ident()
         try:
             _preflight_dedicated_profile(self.profile_dir)
+            ensure_browser_profile_available(self.profile_dir)
             choice = self.browser_choice or detect_browser_choice()
             self.browser_choice = choice
             self._profile_lock.acquire()
@@ -68,13 +128,23 @@ class PersistentBrowserSession:
             )
             manager = self._playwright_factory()
             self._playwright = manager.start()
+            launch_args = (
+                self._launch_args
+                if self._launch_args is not None
+                else ("--start-maximized",)
+            )
             self._context = self._playwright.chromium.launch_persistent_context(
                 str(self.profile_dir),
                 executable_path=str(choice.executable_path),
                 headless=False,
                 viewport=None,
-                args=["--start-maximized"],
+                args=[
+                    *launch_args,
+                    "--force-renderer-accessibility",
+                ],
             )
+            if self._startup_preflight is not None:
+                self._startup_preflight(self._context)
         except BaseException:
             self._close_resources(suppress_errors=True)
             raise
@@ -99,6 +169,25 @@ class PersistentBrowserSession:
         page = unassigned_pages[0] if unassigned_pages else context.new_page()
         self._pages[normalized_family] = page
         return page
+
+    def automation_page(self) -> Any:
+        """Return the one page owned by automatic quotation work."""
+        return self.page_for(AUTOMATION_PAGE_KEY)
+
+    def close_unassigned_pages(self) -> int:
+        """Close popups so automatic work cannot accidentally switch tabs."""
+        self._require_started_on_owner_thread()
+        context = self._context
+        if context is None:
+            raise RuntimeError("browser session has not been started")
+        automation = self.automation_page()
+        closed = 0
+        for candidate in tuple(context.pages):
+            if candidate is automation or candidate.is_closed():
+                continue
+            candidate.close()
+            closed += 1
+        return closed
 
     def close(self) -> None:
         if self._owner_thread_id is not None:

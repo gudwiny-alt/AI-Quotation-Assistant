@@ -6,6 +6,8 @@ from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 import platform as host_platform
+import os
+import stat
 
 from PIL import Image, UnidentifiedImageError
 
@@ -13,6 +15,7 @@ from quote_app.domain.models import InputPaths, Issue, QuoteMonth, QuoteRow
 from quote_app.evidence.validation import EvidenceFileAudit, read_validated_evidence
 from quote_app.evidence.models import (
     MacCapturePolicy,
+    EvidenceRecord,
     accepts_capture_validation,
     validate_mac_capture_policy,
 )
@@ -76,6 +79,8 @@ _WEB_OUTPUT_COLUMNS = (
     "AM",
     "AN",
 )
+_THUMBNAIL_MAX_SIZE = (960, 600)
+_THUMBNAIL_MAX_BYTES = 192 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,12 +99,18 @@ class WebToExcelRequest:
     quote_destination_path: Path | None = None
     report_destination_path: Path | None = None
     report_quote_path: Path | None = None
+    evidence_cache: EvidenceValidationCache | None = None
 
     def __post_init__(self) -> None:
         validate_mac_capture_policy(
             self.capture_acceptance_policy,
             platform_name=host_platform.system(),
         )
+        if (
+            self.evidence_cache is not None
+            and not isinstance(self.evidence_cache, EvidenceValidationCache)
+        ):
+            raise TypeError("evidence_cache must be an EvidenceValidationCache")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +119,98 @@ class WebToExcelResult:
     report_path: Path
     summary: RunSummary
     rows: tuple[QuoteRow, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedEvidence:
+    evidence: EvidenceRecord
+    policy: MacCapturePolicy
+    file_identity: tuple[int, int, int, int]
+    payload: bytes
+
+
+class EvidenceValidationCache:
+    """Reuse validated immutable bytes only while the source file is unchanged."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _CachedEvidence] = {}
+
+    @property
+    def total_payload_bytes(self) -> int:
+        return sum(len(entry.payload) for entry in self._entries.values())
+
+    def get(
+        self,
+        result: WebsiteResult,
+        *,
+        policy: MacCapturePolicy,
+    ) -> bytes | None:
+        cached = self._entries.get(result.task_id)
+        evidence = result.evidence
+        if (
+            cached is None
+            or evidence is None
+            or cached.evidence != evidence
+            or cached.policy is not policy
+        ):
+            return None
+        try:
+            current = os.lstat(evidence.path)
+        except OSError:
+            self._entries.pop(result.task_id, None)
+            return None
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or _evidence_file_identity(current) != cached.file_identity
+        ):
+            self._entries.pop(result.task_id, None)
+            return None
+        return cached.payload
+
+    def store(
+        self,
+        result: WebsiteResult,
+        payload: bytes,
+        *,
+        policy: MacCapturePolicy,
+        validated_identity: tuple[int, int, int, int],
+    ) -> bool:
+        evidence = result.evidence
+        if evidence is None:
+            raise ValueError("validated evidence result must contain evidence")
+        current_identity = _current_evidence_identity(evidence.path)
+        if current_identity != validated_identity:
+            self._entries.pop(result.task_id, None)
+            return False
+        self._entries[result.task_id] = _CachedEvidence(
+            evidence=evidence,
+            policy=policy,
+            file_identity=validated_identity,
+            payload=payload,
+        )
+        return True
+
+
+def _evidence_file_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
+def _current_evidence_identity(
+    path: Path,
+) -> tuple[int, int, int, int] | None:
+    try:
+        current = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+        return None
+    return _evidence_file_identity(current)
 
 
 def write_web_results_to_excel(
@@ -126,6 +229,7 @@ def write_web_results_to_excel(
     evidence_payloads, report_results = _prepare_evidence(
         request.results,
         capture_acceptance_policy=request.capture_acceptance_policy,
+        evidence_cache=request.evidence_cache,
     )
     publishable_result_by_task = {
         result.task_id: result
@@ -251,6 +355,7 @@ def _prepare_evidence(
     results: tuple[WebsiteResult, ...],
     *,
     capture_acceptance_policy: MacCapturePolicy,
+    evidence_cache: EvidenceValidationCache | None = None,
 ) -> tuple[dict[str, bytes], tuple[WebsiteResult, ...]]:
     payloads: dict[str, bytes] = {}
     report_results: list[WebsiteResult] = []
@@ -271,6 +376,21 @@ def _prepare_evidence(
                     ),
                 )
             )
+            continue
+        source_identity = _current_evidence_identity(evidence.path)
+        if (
+            result.diagnostic_path is None
+            and evidence_cache is not None
+            and (
+                cached_payload := evidence_cache.get(
+                    result,
+                    policy=capture_acceptance_policy,
+                )
+            )
+            is not None
+        ):
+            payloads[result.task_id] = cached_payload
+            report_results.append(result)
             continue
         if result.diagnostic_path is not None:
             audit = EvidenceFileAudit(
@@ -314,9 +434,82 @@ def _prepare_evidence(
                 )
             )
             continue
-        payloads[result.task_id] = audit.payload
+        if (
+            source_identity is None
+            or _current_evidence_identity(evidence.path) != source_identity
+        ):
+            report_results.append(
+                _evidence_failure_result(
+                    result,
+                    EvidenceFileAudit(
+                        payload=None,
+                        error_code="EVIDENCE_CHANGED",
+                        error_message="正式截图在发布校验期间发生变化",
+                    ),
+                )
+            )
+            continue
+        try:
+            thumbnail = _excel_thumbnail(audit.payload)
+        except (OSError, UnidentifiedImageError):
+            report_results.append(
+                _evidence_failure_result(
+                    result,
+                    EvidenceFileAudit(
+                        payload=None,
+                        error_code="EVIDENCE_IMAGE_INVALID",
+                        error_message="正式截图无法生成报价表缩略图",
+                    ),
+                )
+            )
+            continue
+        if evidence_cache is not None and not evidence_cache.store(
+                result,
+                thumbnail,
+                policy=capture_acceptance_policy,
+                validated_identity=source_identity,
+        ):
+            report_results.append(
+                _evidence_failure_result(
+                    result,
+                    EvidenceFileAudit(
+                        payload=None,
+                        error_code="EVIDENCE_CHANGED",
+                        error_message="正式截图在发布校验期间发生变化",
+                    ),
+                )
+            )
+            continue
+        payloads[result.task_id] = thumbnail
         report_results.append(result)
     return payloads, tuple(report_results)
+
+
+def _excel_thumbnail(payload: bytes) -> bytes:
+    with Image.open(BytesIO(payload)) as source:
+        source.load()
+        image = source.convert("RGB")
+    image.thumbnail(_THUMBNAIL_MAX_SIZE, Image.Resampling.LANCZOS)
+    for _ in range(12):
+        for quality in (82, 70, 58, 46):
+            output = BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=quality,
+                optimize=True,
+            )
+            candidate = output.getvalue()
+            if len(candidate) <= _THUMBNAIL_MAX_BYTES:
+                return candidate
+        next_size = (
+            max(240, int(image.width * 0.8)),
+            max(160, int(image.height * 0.8)),
+        )
+        if next_size == image.size:
+            break
+        image = image.resize(next_size, Image.Resampling.LANCZOS)
+    raise OSError("formal screenshot thumbnail exceeds the bounded payload")
 
 
 def _require_accepted_evidence(

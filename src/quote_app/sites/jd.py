@@ -56,6 +56,7 @@ from quote_app.sites.protocol import AdapterObservation, BrowserPage
 from quote_app.tasks.models import (
     BusinessOutcome,
     WebsiteChannel,
+    WebsiteObservationCheckpoint,
     WebsiteResult,
     WebsiteTask,
     url_contains_credentials,
@@ -200,6 +201,58 @@ class JDAdapter:
                 stage=stage[0],
             ) from error
 
+    def resume(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        checkpoint: WebsiteObservationCheckpoint,
+    ) -> AdapterObservation:
+        """Navigate straight to a saved item and fully revalidate its offer."""
+        self._validate_task(task)
+        if (
+            not isinstance(checkpoint, WebsiteObservationCheckpoint)
+            or checkpoint.task_id != task.task_id
+        ):
+            raise NonRetryableTechnicalError(
+                "RECOVERY_INVALID",
+                "京东恢复检查点与当前任务不一致",
+            )
+        browser_page = _playwright_page(page)
+        if checkpoint.outcome is BusinessOutcome.NO_MODEL:
+            return self._resume_no_model(task, browser_page, checkpoint.url)
+        return self._observe_detail(task, browser_page, checkpoint.url)
+
+    def _resume_no_model(
+        self,
+        task: WebsiteTask,
+        browser_page: Any,
+        search_url: str,
+    ) -> AdapterObservation:
+        browser_page.goto(search_url, wait_until="domcontentloaded")
+        browser_page.wait_for_load_state("domcontentloaded")
+        self._raise_if_authentication_blocked(browser_page)
+        self._wait_for_valid_store_search_url(
+            browser_page,
+            task.model_name,
+        )
+        self._require_approved_store(browser_page)
+        result_region = self._wait_for_result_region(browser_page)
+        result_search_input = self._validated_result_search_input(
+            browser_page,
+            task.model_name,
+        )
+        cards = visible_locators(result_region, JD_PRODUCT_CARDS)
+        if self._exact_product_cards(cards, task.model_name):
+            raise LayoutRecognitionError(
+                "JD exact product appeared during checkpoint recovery"
+            )
+        return self._no_model_observation(
+            task,
+            browser_page,
+            result_region,
+            result_search_input,
+        )
+
     def _observe_with_stage(
         self,
         task: WebsiteTask,
@@ -278,6 +331,14 @@ class JDAdapter:
                 base_url=browser_page.url,
             )
         stage[0] = "京东商品详情页"
+        return self._observe_detail(task, browser_page, detail_url)
+
+    def _observe_detail(
+        self,
+        task: WebsiteTask,
+        browser_page: Any,
+        detail_url: str,
+    ) -> AdapterObservation:
         browser_page.goto(detail_url, wait_until="domcontentloaded")
         browser_page.wait_for_load_state("domcontentloaded")
         self._raise_if_authentication_blocked(browser_page)
@@ -514,16 +575,51 @@ class JDAdapter:
         raise AssertionError("JD result-region readiness loop did not return")
 
     def _wait_for_detail_layout(self, page: Any) -> bool:
-        """Wait for either the approved modern or legacy detail title."""
+        """Wait for one detail layout and its exact approved seller identity."""
 
         for poll in range(_MAX_STORE_READY_POLLS):
             self._raise_if_authentication_blocked(page)
-            if visible_locators(page, JD_MODERN_DETAIL_TITLES):
-                return True
-            if visible_locators(page, JD_DETAIL_TITLES):
-                return False
+            modern_titles = visible_locators(page, JD_MODERN_DETAIL_TITLES)
+            legacy_titles = visible_locators(page, JD_DETAIL_TITLES)
+            if modern_titles and legacy_titles:
+                raise LayoutRecognitionError(
+                    "JD product detail layout is ambiguous"
+                )
+            if modern_titles:
+                sellers = visible_locators(
+                    page,
+                    JD_MODERN_DETAIL_SELLER_MARKERS,
+                )
+                if sellers:
+                    if (
+                        len(sellers) != 1
+                        or not sellers[0]
+                        .inner_text()
+                        .strip()
+                        .startswith(self.spec.store_name)
+                    ):
+                        raise LayoutRecognitionError(
+                            "JD modern product detail seller does not match "
+                            "the approved store"
+                        )
+                    return True
+            elif legacy_titles:
+                sellers = visible_locators(page, JD_DETAIL_SELLER_MARKERS)
+                if sellers:
+                    if (
+                        len(sellers) != 1
+                        or sellers[0].inner_text().strip()
+                        != self.spec.store_name
+                    ):
+                        raise LayoutRecognitionError(
+                            "JD product detail seller does not match the "
+                            "approved store"
+                        )
+                    return False
             if poll + 1 == _MAX_STORE_READY_POLLS:
-                raise LayoutRecognitionError("JD product detail title is missing")
+                raise LayoutRecognitionError(
+                    "JD product detail title or approved seller is missing"
+                )
             page.wait_for_timeout(_STORE_READY_INTERVAL_MS)
         raise AssertionError("JD detail-layout readiness loop did not return")
 

@@ -54,6 +54,7 @@ from quote_app.sites.protocol import AdapterObservation, BrowserPage
 from quote_app.tasks.models import (
     BusinessOutcome,
     WebsiteChannel,
+    WebsiteObservationCheckpoint,
     WebsiteResult,
     WebsiteTask,
     url_contains_credentials,
@@ -262,6 +263,14 @@ class TmallAdapter:
                 product_link.get_attribute("href"),
                 base_url=browser_page.url,
             )
+        return self._observe_detail(task, browser_page, detail_url)
+
+    def _observe_detail(
+        self,
+        task: WebsiteTask,
+        browser_page: Any,
+        detail_url: str,
+    ) -> AdapterObservation:
         browser_page.goto(detail_url, wait_until="domcontentloaded")
         browser_page.wait_for_load_state("domcontentloaded")
         self._raise_if_blocked_or_error(browser_page)
@@ -386,6 +395,59 @@ class TmallAdapter:
             url=browser_page.url,
             css_rectangles=(),
             semantic_state=semantic_state,
+        )
+
+    def resume(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        checkpoint: WebsiteObservationCheckpoint,
+    ) -> AdapterObservation:
+        """Navigate to the saved Tmall page and revalidate without store search."""
+        self._validate_task(task)
+        if (
+            not isinstance(checkpoint, WebsiteObservationCheckpoint)
+            or checkpoint.task_id != task.task_id
+        ):
+            raise NonRetryableTechnicalError(
+                "RECOVERY_INVALID",
+                "天猫恢复检查点与当前任务不一致",
+            )
+        browser_page = _playwright_page(page)
+        if checkpoint.outcome is BusinessOutcome.NO_MODEL:
+            return self._resume_no_model(task, browser_page, checkpoint.url)
+        return self._observe_detail(task, browser_page, checkpoint.url)
+
+    def _resume_no_model(
+        self,
+        task: WebsiteTask,
+        browser_page: Any,
+        search_url: str,
+    ) -> AdapterObservation:
+        browser_page.goto(search_url, wait_until="domcontentloaded")
+        browser_page.wait_for_load_state("domcontentloaded")
+        self._raise_if_blocked_or_error(browser_page)
+        _validate_store_search_url(
+            browser_page.url,
+            expected_host=_required_entry_host(self.spec.entry_url),
+            expected_model=task.model_name,
+        )
+        self._wait_for_approved_store(browser_page)
+        result_region = self._wait_for_result_region(browser_page)
+        result_search_input = self._validated_result_search_input(
+            browser_page,
+            task.model_name,
+        )
+        cards = visible_locators(result_region, TMALL_PRODUCT_CARDS)
+        if self._exact_product_cards(cards, task.model_name):
+            raise LayoutRecognitionError(
+                "Tmall exact product appeared during checkpoint recovery"
+            )
+        return self._no_model_observation(
+            task,
+            browser_page,
+            result_region,
+            result_search_input,
         )
 
     def verified_state_reader(

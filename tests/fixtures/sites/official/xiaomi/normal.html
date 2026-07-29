@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  <head><title>小米商城</title></head>
+  <body>
+    <main data-screen="store">
+      <span class="official-xiaomi-store">小米商城</span>
+      <div class="official-xiaomi-search">
+        <input class="official-xiaomi-search-input">
+        <button class="official-xiaomi-search-action" data-action="search">搜索</button>
+      </div>
+    </main>
+    <main data-screen="results" hidden>
+      <span class="official-xiaomi-store">小米商城</span>
+      <input class="official-xiaomi-search-input" value="小米 15" style="left:20px;top:20px;width:260px;height:32px">
+      <section class="official-xiaomi-results" style="left:10px;top:70px;width:780px;height:360px">
+        <article class="official-xiaomi-card">
+          <a class="official-xiaomi-product-link" href="https://www.mi.com/product/xiaomi-15">
+            <span class="official-xiaomi-product-title">小米 15</span>
+          </a>
+        </article>
+      </section>
+    </main>
+    <main data-screen="product" hidden>
+      <span class="official-xiaomi-seller">小米商城</span>
+      <h1 class="official-xiaomi-detail-title">小米 15</h1>
+      <section class="official-xiaomi-sku" data-current-sku="1001">
+        <div class="official-xiaomi-capacities">
+          <button class="official-xiaomi-option" data-option-kind="capacity" data-sku="1001" aria-selected="false">12GB + 256GB</button>
+        </div>
+        <div class="official-xiaomi-colors">
+          <button class="official-xiaomi-option" data-option-kind="color" data-sku="1001" data-context-sku="1001" aria-selected="false">黑色</button>
+        </div>
+      </section>
+      <section data-official-price-context="销售价">
+        <span class="official-xiaomi-price" data-sku="1001" style="color:rgb(0,0,0)">¥4,299</span>
+        <span class="official-xiaomi-price" data-sku="1001" style="color:rgb(255,0,0)">¥4,399</span>
+        <del style="text-decoration:line-through"><span class="official-xiaomi-price" data-sku="1001" style="color:rgb(255,0,0)">¥9,999</span></del>
+      </section>
+      <section data-official-price-context="最高可省">
+        <span class="official-xiaomi-price" data-sku="1001" style="color:rgb(255,0,0)">¥12,999</span>
+      </section>
+      <span class="official-xiaomi-region">福建 &gt; 福州 &gt; 台江</span>
+      <span class="official-xiaomi-stock" data-sku="1001" style="left:330px;top:210px;width:120px;height:36px">有货</span>
+    </main>
+  </body>
+</html>

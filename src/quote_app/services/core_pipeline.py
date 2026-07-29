@@ -13,11 +13,10 @@ from quote_app.excel.report_writer import (
     summarize_rows,
     write_execution_report,
 )
+from quote_app.resources import bundled_resource_path
 
 
-DEFAULT_TEMPLATE_PATH = (
-    Path(__file__).resolve().parents[3] / "resources" / "templates" / "quote_template.xlsx"
-)
+DEFAULT_TEMPLATE_PATH = bundled_resource_path("resources/templates/quote_template.xlsx")
 
 
 @dataclass(frozen=True, slots=True)

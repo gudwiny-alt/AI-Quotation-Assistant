@@ -284,6 +284,53 @@ def test_checkpoint_sink_receives_only_durable_stage_events_but_ui_receives_all(
     assert len(snapshots) == 5
 
 
+def test_checkpoint_event_updates_only_its_task_after_one_initial_snapshot_scan(
+    tmp_path: Path,
+) -> None:
+    """Break caught: every one of 1,800 stage events scans all 900 tasks again."""
+    from quote_app.services import web_run
+
+    tasks = tuple(
+        _task(f"task-{index}", output_row=index + 2)
+        for index in range(900)
+    )
+    load_calls = {"observation": 0, "result": 0, "state": 0}
+
+    class Repository:
+        def load_observation(self, _task_id: str) -> None:
+            load_calls["observation"] += 1
+            return None
+
+        def load_result(self, _task_id: str) -> None:
+            load_calls["result"] += 1
+            return None
+
+        def task_state(self, _task_id: str) -> TaskState:
+            load_calls["state"] += 1
+            return TaskState.PENDING
+
+    snapshots: list[object] = []
+    request = web_run.WebsiteRunRequest(
+        run_id="run-1",
+        tasks=tasks,
+        profile_dir=tmp_path / "profile",
+        evidence_dir=tmp_path / "evidence",
+        database_path=tmp_path / "state.sqlite3",
+        checkpoint_sink=snapshots.append,
+    )
+    sink = web_run._event_sink_for_request(request, Repository())
+    assert sink is not None
+    after_initial_scan = dict(load_calls)
+
+    sink(WorkerEvent("observation", "run-1", tasks[-1].task_id, {}))
+
+    assert {
+        key: load_calls[key] - after_initial_scan[key]
+        for key in load_calls
+    } == {"observation": 1, "result": 1, "state": 1}
+    assert len(snapshots) == 1
+
+
 def test_checkpoint_failure_does_not_prevent_ui_event_delivery(tmp_path: Path) -> None:
     """Break caught: a failed partial publish hides a durable UI progress event."""
     from quote_app.services import web_run

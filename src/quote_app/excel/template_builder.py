@@ -65,4 +65,4 @@ def build_template(source: Path, destination: Path) -> None:
 
 def load_clean_template(path: Path) -> Workbook:
     """Load a clean quotation template as an editable workbook."""
-    return load_workbook(path, data_only=False)
+    return load_workbook(path, data_only=False, keep_links=False)
