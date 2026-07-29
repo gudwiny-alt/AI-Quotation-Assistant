@@ -10,7 +10,7 @@ All paths that need both scheduler locks now acquire `_run_lock` before `_manual
 
 ## Commit
 
-Pending commit creation.
+`f1905e6 fix: retry capture context and lock ordering`.
 
 ## Concerns
 

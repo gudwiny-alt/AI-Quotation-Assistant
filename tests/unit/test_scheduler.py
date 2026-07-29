@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
@@ -86,6 +87,7 @@ def _task(
     *,
     channel: WebsiteChannel,
     output_row: int,
+    brand: str = "小米",
 ) -> WebsiteTask:
     return WebsiteTask(
         task_id=task_id,
@@ -93,7 +95,7 @@ def _task(
         source_row_number=output_row,
         output_row_number=output_row,
         material_code=f"CODE-{output_row}",
-        brand="小米",
+        brand=brand,
         model_name="小米 15",
         ram="12GB",
         storage="256GB",
@@ -318,7 +320,7 @@ def test_login_attempt_is_parked_without_using_three_attempt_technical_budget(
     ]
 
 
-def test_login_site_is_parked_while_other_sites_continue(
+def test_login_site_pauses_before_any_later_site_is_attempted(
     repository: SQLiteTaskRepository,
     tmp_path: Path,
 ) -> None:
@@ -340,14 +342,17 @@ def test_login_site_is_parked_while_other_sites_continue(
 
     scheduler.run_until_idle()
 
-    assert visited == ["tmall", "jd", "official"]
+    assert visited == ["tmall"]
     assert repository.task_state("tmall") is TaskState.WAITING_FOR_LOGIN
-    assert repository.task_state("jd") is TaskState.SUCCEEDED
-    assert repository.task_state("official") is TaskState.SUCCEEDED
+    assert repository.task_state("jd") is TaskState.PENDING
+    assert repository.task_state("official") is TaskState.PENDING
     assert scheduler.waiting_for_site("天猫") == (tasks[0],)
+    assert scheduler.waiting_action is not None
+    assert scheduler.waiting_action.task == tasks[0]
+    assert scheduler.waiting_action.reason == "需要登录"
 
 
-def test_all_tasks_waiting_for_the_same_site_are_discoverable(
+def test_login_pause_keeps_later_same_site_task_pending(
     repository: SQLiteTaskRepository,
 ) -> None:
     tasks = (
@@ -365,7 +370,37 @@ def test_all_tasks_waiting_for_the_same_site_are_discoverable(
     )
     scheduler.run_until_idle()
 
-    assert scheduler.waiting_for_site("天猫") == tasks
+    assert scheduler.waiting_for_site("天猫") == (tasks[0],)
+    assert repository.task_state(tasks[1].task_id) is TaskState.PENDING
+
+
+def test_continue_current_task_retries_waiting_task_before_later_tasks(
+    repository: SQLiteTaskRepository,
+    tmp_path: Path,
+) -> None:
+    tasks = (
+        _task("tmall", channel=WebsiteChannel.TMALL, output_row=2),
+        _task("jd", channel=WebsiteChannel.JD, output_row=3),
+    )
+    _seed(repository, *tasks)
+    attempts: list[str] = []
+
+    def attempt(task, _token, _control):
+        attempts.append(task.task_id)
+        if task.task_id == "tmall" and attempts.count("tmall") == 1:
+            raise LoginRequired("天猫", "需要登录")
+        return _success(tmp_path, task)
+
+    scheduler = BrowserTaskScheduler(repository, "run-1", attempt)
+    scheduler.run_until_idle()
+
+    scheduler.continue_current_task()
+    scheduler.run_until_idle()
+
+    assert attempts == ["tmall", "tmall", "jd"]
+    assert scheduler.waiting_action is None
+    assert repository.task_state("tmall") is TaskState.SUCCEEDED
+    assert repository.task_state("jd") is TaskState.SUCCEEDED
 
 
 def test_manual_login_mode_globally_pauses_attempts_and_requeues_only_its_site(
@@ -429,7 +464,7 @@ def test_manual_login_foreground_failure_rolls_back_mode_without_requeueing(
     assert scheduler.control.manual_site is None
     assert repository.task_state(tmall.task_id) is TaskState.WAITING_FOR_LOGIN
     scheduler.run_until_idle()
-    assert repository.task_state(jd.task_id) is TaskState.SUCCEEDED
+    assert repository.task_state(jd.task_id) is TaskState.PENDING
 
 
 def test_manual_login_pauses_active_attempt_before_waiting_for_foreground_lock(
@@ -559,7 +594,7 @@ def test_confirming_login_while_still_logged_out_parks_once_without_busy_loop(
     assert len(repository.list_attempts(task.task_id)) == 2
 
 
-def test_restart_keeps_waiting_tasks_and_runs_unrelated_pending_work(
+def test_restart_restores_global_manual_pause_until_exact_task_is_continued(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "state.sqlite3"
@@ -582,9 +617,243 @@ def test_restart_keeps_waiting_tasks_and_runs_unrelated_pending_work(
         )
         scheduler.run_until_idle()
 
-        assert visited == ["jd"]
+        assert visited == []
+        assert scheduler.waiting_action is not None
+        assert scheduler.waiting_action.task == tmall
+        assert scheduler.waiting_action.site == "天猫"
         assert reopened.task_state(tmall.task_id) is TaskState.WAITING_FOR_LOGIN
+        assert reopened.task_state(jd.task_id) is TaskState.PENDING
+
+        scheduler.continue_current_task()
+        scheduler.run_until_idle()
+
+        assert visited == ["tmall", "jd"]
+        assert reopened.task_state(tmall.task_id) is TaskState.SUCCEEDED
         assert reopened.task_state(jd.task_id) is TaskState.SUCCEEDED
+
+
+@pytest.mark.parametrize(
+    ("second_channel", "second_site"),
+    [
+        (WebsiteChannel.TMALL, "天猫"),
+        (WebsiteChannel.JD, "京东"),
+    ],
+    ids=("same-site", "different-site"),
+)
+def test_restart_rejects_multiple_waiting_tasks_without_requeueing_any(
+    tmp_path: Path,
+    second_channel: WebsiteChannel,
+    second_site: str,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    first = _task("first", channel=WebsiteChannel.TMALL, output_row=2)
+    second = _task("second", channel=second_channel, output_row=3)
+    pending = _task("pending", channel=WebsiteChannel.OFFICIAL, output_row=4)
+    with SQLiteTaskRepository(database) as original:
+        original.create_run(_run(tmp_path))
+        _seed(original, first, second, pending)
+        for task, site in ((first, "天猫"), (second, second_site)):
+            token = original.start_attempt(task.task_id)
+            original.mark_waiting_for_login(
+                task.task_id,
+                token=token,
+                site=site,
+            )
+
+    with SQLiteTaskRepository(database) as reopened:
+        scheduler = BrowserTaskScheduler(
+            reopened,
+            "run-1",
+            lambda *_args: pytest.fail("invalid wait state must stay paused"),
+        )
+
+        with pytest.raises(RepositoryError, match="等待人工处理"):
+            scheduler.run_until_idle()
+
+        assert scheduler.waiting_action is None
+        assert scheduler.control.manual_site is None
+        with pytest.raises(ValueError, match="当前没有等待"):
+            scheduler.continue_current_task()
+        assert reopened.select_waiting("run-1") == (first, second)
+        assert reopened.task_state(pending.task_id) is TaskState.PENDING
+
+
+def test_restart_rejects_blank_waiting_site_without_requeueing_task(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    task = _task("tmall", channel=WebsiteChannel.TMALL, output_row=2)
+    with SQLiteTaskRepository(database) as original:
+        original.create_run(_run(tmp_path))
+        _seed(original, task)
+        token = original.start_attempt(task.task_id)
+        original.mark_waiting_for_login(
+            task.task_id,
+            token=token,
+            site="天猫",
+        )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE website_tasks SET waiting_site = ' ' WHERE task_id = ?",
+            (task.task_id,),
+        )
+
+    with SQLiteTaskRepository(database) as reopened:
+        scheduler = BrowserTaskScheduler(
+            reopened,
+            "run-1",
+            lambda *_args: pytest.fail("invalid wait state must stay paused"),
+        )
+
+        with pytest.raises(RepositoryError, match="缺少站点信息"):
+            scheduler.run_until_idle()
+
+        assert scheduler.waiting_action is None
+        assert scheduler.control.manual_site is None
+        assert reopened.select_waiting("run-1") == (task,)
+        assert reopened.task_state(task.task_id) is TaskState.WAITING_FOR_LOGIN
+
+
+def test_continue_rejects_changed_waiting_identity_without_requeueing_replacement(
+    repository: SQLiteTaskRepository,
+) -> None:
+    original = _task("original", channel=WebsiteChannel.TMALL, output_row=2)
+    replacement = _task("replacement", channel=WebsiteChannel.TMALL, output_row=3)
+    _seed(repository, original, replacement)
+    scheduler = BrowserTaskScheduler(
+        repository,
+        "run-1",
+        lambda *_args: (_ for _ in ()).throw(
+            LoginRequired("天猫", "需要登录")
+        ),
+    )
+    scheduler.run_until_idle()
+    assert scheduler.waiting_action is not None
+    assert scheduler.waiting_action.task == original
+
+    repository.requeue_waiting_site("run-1", "天猫")
+    token = repository.start_attempt(replacement.task_id)
+    repository.mark_waiting_for_login(
+        replacement.task_id,
+        token=token,
+        site="天猫",
+    )
+
+    with pytest.raises(RepositoryError, match="状态已变化"):
+        scheduler.continue_current_task()
+
+    assert scheduler.waiting_action is not None
+    assert scheduler.waiting_action.task == original
+    assert scheduler.control.manual_site == "天猫"
+    assert repository.task_state(original.task_id) is TaskState.PENDING
+    assert (
+        repository.task_state(replacement.task_id)
+        is TaskState.WAITING_FOR_LOGIN
+    )
+
+
+def test_stale_manual_action_cannot_resume_newer_attempt_of_same_task(
+    repository: SQLiteTaskRepository,
+) -> None:
+    task = _task("tmall", channel=WebsiteChannel.TMALL, output_row=2)
+    _seed(repository, task)
+    scheduler = BrowserTaskScheduler(
+        repository,
+        "run-1",
+        lambda *_args: (_ for _ in ()).throw(
+            LoginRequired("天猫", "需要登录")
+        ),
+    )
+    scheduler.run_until_idle()
+    stale_action = scheduler.waiting_action
+    assert stale_action is not None
+    assert repository.attempt_count(task.task_id) == 1
+
+    repository.requeue_waiting_site("run-1", "天猫")
+    newer_token = repository.start_attempt(task.task_id)
+    repository.mark_waiting_for_login(
+        task.task_id,
+        token=newer_token,
+        site="天猫",
+    )
+
+    with pytest.raises(RepositoryError, match="状态已变化"):
+        scheduler.continue_current_task()
+
+    assert scheduler.waiting_action is stale_action
+    assert scheduler.control.manual_site == "天猫"
+    assert not scheduler.control.automated_work_allowed
+    assert repository.task_state(task.task_id) is TaskState.WAITING_FOR_LOGIN
+    assert repository.waiting_site(task.task_id) == "天猫"
+    assert repository.task_generation(task.task_id) == 0
+    assert repository.attempt_count(task.task_id) == 2
+
+
+def test_stale_manual_action_cannot_resume_higher_generation_of_same_task(
+    repository: SQLiteTaskRepository,
+) -> None:
+    task = _task("tmall", channel=WebsiteChannel.TMALL, output_row=2)
+    _seed(repository, task)
+    scheduler = BrowserTaskScheduler(
+        repository,
+        "run-1",
+        lambda *_args: (_ for _ in ()).throw(
+            LoginRequired("天猫", "需要登录")
+        ),
+    )
+    scheduler.run_until_idle()
+    stale_action = scheduler.waiting_action
+    assert stale_action is not None
+
+    repository.requeue_waiting_site("run-1", "天猫")
+    repository.upsert_task(task, generation=1)
+    newer_token = repository.start_attempt(task.task_id)
+    repository.mark_waiting_for_login(
+        task.task_id,
+        token=newer_token,
+        site="天猫",
+    )
+
+    with pytest.raises(RepositoryError, match="状态已变化"):
+        scheduler.continue_current_task()
+
+    assert scheduler.waiting_action is stale_action
+    assert scheduler.control.manual_site == "天猫"
+    assert not scheduler.control.automated_work_allowed
+    assert repository.task_state(task.task_id) is TaskState.WAITING_FOR_LOGIN
+    assert repository.waiting_site(task.task_id) == "天猫"
+    assert repository.task_generation(task.task_id) == 1
+    assert repository.attempt_count(task.task_id) == 1
+
+
+def test_continue_rejects_multiple_same_site_waits_without_requeueing_any(
+    repository: SQLiteTaskRepository,
+) -> None:
+    original = _task("original", channel=WebsiteChannel.TMALL, output_row=2)
+    second = _task("second", channel=WebsiteChannel.TMALL, output_row=3)
+    _seed(repository, original, second)
+    scheduler = BrowserTaskScheduler(
+        repository,
+        "run-1",
+        lambda *_args: (_ for _ in ()).throw(
+            LoginRequired("天猫", "需要登录")
+        ),
+    )
+    scheduler.run_until_idle()
+    token = repository.start_attempt(second.task_id)
+    repository.mark_waiting_for_login(
+        second.task_id,
+        token=token,
+        site="天猫",
+    )
+
+    with pytest.raises(RepositoryError, match="状态已变化"):
+        scheduler.continue_current_task()
+
+    assert scheduler.waiting_action is not None
+    assert scheduler.waiting_action.task == original
+    assert scheduler.control.manual_site == "天猫"
+    assert repository.select_waiting("run-1") == (original, second)
 
 
 def test_pause_during_retry_delay_leaves_retryable_failure_resumable(
@@ -893,7 +1162,7 @@ def test_progress_event_sink_failure_does_not_skip_callback_or_later_channels(
     assert "secret" not in repr(scheduler.event_errors)
 
 
-def test_waiting_event_sink_failure_keeps_site_parked_and_continues(
+def test_waiting_event_sink_failure_keeps_site_parked_without_advancing_queue(
     repository: SQLiteTaskRepository,
     tmp_path: Path,
 ) -> None:
@@ -920,7 +1189,7 @@ def test_waiting_event_sink_failure_keeps_site_parked_and_continues(
     scheduler.run_until_idle()
 
     assert repository.task_state(tmall.task_id) is TaskState.WAITING_FOR_LOGIN
-    assert repository.task_state(jd.task_id) is TaskState.SUCCEEDED
+    assert repository.task_state(jd.task_id) is TaskState.PENDING
     assert [error.event for error in scheduler.event_errors] == [
         "waiting_for_login"
     ]
@@ -1134,3 +1403,41 @@ def test_one_scheduler_serializes_foreground_attempts_across_concurrent_callers(
         repository.task_state(task.task_id) is TaskState.SUCCEEDED
         for task in tasks
     )
+
+
+@pytest.mark.parametrize("requeue", ["continue", "confirm"])
+def test_waiting_publication_and_manual_requeue_complete_without_lock_cycle(
+    repository: SQLiteTaskRepository,
+    requeue: str,
+) -> None:
+    task = _task("waiting-race", channel=WebsiteChannel.TMALL, output_row=2)
+    _seed(repository, task)
+    published = threading.Event()
+    started = threading.Barrier(2)
+
+    def attempt(_task, _token, _control):
+        started.wait(timeout=1)
+        raise LoginRequired("天猫", "需要登录")
+
+    def sink(event: WorkerEvent) -> None:
+        if event.event == "waiting_for_login":
+            published.set()
+
+    scheduler = BrowserTaskScheduler(repository, "run-1", attempt, event_sink=sink)
+    worker = threading.Thread(target=scheduler.run_until_idle)
+    worker.start()
+    started.wait(timeout=1)
+    assert published.wait(1)
+
+    if requeue == "continue":
+        recovery = threading.Thread(target=scheduler.continue_current_task)
+    else:
+        recovery = threading.Thread(target=lambda: scheduler.confirm_manual_login("天猫"))
+    recovery.start()
+    recovery.join(timeout=1)
+    worker.join(timeout=1)
+
+    assert not recovery.is_alive()
+    assert not worker.is_alive()
+    assert repository.task_state(task.task_id) is TaskState.PENDING
+    assert repository.waiting_site(task.task_id) is None
