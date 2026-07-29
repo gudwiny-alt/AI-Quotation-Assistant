@@ -6,8 +6,17 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from quote_app.browser.worker import JsonValue, WorkerEvent
-from quote_app.tasks.models import TaskState, WebsiteResult, WebsiteTask
-from quote_app.tasks.repository import AttemptToken, SQLiteTaskRepository
+from quote_app.tasks.models import (
+    TaskState,
+    WebsiteObservationCheckpoint,
+    WebsiteResult,
+    WebsiteTask,
+)
+from quote_app.tasks.repository import (
+    AttemptToken,
+    RepositoryError,
+    SQLiteTaskRepository,
+)
 from quote_app.tasks.retry import (
     LoginRequired,
     NonRetryableTechnicalError,
@@ -36,7 +45,7 @@ EventSink = Callable[[WorkerEvent], None]
 ManualLoginCallback = Callable[[str], None]
 TaskSortKey = Callable[
     [WebsiteTask],
-    tuple[str, str, str, str, str, str, int],
+    tuple[str | int, ...],
 ]
 TaskSiteResolver = Callable[[WebsiteTask], str]
 
@@ -46,6 +55,30 @@ class EventDeliveryError:
     event: str
     task_id: str
     error_code: str = "EVENT_SINK_ERROR"
+
+
+@dataclass(frozen=True, slots=True)
+class ManualActionEvent:
+    """One browser task paused on its visible login or verification page."""
+
+    task: WebsiteTask
+    token: AttemptToken
+    site: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, WebsiteTask):
+            raise ValueError("manual action task must be WebsiteTask")
+        if (
+            not isinstance(self.token, AttemptToken)
+            or self.token.task_id != self.task.task_id
+        ):
+            raise ValueError("manual action token must belong to task")
+        for field_name in ("site", "reason"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"manual action {field_name} must be nonblank")
+            object.__setattr__(self, field_name, value.strip())
 
 
 class ManualLoginError(RuntimeError):
@@ -67,6 +100,7 @@ class BrowserTaskScheduler:
         manual_login_callback: ManualLoginCallback | None = None,
         task_sort_key: TaskSortKey | None = None,
         task_site_resolver: TaskSiteResolver | None = None,
+        stop_after_brand_issue: bool = False,
     ) -> None:
         if not isinstance(repository, SQLiteTaskRepository):
             raise ValueError("repository must be a SQLiteTaskRepository")
@@ -80,6 +114,8 @@ class BrowserTaskScheduler:
             task_site_resolver
         ):
             raise ValueError("task_site_resolver must be callable")
+        if type(stop_after_brand_issue) is not bool:
+            raise ValueError("stop_after_brand_issue must be a bool")
         self.repository = repository
         self.run_id = run_id.strip()
         self.attempt_callback = attempt_callback
@@ -90,24 +126,39 @@ class BrowserTaskScheduler:
         self.manual_login_callback = manual_login_callback
         self.task_sort_key = task_sort_key
         self.task_site_resolver = task_site_resolver
+        self.stop_after_brand_issue = stop_after_brand_issue
         self._run_lock = threading.Lock()
         self._manual_lock = threading.Lock()
+        self._waiting_action: ManualActionEvent | None = None
+
+    @property
+    def waiting_action(self) -> ManualActionEvent | None:
+        with self._manual_lock:
+            return self._waiting_action
 
     def run_until_idle(self) -> None:
+        self._restore_waiting_action()
         with self._run_lock:
             while self.control.automated_work_allowed:
                 tasks = self._eligible_tasks()
                 if not tasks:
                     return
+                selected_tasks = self._select_brand_batch(tasks)
                 made_progress = False
-                for task in tasks:
+                for task in selected_tasks:
                     if not self.control.automated_work_allowed:
                         return
                     if self._site_is_waiting(task):
                         continue
                     if self._run_task(task):
                         made_progress = True
+                    if self.waiting_action is not None:
+                        return
                 if not made_progress:
+                    return
+                if self.stop_after_brand_issue and self._brand_has_issue(
+                    selected_tasks
+                ):
                     return
 
     def waiting_for_site(self, site: str) -> tuple[WebsiteTask, ...]:
@@ -119,15 +170,14 @@ class BrowserTaskScheduler:
             active_site = self.control.manual_site
             if active_site is None:
                 raise AssertionError("manual login site was not retained")
-            try:
-                with self._run_lock:
-                    if self.manual_login_callback is not None:
-                        self.manual_login_callback(active_site)
-            except Exception:
+        try:
+            with self._run_lock:
+                if self.manual_login_callback is not None:
+                    self.manual_login_callback(active_site)
+        except Exception:
+            with self._manual_lock:
                 self.control.cancel_manual_login(active_site)
-                raise ManualLoginError(
-                    "无法进入人工登录模式，请重试"
-                ) from None
+            raise ManualLoginError("无法进入人工登录模式，请重试") from None
 
     def confirm_manual_login(self, site: str) -> tuple[WebsiteTask, ...]:
         normalized_site = _normalized_site(site)
@@ -141,7 +191,39 @@ class BrowserTaskScheduler:
             self.control.confirm_manual_login(normalized_site)
             return requeued
 
+    def continue_current_task(self) -> tuple[WebsiteTask, ...]:
+        """Requeue the exact site paused by the automatic browser attempt."""
+        with self._manual_lock, self._run_lock:
+            action = self._waiting_action
+            if action is None:
+                raise ValueError("当前没有等待人工处理的网站任务")
+            if self.control.manual_site != action.site:
+                raise AssertionError("manual action site does not match scheduler control")
+            requeued_task = self.repository.requeue_exact_waiting_task(
+                self.run_id,
+                action.task,
+                action.site,
+                expected_token=action.token,
+            )
+            self.control.confirm_manual_login(action.site)
+            self._waiting_action = None
+            return (requeued_task,)
+
+    def cancel_manual_action(self) -> bool:
+        """Stop this scheduler while preserving the durable waiting task."""
+        with self._manual_lock:
+            action = self._waiting_action
+            if action is None:
+                return False
+            if not self.control.cancel_manual_login(action.site):
+                raise AssertionError("manual action site does not match scheduler control")
+            self._waiting_action = None
+            self.control.request_stop()
+            return True
+
     def _eligible_tasks(self) -> tuple[WebsiteTask, ...]:
+        if self.repository.select_waiting(self.run_id):
+            return ()
         pending = self.repository.select_pending(self.run_id)
         failed = tuple(
             task
@@ -163,6 +245,36 @@ class BrowserTaskScheduler:
             return tuple(sorted(tasks, key=self.task_sort_key))
         return tasks
 
+    def _restore_waiting_action(self) -> None:
+        with self._manual_lock:
+            if self._waiting_action is not None or self.control.manual_site is not None:
+                return
+            waiting = self.repository.select_waiting(self.run_id)
+            if not waiting:
+                return
+            if len(waiting) != 1:
+                raise RepositoryError(
+                    "等待人工处理的任务状态已变化，请重新开始报价"
+                )
+            task = waiting[0]
+            site = self.repository.waiting_site(task.task_id)
+            if site is None:
+                raise RepositoryError(
+                    "等待人工处理的任务状态已变化，请重新开始报价"
+                )
+            token = self.repository.waiting_attempt_token(task.task_id)
+            if token is None:
+                raise RepositoryError(
+                    "等待人工处理的任务状态已变化，请重新开始报价"
+                )
+            self.control.enter_manual_login(site)
+            self._waiting_action = ManualActionEvent(
+                task=task,
+                token=token,
+                site=site,
+                reason="等待人工登录或安全验证",
+            )
+
     def _site_is_waiting(self, task: WebsiteTask) -> bool:
         if self.task_site_resolver is None:
             return False
@@ -170,6 +282,21 @@ class BrowserTaskScheduler:
         return any(
             self._task_site(waiting) == site
             for waiting in self.repository.select_waiting(self.run_id)
+        )
+
+    def _select_brand_batch(
+        self, tasks: tuple[WebsiteTask, ...]
+    ) -> tuple[WebsiteTask, ...]:
+        if not self.stop_after_brand_issue:
+            return tasks
+        current_brand = tasks[0].brand
+        return tuple(task for task in tasks if task.brand == current_brand)
+
+    def _brand_has_issue(self, tasks: tuple[WebsiteTask, ...]) -> bool:
+        blocking_states = {TaskState.TECHNICAL_FAILURE, TaskState.WAITING_FOR_LOGIN}
+        return any(
+            self.repository.task_state(task.task_id) in blocking_states
+            for task in tasks
         )
 
     def _task_site(self, task: WebsiteTask) -> str:
@@ -312,6 +439,16 @@ class BrowserTaskScheduler:
             token=token,
             site=error.site,
         )
+        self.control.enter_manual_login(error.site)
+        with self._manual_lock:
+            if self._waiting_action is not None:
+                raise AssertionError("only one manual action may be active")
+            self._waiting_action = ManualActionEvent(
+                task=task,
+                token=token,
+                site=error.site,
+                reason=error.reason,
+            )
         condition = (
             "security_verification"
             if isinstance(error, SecurityVerificationRequired)
@@ -375,6 +512,24 @@ class BrowserTaskScheduler:
                 "error_code": code,
                 "retryable": retryable,
                 "retry_remaining": retry_remaining,
+            },
+        )
+
+    def publish_observation(
+        self,
+        task: WebsiteTask,
+        checkpoint: WebsiteObservationCheckpoint,
+    ) -> None:
+        self._emit(
+            "observation",
+            task.task_id,
+            {
+                "outcome": checkpoint.outcome.value,
+                "price": (
+                    str(checkpoint.price)
+                    if checkpoint.price is not None
+                    else None
+                ),
             },
         )
 

@@ -2,25 +2,40 @@ from __future__ import annotations
 
 import hashlib
 import math
+import platform as host_platform
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
 from quote_app.evidence.geometry import CssRect
-from quote_app.evidence.models import EvidenceRecord, EvidenceState
+from quote_app.evidence.models import (
+    EvidenceRecord,
+    EvidenceState,
+    MacCapturePolicy,
+    validate_mac_capture_policy,
+)
+from quote_app.evidence.validation import read_validated_evidence
 from quote_app.evidence.platform import (
     BrowserWindowIdentity,
+    CaptureContext,
     CaptureRequest,
     PlatformEvidenceCapture,
 )
 from quote_app.evidence.quality import SemanticHashProbe
+from quote_app.evidence.semantic_state import VerifiedSemanticState
+from quote_app.sites.protocol import AdapterObservation, SiteObservationAdapter
+from quote_app.sites.catalog import site_session_family
+from quote_app.sites.registry import AdapterRegistry
 from quote_app.tasks.models import (
     BusinessOutcome,
     TaskState,
+    WebsiteChannel,
     WebsiteResult,
+    WebsiteObservationCheckpoint,
     WebsiteTask,
 )
 from quote_app.tasks.repository import (
@@ -56,6 +71,21 @@ _OUTCOME_ROLES = {
     BusinessOutcome.COLOR_UNAVAILABLE: ("color",),
     BusinessOutcome.SOLD_OUT: ("stock_status",),
 }
+_AUTOMATION_PAGE_KEY = "quotation-automation"
+_CHANNEL_EXECUTION_PRIORITY = {
+    WebsiteChannel.OFFICIAL: 0,
+    WebsiteChannel.JD: 1,
+    WebsiteChannel.TMALL: 2,
+}
+_CAPTURE_RETRY_CODES = frozenset(
+    {
+        "CAPTURE_FOREGROUND",
+        "CAPTURE_UNSTABLE",
+        "CAPTURE_OBSCURED",
+        "CAPTURE_GEOMETRY",
+        "CAPTURE_FAILED",
+    }
+)
 
 
 class BrowserPageSession(Protocol):
@@ -72,6 +102,10 @@ class FixtureAdapter(Protocol):
 
 DiagnosticCapture = Callable[[WebsiteTask, BaseException, Path], Path | None]
 SiteFamilyResolver = Callable[[WebsiteTask], str]
+CaptureContextProvider = Callable[
+    [WebsiteTask, Any, VerifiedSemanticState],
+    CaptureContext,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,9 +182,11 @@ class WebsiteTaskRunner:
         repository: SQLiteTaskRepository,
         run_id: str,
         browser_session: BrowserPageSession,
-        adapter: FixtureAdapter,
         evidence_capture: PlatformEvidenceCapture,
         evidence_dir: Path,
+        adapter: FixtureAdapter | None = None,
+        adapter_registry: AdapterRegistry | None = None,
+        capture_context_provider: CaptureContextProvider | None = None,
         diagnostic_capture: DiagnosticCapture | None = None,
         retry_policy: RetryPolicy | None = None,
         control: SchedulerControl | None = None,
@@ -158,6 +194,8 @@ class WebsiteTaskRunner:
         manual_login_callback: ManualLoginCallback | None = None,
         site_family_resolver: SiteFamilyResolver | None = None,
         minimum_stability_interval_seconds: float = 0.15,
+        capture_acceptance_policy: MacCapturePolicy = MacCapturePolicy.STRICT,
+        stop_after_brand_issue: bool = False,
     ) -> None:
         if not isinstance(repository, SQLiteTaskRepository):
             raise ValueError("repository must be SQLiteTaskRepository")
@@ -165,12 +203,32 @@ class WebsiteTaskRunner:
             raise ValueError("run_id must not be blank")
         if not callable(getattr(browser_session, "page_for", None)):
             raise ValueError("browser_session must provide page_for")
-        if not callable(adapter):
-            raise ValueError("adapter must be callable")
+        if (adapter is None) == (adapter_registry is None):
+            raise ValueError("exactly one of adapter or adapter_registry is required")
+        if adapter is not None:
+            if not callable(adapter):
+                raise ValueError("adapter must be callable")
+            if capture_context_provider is not None:
+                raise ValueError(
+                    "capture_context_provider is only valid with adapter_registry"
+                )
+        else:
+            if not isinstance(adapter_registry, AdapterRegistry):
+                raise ValueError("adapter_registry must be an AdapterRegistry")
+            if not callable(capture_context_provider):
+                raise ValueError(
+                    "adapter_registry requires a callable capture_context_provider"
+                )
         if not callable(getattr(evidence_capture, "capture", None)):
             raise ValueError("evidence_capture must provide capture")
+        validate_mac_capture_policy(
+            capture_acceptance_policy,
+            platform_name=host_platform.system(),
+        )
         if not isinstance(evidence_dir, Path):
             raise ValueError("evidence_dir must be a Path")
+        if type(stop_after_brand_issue) is not bool:
+            raise ValueError("stop_after_brand_issue must be a bool")
         if diagnostic_capture is not None and not callable(diagnostic_capture):
             raise ValueError("diagnostic_capture must be callable")
         if manual_login_callback is not None and not callable(
@@ -194,7 +252,10 @@ class WebsiteTaskRunner:
         self.run_id = run_id.strip()
         self.browser_session = browser_session
         self.adapter = adapter
+        self.adapter_registry = adapter_registry
+        self.capture_context_provider = capture_context_provider
         self.evidence_capture = evidence_capture
+        self.capture_acceptance_policy = capture_acceptance_policy
         self.evidence_dir = evidence_dir.expanduser().resolve()
         self.diagnostic_capture = diagnostic_capture
         self.site_family_resolver = (
@@ -215,6 +276,7 @@ class WebsiteTaskRunner:
             manual_login_callback=self._prepare_manual_login,
             task_sort_key=task_sort_key,
             task_site_resolver=self.site_family_resolver,
+            stop_after_brand_issue=stop_after_brand_issue,
         )
 
     @property
@@ -267,25 +329,28 @@ class WebsiteTaskRunner:
                 site_family = self.site_family_resolver(task)
                 if not isinstance(site_family, str) or not site_family.strip():
                     raise ValueError("site family resolver returned invalid data")
-                page = self.browser_session.page_for(site_family.strip())
-                observation = self.adapter(task, page)
-                if not isinstance(observation, FixtureObservation):
-                    raise ValueError(
-                        "adapter returned an invalid observation"
-                    )
-                request = CaptureRequest(
-                    destination=destination,
-                    state=_OUTCOME_STATES[observation.outcome],
-                    css_rectangles=observation.css_rectangles,
-                    expected_roles=observation.expected_roles,
-                    expected_window=observation.expected_window,
-                    stability_probe=observation.stability_probe,
-                    minimum_stability_interval_seconds=(
-                        self.minimum_stability_interval_seconds
-                    ),
+                self._close_unassigned_pages()
+                page = self._automation_page()
+                observation: FixtureObservation | AdapterObservation
+                if self.adapter_registry is None:
+                    observation = self._fixture_observation(task, page)
+                else:
+                    observation = self._site_observation(task, page)
+                checkpoint = WebsiteObservationCheckpoint(
+                    task_id=task.task_id,
+                    outcome=observation.outcome,
+                    price=observation.price,
+                    url=observation.url,
+                    observed_at=datetime.now(timezone.utc),
                 )
-                evidence = self.evidence_capture.capture(request)
-                _require_validated_formal_evidence(evidence, request)
+                self.repository.save_observation(checkpoint, token=token)
+                self.scheduler.publish_observation(task, checkpoint)
+                evidence = self._capture_current_observation(
+                    task,
+                    page,
+                    observation,
+                    destination,
+                )
                 return WebsiteResult(
                     task_id=task.task_id,
                     state=TaskState.SUCCEEDED,
@@ -352,6 +417,115 @@ class WebsiteTaskRunner:
                     error_message=classified.message,
                 )
 
+    def _fixture_observation(
+        self,
+        task: WebsiteTask,
+        page: Any,
+    ) -> FixtureObservation:
+        if self.adapter is None:
+            raise AssertionError("legacy adapter is unavailable")
+        observation = self.adapter(task, page)
+        if not isinstance(observation, FixtureObservation):
+            raise ValueError("adapter returned an invalid observation")
+        return observation
+
+    def _site_observation(
+        self,
+        task: WebsiteTask,
+        page: Any,
+    ) -> AdapterObservation:
+        if self.adapter_registry is None:
+            raise AssertionError("registry observation dependencies are unavailable")
+        adapter = self.adapter_registry.adapter_for(task.brand, task.channel)
+        if not isinstance(adapter, SiteObservationAdapter):
+            raise ValueError("registry adapter must provide observe")
+        observation = adapter.observe(task, page)
+        if not isinstance(observation, AdapterObservation):
+            raise ValueError("registry adapter returned an invalid observation")
+        observation = AdapterObservation(
+            outcome=observation.outcome,
+            price=observation.price,
+            url=observation.url,
+            css_rectangles=observation.css_rectangles,
+            semantic_state=observation.semantic_state,
+        )
+        return observation
+
+    def _capture_current_observation(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        observation: FixtureObservation | AdapterObservation,
+        destination: Path,
+    ) -> EvidenceRecord:
+        for capture_attempt in range(3):
+            request = self._capture_request(
+                task,
+                page,
+                observation,
+                destination,
+            )
+            try:
+                evidence = self.evidence_capture.capture(request)
+                _require_validated_formal_evidence(
+                    evidence,
+                    request,
+                    capture_acceptance_policy=self.capture_acceptance_policy,
+                )
+                return evidence
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as error:
+                classified = classify_attempt_error(error)
+                if (
+                    capture_attempt == 2
+                    or not isinstance(classified, TechnicalError)
+                    or classified.code not in _CAPTURE_RETRY_CODES
+                ):
+                    raise
+                wait_for_timeout = getattr(page, "wait_for_timeout", None)
+                if not callable(wait_for_timeout):
+                    raise ValueError("browser page must provide wait_for_timeout")
+                wait_for_timeout(500)
+        raise AssertionError("capture retry loop exhausted without a result")
+
+    def _capture_request(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        observation: FixtureObservation | AdapterObservation,
+        destination: Path,
+    ) -> CaptureRequest:
+        if isinstance(observation, FixtureObservation):
+            return CaptureRequest(
+                destination=destination,
+                state=_OUTCOME_STATES[observation.outcome],
+                css_rectangles=observation.css_rectangles,
+                expected_roles=observation.expected_roles,
+                expected_window=observation.expected_window,
+                stability_probe=observation.stability_probe,
+                minimum_stability_interval_seconds=(
+                    self.minimum_stability_interval_seconds
+                ),
+            )
+        provider = self.capture_context_provider
+        if provider is None:
+            raise AssertionError("capture context provider is unavailable")
+        context = provider(task, page, observation.semantic_state)
+        if not isinstance(context, CaptureContext):
+            raise ValueError("capture context provider returned invalid data")
+        return CaptureRequest(
+            destination=destination,
+            state=_OUTCOME_STATES[observation.outcome],
+            css_rectangles=observation.css_rectangles,
+            expected_roles=_OUTCOME_ROLES[observation.outcome],
+            expected_window=context.expected_window,
+            stability_probe=context.stability_probe,
+            minimum_stability_interval_seconds=(
+                self.minimum_stability_interval_seconds
+            ),
+        )
+
     def _capture_diagnostic(
         self,
         task: WebsiteTask,
@@ -405,32 +579,37 @@ class WebsiteTaskRunner:
 
     def _prepare_manual_login(self, site: str) -> None:
         with self._page_lock:
-            page = self.browser_session.page_for(site)
+            page = self._automation_page()
             bring_to_front = getattr(page, "bring_to_front", None)
             if callable(bring_to_front):
                 bring_to_front()
             if self.manual_login_callback is not None:
                 self.manual_login_callback(site)
 
+    def _automation_page(self) -> Any:
+        getter = getattr(self.browser_session, "automation_page", None)
+        if callable(getter):
+            return getter()
+        return self.browser_session.page_for(_AUTOMATION_PAGE_KEY)
+
+    def _close_unassigned_pages(self) -> None:
+        closer = getattr(self.browser_session, "close_unassigned_pages", None)
+        if callable(closer):
+            closer()
+
 
 def task_sort_key(
     task: WebsiteTask,
-) -> tuple[str, str, str, str, str, str, int]:
+) -> tuple[str, int, int]:
     return (
         task.brand,
-        task.model_name,
-        task.ram,
-        task.storage,
-        task.color,
-        task.channel.value,
+        _CHANNEL_EXECUTION_PRIORITY[task.channel],
         task.output_row_number,
     )
 
 
 def _default_site_family(task: WebsiteTask) -> str:
-    if task.channel.value == "official":
-        return f"official:{task.brand}"
-    return task.channel.value
+    return site_session_family(task.brand, task.channel)
 
 
 def safe_task_file_stem(task_id: str) -> str:
@@ -460,19 +639,22 @@ def _validated_ordered_tasks(
 def _require_validated_formal_evidence(
     evidence: object,
     request: CaptureRequest,
+    *,
+    capture_acceptance_policy: MacCapturePolicy,
 ) -> None:
     if not isinstance(evidence, EvidenceRecord):
         raise ValueError("capture returned invalid evidence")
     if (
-        not evidence.is_validated
-        or evidence.state is not request.state
+        evidence.state is not request.state
         or evidence.path != request.destination
-        or not evidence.path.is_file()
     ):
         raise ValueError("capture did not publish validated formal evidence")
-    digest = hashlib.sha256(evidence.path.read_bytes()).hexdigest()
-    if digest != evidence.sha256:
-        raise ValueError("formal evidence hash does not match its record")
+    audit = read_validated_evidence(
+        evidence,
+        capture_acceptance_policy=capture_acceptance_policy,
+    )
+    if not audit.is_valid:
+        raise ValueError("capture did not publish validated formal evidence")
 
 
 def _remove_partial_formal(path: Path) -> None:

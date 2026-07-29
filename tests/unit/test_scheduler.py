@@ -27,8 +27,9 @@ from quote_app.tasks.models import (
     WebsiteChannel,
     WebsiteResult,
     WebsiteTask,
+    WebsiteObservationCheckpoint,
 )
-from quote_app.tasks.repository import SQLiteTaskRepository
+from quote_app.tasks.repository import RepositoryError, SQLiteTaskRepository
 from quote_app.tasks.retry import (
     LoginRequired,
     NonRetryableTechnicalError,
@@ -200,6 +201,78 @@ def test_initial_attempt_and_two_technical_retries_are_persisted(
     assert [
         attempt.error_code for attempt in repository.list_attempts(task.task_id)
     ] == ["LAYOUT_CHANGED", "LAYOUT_CHANGED", "LAYOUT_CHANGED"]
+
+
+def test_observation_event_follows_sqlite_checkpoint_commit(
+    repository: SQLiteTaskRepository,
+    tmp_path: Path,
+) -> None:
+    task = _task("observation", channel=WebsiteChannel.JD, output_row=2)
+    _seed(repository, task)
+    checkpoint = WebsiteObservationCheckpoint(
+        task_id=task.task_id,
+        outcome=BusinessOutcome.PRICE_FOUND,
+        price=Decimal("4999"),
+        url="https://example.test/observation",
+        observed_at=NOW,
+    )
+    events: list[WorkerEvent] = []
+
+    def sink(event: WorkerEvent) -> None:
+        events.append(event)
+        if event.event == "observation":
+            assert repository.load_observation(task.task_id) == checkpoint
+
+    def attempt(
+        current_task: WebsiteTask,
+        token: object,
+        _control: SchedulerControl,
+    ) -> WebsiteResult:
+        repository.save_observation(checkpoint, token=token)  # type: ignore[arg-type]
+        scheduler.publish_observation(current_task, checkpoint)
+        return _success(tmp_path, current_task)
+
+    scheduler = BrowserTaskScheduler(repository, "run-1", attempt, event_sink=sink)
+
+    scheduler.run_until_idle()
+
+    assert [event.event for event in events] == ["progress", "observation", "result"]
+
+
+def test_brand_gate_finishes_the_current_brand_then_stops_before_next_brand(
+    repository: SQLiteTaskRepository,
+    tmp_path: Path,
+) -> None:
+    honor_jd = _task(
+        "honor-jd", channel=WebsiteChannel.JD, output_row=2, brand="HONOR"
+    )
+    honor_tmall = _task(
+        "honor-tmall", channel=WebsiteChannel.TMALL, output_row=2, brand="HONOR"
+    )
+    vivo_jd = _task(
+        "vivo-jd", channel=WebsiteChannel.JD, output_row=3, brand="维沃"
+    )
+    _seed(repository, honor_jd, honor_tmall, vivo_jd)
+
+    def attempt(task, _token, _control):
+        if task.task_id == honor_jd.task_id:
+            return _technical_failure(task.task_id, error_code="LAYOUT_CHANGED")
+        return _success(tmp_path, task)
+
+    scheduler = BrowserTaskScheduler(
+        repository,
+        "run-1",
+        attempt,
+        retry_policy=RetryPolicy(technical_retries=0, retry_delay_seconds=0),
+        task_sort_key=lambda task: (task.brand, task.channel.value),
+        stop_after_brand_issue=True,
+    )
+
+    scheduler.run_until_idle()
+
+    assert repository.task_state(honor_jd.task_id) is TaskState.TECHNICAL_FAILURE
+    assert repository.task_state(honor_tmall.task_id) is TaskState.SUCCEEDED
+    assert repository.task_state(vivo_jd.task_id) is TaskState.PENDING
 
 
 @pytest.mark.parametrize(

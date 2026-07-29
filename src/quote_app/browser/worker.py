@@ -15,6 +15,7 @@ WORKER_EVENT_SCHEMA_VERSION = 1
 _EVENT_NAMES = frozenset(
     {
         "progress",
+        "observation",
         "waiting_for_login",
         "result",
         "technical_failure",
