@@ -810,6 +810,10 @@ class QuoteApp:
         if self._closing or self._destroyed:
             return
         self._closing = True
+        controller = getattr(self, "_website_controller", None)
+        request_shutdown = getattr(controller, "request_shutdown", None)
+        if callable(request_shutdown):
+            request_shutdown()
         self._active_pipeline_generation = None
         self._cancel_pipeline_poll()
         self._active_website_generation = None

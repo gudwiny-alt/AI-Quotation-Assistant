@@ -241,6 +241,43 @@ def test_observation_event_follows_sqlite_checkpoint_commit(
     assert [event.event for event in events] == ["progress", "observation", "result"]
 
 
+def test_version_one_progress_observation_and_result_payloads_remain_exact(
+    repository: SQLiteTaskRepository,
+    tmp_path: Path,
+) -> None:
+    task = _task("legacy-payload", channel=WebsiteChannel.OFFICIAL, output_row=2)
+    _seed(repository, task)
+    checkpoint = WebsiteObservationCheckpoint(
+        task_id=task.task_id,
+        outcome=BusinessOutcome.PRICE_FOUND,
+        price=Decimal("4999"),
+        url="https://example.test/legacy",
+        observed_at=NOW,
+    )
+    events: list[WorkerEvent] = []
+
+    def attempt(current_task, token, _control):
+        repository.save_observation(checkpoint, token=token)
+        scheduler.publish_observation(current_task, checkpoint)
+        return _success(tmp_path, current_task)
+
+    scheduler = BrowserTaskScheduler(
+        repository,
+        "run-1",
+        attempt,
+        event_sink=events.append,
+    )
+
+    scheduler.run_until_idle()
+
+    assert [event.schema_version for event in events] == [1, 1, 1]
+    assert [dict(event.data) for event in events] == [
+        {"attempt_number": 1, "channel": "official"},
+        {"outcome": "price_found", "price": "4999"},
+        {"outcome": "price_found", "price": "3999"},
+    ]
+
+
 def test_brand_gate_finishes_the_current_brand_then_stops_before_next_brand(
     repository: SQLiteTaskRepository,
     tmp_path: Path,

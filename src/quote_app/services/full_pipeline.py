@@ -9,6 +9,7 @@ from pathlib import Path
 from quote_app.core.association import associate_rows
 from quote_app.core.normalization import normalize_brand
 from quote_app.core.precheck import precheck_inputs
+from quote_app.browser.worker import WorkerEvent
 from quote_app.domain.models import InputPaths, Issue, QuoteMonth, QuoteRow
 from quote_app.evidence.models import MacCapturePolicy
 from quote_app.excel.report_writer import RunSummary
@@ -120,6 +121,10 @@ def run_full_pipeline(
     )
     task_build = build_website_tasks(run, rows)
     _apply_task_build_issues(rows, task_build.issues)
+    ui_event_sink = _ui_event_sink_for_tasks(
+        task_build.tasks,
+        request.event_sink,
+    )
 
     with SQLiteTaskRepository(request.database_path) as repository:
         repository.create_run(run)
@@ -151,7 +156,7 @@ def run_full_pipeline(
         evidence_dir=request.evidence_dir,
         database_path=request.database_path,
         controller=request.controller,
-        event_sink=request.event_sink,
+        event_sink=ui_event_sink,
         checkpoint_sink=publish_checkpoint,
     )
     website_summary = _run_or_skip(website_request, website_runner)
@@ -303,6 +308,35 @@ def _run_or_skip(
         technical_failure=0,
         evidence_paths=(),
     )
+
+
+def _ui_event_sink_for_tasks(
+    tasks: tuple[WebsiteTask, ...],
+    event_sink: EventSink | None,
+) -> EventSink | None:
+    """Decorate copies for the GUI without changing version-1 worker payloads."""
+    if event_sink is None:
+        return None
+    tasks_by_id = {task.task_id: task for task in tasks}
+
+    def publish(event: WorkerEvent) -> None:
+        task = tasks_by_id.get(event.task_id)
+        if task is None or event.run_id != task.run_id:
+            return
+        data = dict(event.data)
+        data["channel"] = task.channel.value
+        data["model_name"] = task.model_name
+        event_sink(
+            WorkerEvent(
+                event=event.event,
+                run_id=event.run_id,
+                task_id=event.task_id,
+                data=data,
+                schema_version=event.schema_version,
+            )
+        )
+
+    return publish
 
 
 def _load_saved_results(

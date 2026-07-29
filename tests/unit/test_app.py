@@ -374,6 +374,144 @@ def test_gui_continue_current_task_releases_waiting_browser_controller() -> None
     assert statuses == ["正在继续当前任务：天猫 / 荣耀Magic8"]
 
 
+def _manual_action():
+    from quote_app.tasks.scheduler import ManualActionEvent
+
+    task = WebsiteTask(
+        task_id="waiting",
+        run_id="run-1",
+        source_row_number=2,
+        output_row_number=2,
+        material_code="CODE-2",
+        brand="HONOR",
+        model_name="荣耀Magic8",
+        ram="16GB",
+        storage="512GB",
+        color="天青釉",
+        channel=WebsiteChannel.TMALL,
+    )
+    return ManualActionEvent(
+        task=task,
+        token=AttemptToken("waiting", 0, 1),
+        site="天猫",
+        reason="需要人工完成安全验证",
+    )
+
+
+def test_controller_shutdown_after_manual_action_resolves_false() -> None:
+    from quote_app.services.web_run import WebsiteRunController
+
+    controller = WebsiteRunController()
+    controller.publish_manual_action(_manual_action())
+
+    controller.request_shutdown()
+
+    assert controller.wait_for_resolution() is False
+
+
+def test_controller_shutdown_before_manual_action_resolves_future_publish_false() -> None:
+    from quote_app.services.web_run import WebsiteRunController
+
+    controller = WebsiteRunController()
+    controller.request_shutdown()
+
+    controller.publish_manual_action(_manual_action())
+
+    assert controller.wait_for_resolution() is False
+
+
+def test_controller_shutdown_is_idempotent_before_and_after_publish() -> None:
+    from quote_app.services.web_run import WebsiteRunController
+
+    controller = WebsiteRunController()
+    controller.request_shutdown()
+    controller.request_shutdown()
+    controller.publish_manual_action(_manual_action())
+    controller.request_shutdown()
+
+    assert controller.wait_for_resolution() is False
+
+
+@pytest.mark.parametrize(
+    ("event_name", "data", "expected"),
+    [
+        (
+            "progress",
+            {"attempt_number": 1, "channel": "official"},
+            "正在处理：官网 / 荣耀Magic8",
+        ),
+        (
+            "observation",
+            {"outcome": "price_found", "price": "4999"},
+            "已保存阶段结果：官网 / 荣耀Magic8 / 价格4999 / 截图待补",
+        ),
+        (
+            "result",
+            {"outcome": "price_found", "price": "4999"},
+            "已保存阶段结果：官网 / 荣耀Magic8 / 价格4999 / "
+            "截图已补 / 官网渠道完成",
+        ),
+        (
+            "waiting_for_login",
+            {"site": "jd", "condition": "login_required"},
+            "网站任务已暂停：京东 / 荣耀Magic8 / 等待登录或安全验证",
+        ),
+        (
+            "technical_failure",
+            {
+                "error_code": "PAGE_TIMEOUT",
+                "retryable": True,
+                "retry_remaining": 1,
+            },
+            "网站任务暂时失败：官网 / 荣耀Magic8 / PAGE_TIMEOUT；"
+            "将自动重试（剩余1次）",
+        ),
+        (
+            "technical_failure",
+            {
+                "error_code": "CAPTURE_PERMISSION",
+                "retryable": False,
+                "retry_remaining": 0,
+            },
+            "网站任务技术失败：官网 / 荣耀Magic8 / CAPTURE_PERMISSION",
+        ),
+    ],
+)
+def test_full_pipeline_ui_boundary_decorates_legacy_events_for_every_status(
+    event_name: str,
+    data: dict[str, object],
+    expected: str,
+) -> None:
+    from quote_app.app import format_worker_event_status
+    from quote_app.browser.worker import WorkerEvent
+    from quote_app.services.full_pipeline import _ui_event_sink_for_tasks
+
+    task = WebsiteTask(
+        task_id="official-task",
+        run_id="run-stage",
+        source_row_number=2,
+        output_row_number=2,
+        material_code="CODE-2",
+        brand="HONOR",
+        model_name="荣耀Magic8",
+        ram="16GB",
+        storage="512GB",
+        color="天青釉",
+        channel=WebsiteChannel.OFFICIAL,
+    )
+    decorated = []
+    sink = _ui_event_sink_for_tasks((task,), decorated.append)
+    assert sink is not None
+    source = WorkerEvent(event_name, "run-stage", task.task_id, data)
+
+    sink(source)
+
+    assert dict(source.data) == data
+    assert format_worker_event_status(decorated[0]) == expected
+    sink(WorkerEvent(event_name, "run-stage", "unknown-task", data))
+    assert len(decorated) == 1
+
+
 def test_desktop_run_executes_complete_pipeline_off_the_tk_thread(
     tmp_path: Path,
 ) -> None:
@@ -1004,6 +1142,138 @@ def test_gui_close_waits_for_worker_cleanup_and_never_touches_widgets_after_clos
     assert button.configure_calls == button_calls
     app.close()
     assert root.destroy_calls == 1
+
+
+def test_gui_close_releases_full_pipeline_manual_wait_and_preserves_sqlite_waiting(
+    tmp_path: Path,
+) -> None:
+    """Break caught: closing while the full pipeline awaits login hangs forever."""
+    from datetime import datetime, timezone
+    from hashlib import sha256
+
+    from quote_app.domain.models import QuoteMonth
+    from quote_app.paths import build_app_paths
+    from quote_app.services.web_run import WebsiteRunController
+    from quote_app.tasks.models import (
+        SCHEMA_VERSION,
+        InputFingerprint,
+        RunRecord,
+        RunState,
+        TaskState,
+    )
+    from quote_app.tasks.repository import SQLiteTaskRepository
+    from quote_app.tasks.retry import LoginRequired, RetryPolicy
+    from quote_app.tasks.scheduler import BrowserTaskScheduler
+
+    app_paths = build_app_paths("Darwin", home=tmp_path / "user")
+    now = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    run_record = RunRecord(
+        run_id="run-close-waiting",
+        schema_version=SCHEMA_VERSION,
+        quote_month=QuoteMonth(2026, 8),
+        input_fingerprints=tuple(
+            InputFingerprint(
+                source_role=role,
+                path=tmp_path / f"{role}.xlsx",
+                sha256=str(index) * 64,
+                byte_size=1,
+                modified_ns=1,
+            )
+            for index, role in enumerate(("base", "marketing", "bop"), 1)
+        ),
+        output_dir=tmp_path / "outputs",
+        browser_profile_dir=app_paths.browser_profile,
+        associated_rows_snapshot="[]",
+        associated_rows_snapshot_path=None,
+        associated_rows_snapshot_sha256=sha256(b"[]").hexdigest(),
+        quote_path=None,
+        report_path=None,
+        state=RunState.CREATED,
+        created_at=now,
+        updated_at=now,
+    )
+    task = WebsiteTask(
+        task_id="close-waiting",
+        run_id=run_record.run_id,
+        source_row_number=2,
+        output_row_number=2,
+        material_code="CODE-2",
+        brand="HONOR",
+        model_name="荣耀Magic8",
+        ram="16GB",
+        storage="512GB",
+        color="天青釉",
+        channel=WebsiteChannel.TMALL,
+    )
+    with SQLiteTaskRepository(app_paths.task_database) as repository:
+        repository.create_run(run_record)
+        repository.upsert_task(task)
+
+    waiting_published = threading.Event()
+
+    def pipeline(request: object):
+        controller = getattr(request, "controller")
+        assert isinstance(controller, WebsiteRunController)
+        with SQLiteTaskRepository(app_paths.task_database) as repository:
+            scheduler = BrowserTaskScheduler(
+                repository,
+                run_record.run_id,
+                lambda *_args: (_ for _ in ()).throw(
+                    LoginRequired("tmall", "需要登录")
+                ),
+                retry_policy=RetryPolicy(retry_delay_seconds=0),
+            )
+            scheduler.run_until_idle()
+            action = scheduler.waiting_action
+            assert action is not None
+            controller.publish_manual_action(action)
+            waiting_published.set()
+            if controller.wait_for_resolution():
+                scheduler.continue_current_task()
+            else:
+                assert scheduler.cancel_manual_action() is True
+        return _result()
+
+    root = _GuiRoot()
+    button = _GuiButton()
+    app, statuses = _gui_app(root, button, lambda _request: None)
+    app.pipeline = pipeline
+    app.app_paths = app_paths
+    app.base_var = SimpleNamespace(get=lambda: str(tmp_path / "base.xlsx"))
+    app.marketing_var = SimpleNamespace(get=lambda: str(tmp_path / "marketing.xlsx"))
+    app.bop_var = SimpleNamespace(get=lambda: str(tmp_path / "bop.xlsx"))
+    app.output_dir_var = SimpleNamespace(get=lambda: str(tmp_path / "outputs"))
+    app.year_var = SimpleNamespace(get=lambda: "2026")
+    app.month_var = SimpleNamespace(get=lambda: "8")
+    app.brand_mode_var = SimpleNamespace(get=lambda: "仅 HONOR")
+    app.readiness_checker = _ready_check
+    app._pipeline_results = queue.SimpleQueue()
+    app._pipeline_thread = None
+    app._pipeline_after_id = None
+    app._pipeline_generation = 0
+    app._active_pipeline_generation = None
+    app._website_controller = None
+    app._shown_manual_action_task_id = None
+    app._install_close_handler()
+
+    app.run()
+    assert waiting_published.wait(timeout=5)
+    status_count = len(statuses)
+    button_calls = button.configure_calls
+
+    app.close()
+    app.close()
+
+    assert app._pipeline_thread is not None
+    app._pipeline_thread.join(timeout=5)
+    assert not app._pipeline_thread.is_alive()
+    root.run_next()
+    with SQLiteTaskRepository(app_paths.task_database) as repository:
+        assert repository.task_state(task.task_id) is TaskState.WAITING_FOR_LOGIN
+    assert root.destroy_calls == 1
+    assert root.callbacks == {}
+    assert len(statuses) == status_count
+    assert button.configure_calls == button_calls
 
 
 def test_gui_ignores_stale_completed_outcome_when_a_new_run_starts(

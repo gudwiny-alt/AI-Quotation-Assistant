@@ -37,6 +37,7 @@ class WebsiteRunController:
         self._condition = threading.Condition()
         self._waiting_action: ManualActionEvent | None = None
         self._resolution: bool | None = None
+        self._shutdown_requested = False
 
     @property
     def waiting_action(self) -> ManualActionEvent | None:
@@ -50,7 +51,15 @@ class WebsiteRunController:
             if self._waiting_action is not None:
                 raise RuntimeError("已有网站任务等待人工处理")
             self._waiting_action = action
-            self._resolution = None
+            self._resolution = False if self._shutdown_requested else None
+            self._condition.notify_all()
+
+    def request_shutdown(self) -> None:
+        """Resolve current or future manual waits as cancellation."""
+        with self._condition:
+            self._shutdown_requested = True
+            if self._waiting_action is not None:
+                self._resolution = False
             self._condition.notify_all()
 
     def continue_current_task(self) -> None:
@@ -80,7 +89,9 @@ class WebsiteRunController:
         with self._condition:
             if self._waiting_action is None:
                 raise RuntimeError("当前没有等待人工处理的网站任务")
-            self._resolution = resolution
+            self._resolution = (
+                False if self._shutdown_requested else resolution
+            )
             self._condition.notify_all()
 
 
