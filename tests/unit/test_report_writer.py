@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from decimal import Decimal
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -9,8 +10,17 @@ from openpyxl.workbook.workbook import Workbook  # type: ignore[import-untyped]
 import pytest
 
 from quote_app.domain.models import InputPaths, Issue, QuoteMonth, QuoteRow
+from quote_app.evidence.models import EvidenceRecord, EvidenceState, MacCapturePolicy
 from quote_app.excel import report_writer
 from quote_app.excel.report_writer import ReportWriteRequest, write_execution_report
+from quote_app.tasks.models import (
+    BusinessOutcome,
+    TaskState,
+    WebsiteChannel,
+    WebsiteObservationCheckpoint,
+    WebsiteResult,
+    WebsiteTask,
+)
 
 
 ORANGE = "F4B183"
@@ -351,6 +361,117 @@ def test_report_marks_fully_populated_channels_completed_and_green(
         workbook.close()
 
 
+def test_report_marks_checkpoint_price_as_screenshot_pending(
+    tmp_path: Path,
+) -> None:
+    row = QuoteRow(
+        2,
+        "9101",
+        {"B": "HONOR", "C": "9101", "E": "Magic8", "AG": "经理甲"},
+    )
+    task = WebsiteTask(
+        task_id="official-checkpoint",
+        run_id="run-1",
+        source_row_number=2,
+        output_row_number=2,
+        material_code="9101",
+        brand="HONOR",
+        model_name="Magic8",
+        ram="16GB",
+        storage="512GB",
+        color="天青釉",
+        channel=WebsiteChannel.OFFICIAL,
+    )
+    observation = WebsiteObservationCheckpoint(
+        task_id=task.task_id,
+        outcome=BusinessOutcome.PRICE_FOUND,
+        price=Decimal("4999"),
+        url="https://official.example/product",
+        observed_at=datetime(2026, 7, 26, tzinfo=timezone.utc),
+    )
+    failure = WebsiteResult(
+        task_id=task.task_id,
+        state=TaskState.TECHNICAL_FAILURE,
+        outcome=None,
+        price=None,
+        url=None,
+        evidence=None,
+        diagnostic_path=None,
+        error_code="CAPTURE_FOREGROUND",
+        error_message="截图前台校验失败",
+    )
+
+    output = write_execution_report(
+        ReportWriteRequest(
+            QuoteMonth(2026, 8),
+            [row],
+            tmp_path,
+            website_tasks=(task,),
+            website_results=(failure,),
+            website_observations=(observation,),
+            website_run=True,
+        )
+    )
+
+    workbook = load_workbook(output)
+    try:
+        detail = workbook["处理明细"]
+        assert detail["K2"].value == "价格成功（4999）；截图待补（CAPTURE_FOREGROUND）"
+        assert detail["L2"].value == "部分完成"
+    finally:
+        workbook.close()
+
+
+def test_report_identifies_waiting_manual_verification_and_recovery_action(
+    tmp_path: Path,
+) -> None:
+    row = QuoteRow(
+        2,
+        "9101",
+        {
+            "B": "HONOR",
+            "C": "9101",
+            "E": "Magic8",
+            "G": "16GB+512GB",
+            "AG": "经理甲",
+        },
+    )
+    task = WebsiteTask(
+        task_id="waiting-jd",
+        run_id="run-1",
+        source_row_number=2,
+        output_row_number=2,
+        material_code="9101",
+        brand="HONOR",
+        model_name="Magic8",
+        ram="16GB",
+        storage="512GB",
+        color="天青釉",
+        channel=report_writer.WebsiteChannel.JD,
+    )
+
+    output = write_execution_report(
+        ReportWriteRequest(
+            QuoteMonth(2026, 8),
+            [row],
+            tmp_path,
+            website_tasks=(task,),
+            website_run=True,
+            waiting_task_ids=frozenset((task.task_id,)),
+        )
+    )
+
+    workbook = load_workbook(output)
+    try:
+        detail = workbook["处理明细"]
+        assert detail["I2"].value == "等待人工验证"
+        assert detail["L2"].value == "部分完成"
+        assert "京东：等待人工验证" in str(detail["N2"].value)
+        assert detail["O2"].value == "完成人工验证后继续当前任务"
+    finally:
+        workbook.close()
+
+
 def test_report_cleans_private_temporary_file_when_save_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -405,6 +526,42 @@ def test_report_returns_published_path_when_post_publish_cleanup_keeps_failing(
     workbook = load_workbook(output)
     workbook.close()
     assert len(list(tmp_path.glob(".report-*.tmp.xlsx"))) == 1
+
+
+def test_report_marks_only_authorized_beta_evidence_for_mac_visual_review(
+    tmp_path: Path,
+) -> None:
+    evidence = EvidenceRecord(
+        state=EvidenceState.NORMAL,
+        path=tmp_path / "formal.png",
+        sha256="a" * 64,
+        pixel_width=800,
+        pixel_height=600,
+        captured_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        validation_code="CAPTURE_OK_MAC_VISUAL_REVIEW",
+    )
+    result = WebsiteResult(
+        task_id="mac-beta",
+        state=TaskState.SUCCEEDED,
+        outcome=BusinessOutcome.PRICE_FOUND,
+        price=Decimal("4499"),
+        url="https://example.test/product",
+        evidence=evidence,
+        diagnostic_path=None,
+        error_code=None,
+        error_message=None,
+    )
+
+    with pytest.raises(ValueError, match="capture validation"):
+        report_writer._website_channel_state(
+            result,
+            capture_acceptance_policy=MacCapturePolicy.STRICT,
+        )
+
+    assert report_writer._website_channel_state(
+        result,
+        capture_acceptance_policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    ) == "价格成功（4499）；截图成功（Mac 视觉复核）"
 
 
 def test_report_save_and_cleanup_failure_names_private_temp_without_internal_detail(
