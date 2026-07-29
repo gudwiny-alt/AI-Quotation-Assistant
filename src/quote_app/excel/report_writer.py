@@ -543,6 +543,7 @@ def _website_channel_state(
         code = normalize_text(result.error_code)
         message = _concise_diagnostic(result.error_message)
         return f"技术失败（{code}：{message}）"
+    raise ValueError("website result has an unsupported task state")
 
 
 def _concise_diagnostic(message: str | None) -> str:

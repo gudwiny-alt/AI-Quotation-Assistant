@@ -1281,7 +1281,9 @@ def _attempt_record(row: sqlite3.Row) -> AttemptRecord:
     )
 
 
-def _encode(value: RunRecord | WebsiteTask | WebsiteResult) -> str:
+def _encode(
+    value: RunRecord | WebsiteTask | WebsiteObservationCheckpoint | WebsiteResult,
+) -> str:
     return json.dumps(
         to_payload(value),
         ensure_ascii=False,

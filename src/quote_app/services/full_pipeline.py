@@ -39,6 +39,7 @@ from quote_app.tasks.models import (
     WebsiteTask,
 )
 from quote_app.tasks.repository import SQLiteTaskRepository
+from quote_app.tasks.scheduler import EventSink
 
 
 WebsiteRunner = Callable[[WebsiteRunRequest], WebsiteRunSummary]
@@ -69,6 +70,7 @@ class FullPipelineRequest:
     runtime_readiness: RuntimeReadinessChecker | None = None
     controller: WebsiteRunController | None = None
     selected_brand: str | None = None
+    event_sink: EventSink | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +141,9 @@ def run_full_pipeline(
         )
     )
 
+    def publish_checkpoint(snapshot: WebsiteRunSnapshot) -> None:
+        publisher.publish(snapshot)
+
     website_request = WebsiteRunRequest(
         run_id=run.run_id,
         tasks=task_build.tasks,
@@ -146,7 +151,8 @@ def run_full_pipeline(
         evidence_dir=request.evidence_dir,
         database_path=request.database_path,
         controller=request.controller,
-        checkpoint_sink=publisher.publish,
+        event_sink=request.event_sink,
+        checkpoint_sink=publish_checkpoint,
     )
     website_summary = _run_or_skip(website_request, website_runner)
     results = _load_saved_results(request.database_path, task_build.tasks)

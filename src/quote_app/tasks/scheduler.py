@@ -337,6 +337,7 @@ class BrowserTaskScheduler:
                 {
                     "attempt_number": token.attempt_number,
                     "channel": task.channel.value,
+                    "model_name": task.model_name,
                 },
             )
             try:
@@ -403,6 +404,8 @@ class BrowserTaskScheduler:
                     "result",
                     task.task_id,
                     {
+                        "channel": task.channel.value,
+                        "model_name": task.model_name,
                         "outcome": result.outcome.value if result.outcome else None,
                         "price": str(result.price) if result.price is not None else None,
                     },
@@ -526,6 +529,8 @@ class BrowserTaskScheduler:
             "observation",
             task.task_id,
             {
+                "channel": task.channel.value,
+                "model_name": task.model_name,
                 "outcome": checkpoint.outcome.value,
                 "price": (
                     str(checkpoint.price)

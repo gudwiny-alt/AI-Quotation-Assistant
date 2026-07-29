@@ -619,6 +619,7 @@ def test_capture_failure_is_diagnostic_only_and_never_business_no(
         )
         assert [event.event for event in events] == [
             "progress",
+            "observation",
             "technical_failure",
         ]
 
@@ -678,8 +679,12 @@ def test_result_validation_failure_removes_formal_and_records_diagnostic(
         assert result.state is TaskState.TECHNICAL_FAILURE
         assert result.evidence is None
         assert result.diagnostic_path is not None
-        assert len(capture.requests) == 1
-        assert not capture.requests[0].destination.exists()
+        assert capture.requests == []
+        assert not tuple(
+            (tmp_path / "evidence").glob(
+                f"{safe_task_file_stem(task.task_id)}.g*.png"
+            )
+        )
 
 
 def test_external_diagnostic_path_is_not_persisted(tmp_path: Path) -> None:
