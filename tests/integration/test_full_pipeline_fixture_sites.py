@@ -390,8 +390,13 @@ def test_full_pipeline_replaces_one_partial_excel_pair_after_each_stage(
             tmp_path / "outputs" / "2026年08月终端供货价报价表-处理中.xlsx",
             data_only=False,
         )
+        report = load_workbook(
+            tmp_path / "outputs" / "2026年08月报价执行报告-处理中.xlsx",
+            data_only=False,
+        )
         try:
             sheet = quote["5G手机"]
+            detail = report["处理明细"]
             observed_stages.append(
                 {
                     "AK2": sheet["AK2"].value,
@@ -400,10 +405,15 @@ def test_full_pipeline_replaces_one_partial_excel_pair_after_each_stage(
                         image.anchor._from.col == 39 and image.anchor._from.row == 1
                         for image in sheet._images
                     ),
+                    "official": detail["K2"].value,
+                    "jd": detail["I2"].value,
+                    "status": detail["L2"].value,
+                    "quote_reference": _overview_value(report, "报价表输出"),
                 }
             )
         finally:
             quote.close()
+            report.close()
 
     def staged_runner(request: WebsiteRunRequest) -> WebsiteRunSummary:
         request.evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -419,30 +429,30 @@ def test_full_pipeline_replaces_one_partial_excel_pair_after_each_stage(
         )
         jd_failure = make_technical_result(jd)
 
-        checkpoint_and_record(
-            request,
-            WebsiteRunSnapshot((observation,), (), frozenset()),
-        )
-        checkpoint_and_record(
-            request,
-            WebsiteRunSnapshot((observation,), (official_result,), frozenset()),
-        )
-        checkpoint_and_record(
-            request,
-            WebsiteRunSnapshot(
-                (observation,),
-                (official_result, jd_failure),
-                frozenset(),
-            ),
-        )
         with SQLiteTaskRepository(request.database_path) as repository:
             for task in request.tasks:
                 repository.upsert_task(task)
             official_token = repository.start_attempt(official.task_id)
             repository.save_observation(observation, token=official_token)
+            checkpoint_and_record(
+                request,
+                WebsiteRunSnapshot((observation,), (), frozenset()),
+            )
             repository.save_result(official_result, token=official_token)
+            checkpoint_and_record(
+                request,
+                WebsiteRunSnapshot((observation,), (official_result,), frozenset()),
+            )
             jd_token = repository.start_attempt(jd.task_id)
             repository.save_result(jd_failure, token=jd_token)
+            checkpoint_and_record(
+                request,
+                WebsiteRunSnapshot(
+                    (observation,),
+                    (official_result, jd_failure),
+                    frozenset(),
+                ),
+            )
         return WebsiteRunSummary(
             succeeded=1,
             waiting_for_login=0,
@@ -460,9 +470,33 @@ def test_full_pipeline_replaces_one_partial_excel_pair_after_each_stage(
     result = run_full_pipeline(request, website_runner=staged_runner)
 
     assert observed_stages == [
-        {"AK2": 4999, "AI2": None, "AN2_images": 0},
-        {"AK2": 4999, "AI2": None, "AN2_images": 1},
-        {"AK2": 4999, "AI2": None, "AN2_images": 1},
+        {
+            "AK2": 4999,
+            "AI2": None,
+            "AN2_images": 0,
+            "official": "价格成功（4999）；截图待补（CAPTURE_PENDING）",
+            "jd": "待运行",
+            "status": "部分完成",
+            "quote_reference": "2026年08月终端供货价报价表-处理中.xlsx",
+        },
+        {
+            "AK2": 4999,
+            "AI2": None,
+            "AN2_images": 1,
+            "official": "价格成功（4999）；截图成功",
+            "jd": "待运行",
+            "status": "部分完成",
+            "quote_reference": "2026年08月终端供货价报价表-处理中.xlsx",
+        },
+        {
+            "AK2": 4999,
+            "AI2": None,
+            "AN2_images": 1,
+            "official": "价格成功（4999）；截图成功",
+            "jd": "技术失败（PAGE_TIMEOUT：页面在限定时间内未稳定）",
+            "status": "部分完成",
+            "quote_reference": "2026年08月终端供货价报价表-处理中.xlsx",
+        },
     ]
     assert result.quote_path.is_file()
     assert len(list(request.paths.output_dir.glob("*终端供货价报价表-处理中.xlsx"))) == 1

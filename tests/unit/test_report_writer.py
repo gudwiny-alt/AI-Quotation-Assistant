@@ -375,6 +375,47 @@ def test_explicit_destination_is_atomically_replaced(tmp_path: Path) -> None:
     assert not tuple(tmp_path.glob(".report-*.tmp.xlsx"))
 
 
+@pytest.mark.parametrize("kind", ("traversal", "nested", "nested_symlink"))
+def test_explicit_destination_rejects_non_direct_lexical_child(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """Break caught: a lexical escape can replace a file outside output_dir."""
+    request = _request(tmp_path)
+    if kind == "traversal":
+        destination = tmp_path / "nested" / ".." / "escaped.xlsx"
+    elif kind == "nested":
+        destination = tmp_path / "nested" / "escaped.xlsx"
+    else:
+        alias = tmp_path / "alias"
+        alias.symlink_to(tmp_path, target_is_directory=True)
+        destination = alias / "escaped.xlsx"
+
+    with pytest.raises(ValueError, match="指定输出路径必须位于输出目录内"):
+        write_execution_report(replace(request, destination_path=destination))
+
+
+@pytest.mark.parametrize("broken", (False, True))
+def test_explicit_destination_replaces_final_symlink_itself(
+    tmp_path: Path,
+    broken: bool,
+) -> None:
+    """Break caught: final destination links are followed instead of replaced."""
+    target = tmp_path / ("missing.xlsx" if broken else "old.xlsx")
+    if not broken:
+        target.write_bytes(b"old")
+    destination = tmp_path / "2026年08月报价执行报告-处理中.xlsx"
+    destination.symlink_to(target)
+
+    write_execution_report(replace(_request(tmp_path), destination_path=destination))
+
+    assert not destination.is_symlink()
+    if broken:
+        assert not target.exists()
+    else:
+        assert target.read_bytes() == b"old"
+
+
 def test_report_never_overwrites_concurrent_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

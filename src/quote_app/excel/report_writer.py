@@ -783,13 +783,18 @@ def _publish_to_destination(
     destination_path: Path,
 ) -> Path:
     destination = Path(destination_path)
-    if destination.resolve().parent != output_dir.resolve():
+    normalized_output = Path(os.path.abspath(output_dir))
+    normalized_destination = Path(os.path.abspath(destination))
+    if (
+        ".." in destination.parts
+        or normalized_destination.parent != normalized_output
+    ):
         raise ValueError("执行报告指定输出路径必须位于输出目录内")
     try:
-        os.replace(temporary_path, destination)
+        os.replace(temporary_path, normalized_destination)
     except OSError:
         raise ValueError(f"执行报告无法安全发布到输出目录：{output_dir}") from None
-    return destination
+    return normalized_destination
 
 
 def _remove_temporary_file(temporary_path: Path) -> None:
