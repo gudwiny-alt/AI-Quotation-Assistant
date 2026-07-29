@@ -10,7 +10,7 @@ Both worker and recovery threads join within one second. The test verifies the w
 
 ## Commit
 
-Recorded after commit creation.
+`00c7c00 test: cover scheduler waiting lock ordering`.
 
 ## Concerns
 

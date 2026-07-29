@@ -1413,27 +1413,55 @@ def test_waiting_publication_and_manual_requeue_complete_without_lock_cycle(
     task = _task("waiting-race", channel=WebsiteChannel.TMALL, output_row=2)
     _seed(repository, task)
     published = threading.Event()
-    started = threading.Barrier(2)
+    allow_worker = threading.Event()
+    recovery_attempted_run = threading.Event()
+
+    class ObservableLock:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.watch_recovery = False
+
+        def acquire(self, *args: object, **kwargs: object) -> bool:
+            if self.watch_recovery:
+                recovery_attempted_run.set()
+            return self.lock.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            self.lock.release()
+
+        def __enter__(self) -> ObservableLock:
+            self.acquire()
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.release()
+
+    observable_run_lock = ObservableLock()
 
     def attempt(_task, _token, _control):
-        started.wait(timeout=1)
         raise LoginRequired("天猫", "需要登录")
 
     def sink(event: WorkerEvent) -> None:
         if event.event == "waiting_for_login":
             published.set()
+            assert allow_worker.wait(1)
 
     scheduler = BrowserTaskScheduler(repository, "run-1", attempt, event_sink=sink)
-    worker = threading.Thread(target=scheduler.run_until_idle)
+    scheduler._run_lock = observable_run_lock  # type: ignore[assignment]
+    worker = threading.Thread(target=scheduler.run_until_idle, daemon=True)
     worker.start()
-    started.wait(timeout=1)
     assert published.wait(1)
 
+    observable_run_lock.watch_recovery = True
     if requeue == "continue":
-        recovery = threading.Thread(target=scheduler.continue_current_task)
+        recovery = threading.Thread(target=scheduler.continue_current_task, daemon=True)
     else:
-        recovery = threading.Thread(target=lambda: scheduler.confirm_manual_login("天猫"))
+        recovery = threading.Thread(
+            target=lambda: scheduler.confirm_manual_login("天猫"), daemon=True
+        )
     recovery.start()
+    assert recovery_attempted_run.wait(1)
+    allow_worker.set()
     recovery.join(timeout=1)
     worker.join(timeout=1)
 
