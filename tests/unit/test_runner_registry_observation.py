@@ -460,6 +460,36 @@ def test_capture_failure_keeps_the_saved_observation_and_retries_same_page(
     assert results[0].state is TaskState.SUCCEEDED
 
 
+@pytest.mark.parametrize("failures", [2, 3], ids=("then-success", "exhausted"))
+def test_capture_context_failure_retries_on_the_same_observed_page(
+    runner_case: RunnerCase,
+    failures: int,
+) -> None:
+    original_provider = runner_case.runner.capture_context_provider
+    calls = 0
+
+    def provider(*args: object) -> CaptureContext:
+        nonlocal calls
+        calls += 1
+        if calls <= failures:
+            raise NonRetryableEvidenceCaptureError(
+                "CAPTURE_FOREGROUND", "fixture context failed"
+            )
+        assert original_provider is not None
+        return original_provider(*args)  # type: ignore[arg-type]
+
+    runner_case.runner.capture_context_provider = provider
+
+    results = runner_case.runner.run((runner_case.task,))
+
+    assert calls == 3
+    assert runner_case.page.goto_calls == [runner_case.official_detail_url]
+    assert runner_case.page.wait_calls == [500, 500]
+    assert results[0].state is (
+        TaskState.TECHNICAL_FAILURE if failures == 3 else TaskState.SUCCEEDED
+    )
+
+
 def test_runner_requires_exactly_one_source_and_scopes_capture_context(
     tmp_path: Path,
 ) -> None:

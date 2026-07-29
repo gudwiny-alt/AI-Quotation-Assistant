@@ -459,13 +459,13 @@ class WebsiteTaskRunner:
         destination: Path,
     ) -> EvidenceRecord:
         for capture_attempt in range(3):
-            request = self._capture_request(
-                task,
-                page,
-                observation,
-                destination,
-            )
             try:
+                request = self._capture_request(
+                    task,
+                    page,
+                    observation,
+                    destination,
+                )
                 evidence = self.evidence_capture.capture(request)
                 _require_validated_formal_evidence(
                     evidence,

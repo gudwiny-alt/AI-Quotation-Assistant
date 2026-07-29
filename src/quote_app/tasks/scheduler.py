@@ -181,33 +181,35 @@ class BrowserTaskScheduler:
 
     def confirm_manual_login(self, site: str) -> tuple[WebsiteTask, ...]:
         normalized_site = _normalized_site(site)
-        with self._manual_lock, self._run_lock:
-            if self.control.manual_site != normalized_site:
-                raise ValueError("确认的站点与当前人工登录站点不一致")
-            requeued = self.repository.requeue_waiting_site(
-                self.run_id,
-                normalized_site,
-            )
-            self.control.confirm_manual_login(normalized_site)
-            return requeued
+        with self._run_lock:
+            with self._manual_lock:
+                if self.control.manual_site != normalized_site:
+                    raise ValueError("确认的站点与当前人工登录站点不一致")
+                requeued = self.repository.requeue_waiting_site(
+                    self.run_id,
+                    normalized_site,
+                )
+                self.control.confirm_manual_login(normalized_site)
+                return requeued
 
     def continue_current_task(self) -> tuple[WebsiteTask, ...]:
         """Requeue the exact site paused by the automatic browser attempt."""
-        with self._manual_lock, self._run_lock:
-            action = self._waiting_action
-            if action is None:
-                raise ValueError("当前没有等待人工处理的网站任务")
-            if self.control.manual_site != action.site:
-                raise AssertionError("manual action site does not match scheduler control")
-            requeued_task = self.repository.requeue_exact_waiting_task(
-                self.run_id,
-                action.task,
-                action.site,
-                expected_token=action.token,
-            )
-            self.control.confirm_manual_login(action.site)
-            self._waiting_action = None
-            return (requeued_task,)
+        with self._run_lock:
+            with self._manual_lock:
+                action = self._waiting_action
+                if action is None:
+                    raise ValueError("当前没有等待人工处理的网站任务")
+                if self.control.manual_site != action.site:
+                    raise AssertionError("manual action site does not match scheduler control")
+                requeued_task = self.repository.requeue_exact_waiting_task(
+                    self.run_id,
+                    action.task,
+                    action.site,
+                    expected_token=action.token,
+                )
+                self.control.confirm_manual_login(action.site)
+                self._waiting_action = None
+                return (requeued_task,)
 
     def cancel_manual_action(self) -> bool:
         """Stop this scheduler while preserving the durable waiting task."""
