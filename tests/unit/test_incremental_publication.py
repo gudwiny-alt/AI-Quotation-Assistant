@@ -173,6 +173,38 @@ def test_large_workload_coalescing_has_a_deterministic_publication_budget(
     assert publication_count <= maximum_publications
 
 
+@pytest.mark.parametrize(
+    ("row_count", "stage_events", "maximum_publications"),
+    ((200, 1200, 49), (300, 1800, 73)),
+)
+def test_real_worker_enforces_the_large_workload_publication_budget(
+    row_count: int,
+    stage_events: int,
+    maximum_publications: int,
+) -> None:
+    """The production worker must retain the queue's count-based upper bound."""
+
+    class Publisher:
+        def publish(self, _snapshot: WebsiteRunSnapshot) -> WebToExcelResult:
+            return WebToExcelResult(
+                Path("quote.xlsx"),
+                Path("report.xlsx"),
+                RunSummary(0, 0, 0, 0, 0, 0),
+                (),
+            )
+
+    worker = incremental_publication.CoalescingPublicationWorker(
+        Publisher(),  # type: ignore[arg-type]
+        task_count=row_count * 3,
+    )
+    snapshot = WebsiteRunSnapshot((), (), frozenset())
+    for _ in range(stage_events):
+        worker.submit(snapshot)
+    worker.close()
+
+    assert worker.publication_count <= maximum_publications
+
+
 def test_large_workload_submit_does_not_block_on_excel_render() -> None:
     """Break caught: browser callbacks wait for the current full XLSX render."""
     render_started = threading.Event()
@@ -211,20 +243,6 @@ def test_large_workload_submit_does_not_block_on_excel_render() -> None:
     finally:
         release_render.set()
         worker.close()
-
-
-def test_large_workload_lone_price_snapshot_is_ready_within_five_seconds() -> None:
-    """Break caught: one saved price waits indefinitely for a batch to fill."""
-    queue = incremental_publication.CoalescingSnapshotQueue(
-        task_count=600,
-        max_delay_seconds=5,
-    )
-    snapshot = WebsiteRunSnapshot((), (), frozenset())
-    queue.offer(snapshot, offered_at=100)
-
-    assert queue.ready_at(104.999) is False
-    assert queue.ready_at(105) is True
-    assert queue.take(now=105) == snapshot
 
 
 def test_publication_worker_surfaces_background_failure_on_flush() -> None:

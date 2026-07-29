@@ -794,6 +794,23 @@ def test_jd_waits_for_modern_detail_seller_after_title_is_visible() -> None:
     assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
 
 
+def test_jd_modern_detail_rejects_unapproved_seller_name_suffix() -> None:
+    """Break caught: a third-party suffix must not pass an approved-name prefix check."""
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace(
+        "小米京东自营旗舰店</div>",
+        "小米京东自营旗舰店-第三方</div>",
+        1,
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="seller"):
+        _observe(
+            html=html,
+            task=_task(ram="16GB", storage="512GB"),
+        )
+
+
 def test_jd_waits_for_legacy_detail_seller_after_title_is_visible() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         'class="shop-name"',

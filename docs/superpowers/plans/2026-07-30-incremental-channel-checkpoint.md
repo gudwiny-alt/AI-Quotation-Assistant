@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Persist every confirmed website price before capture, update one partial Excel pair after each task stage, and repair the HONOR official/JD/Tmall live flows without allowing later failures to erase earlier work.
+**Goal:** Persist every confirmed website price before capture, update one partial Excel pair stage-by-stage for small runs and in bounded batches for production-scale runs, and repair the HONOR official/JD/Tmall live flows without allowing later failures to erase earlier work.
 
-**Architecture:** Add a durable `WebsiteObservationCheckpoint` beside the existing final `WebsiteResult`. Split task execution into observation and capture stages, publish a stable `-处理中` workbook/report pair from saved checkpoints after each meaningful event, and publish the normal final pair at run completion. Keep the existing channel-major order and exact-match/fail-closed rules.
+**Architecture:** Add a durable `WebsiteObservationCheckpoint` beside the existing final `WebsiteResult`. Split task execution into observation and capture stages. Runs below 100 website tasks publish the stable `-处理中` workbook/report pair after every meaningful event; larger runs keep SQLite/UI stage progress immediate and use one count-bounded background publisher with a final/manual-wait flush. Publish the normal final pair at run completion. Keep the existing channel-major order and exact-match/fail-closed rules.
 
 **Tech Stack:** Python 3.12, dataclasses, SQLite, Playwright, openpyxl, Pillow, tkinter, pytest, PyInstaller.
 
@@ -14,6 +14,7 @@
 - Channel order is all HONOR official tasks, then all HONOR JD tasks, then all HONOR Tmall tasks.
 - A later channel failure must never clear an earlier channel observation or screenshot.
 - A confirmed price or legal “无” is written to the partial workbook even when its screenshot is still missing; the report must say “截图待补”.
+- For 100 or more website tasks, the durable checkpoint and UI update are immediate while the processing workbook is refreshed every 25 stage events; manual wait, cancellation, close, and final return force the latest snapshot.
 - Only validated formal evidence may be embedded in `AL/AM/AN`.
 - JD/Tmall login or security verification pauses the exact current task and resumes it atomically.
 - Mac keeps the user-positioned normal Chrome window; the program must not maximize or resize it.

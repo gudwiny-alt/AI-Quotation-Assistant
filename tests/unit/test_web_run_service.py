@@ -367,6 +367,110 @@ def test_checkpoint_failure_does_not_prevent_ui_event_delivery(tmp_path: Path) -
     assert events == [event]
 
 
+def test_service_surfaces_checkpoint_failure_before_showing_manual_action(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A swallowed scheduler event error must not hide a failed manual-wait flush."""
+    from quote_app.services import web_run
+    from quote_app.tasks.scheduler import ManualActionEvent
+
+    task = _task("waiting-checkpoint", channel=WebsiteChannel.JD)
+    events: list[WorkerEvent] = []
+    manual_action_published = False
+
+    class Repository:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def load_observation(self, _task_id: str) -> None:
+            return None
+
+        def load_result(self, _task_id: str) -> None:
+            return None
+
+        def task_state(self, _task_id: str) -> TaskState:
+            return TaskState.WAITING_FOR_LOGIN
+
+        def close(self) -> None:
+            pass
+
+    class Browser:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    class Scheduler:
+        waiting_action = ManualActionEvent(
+            task=task,
+            token=AttemptToken(task.task_id, 0, 1),
+            site="京东",
+            reason="需要人工完成安全验证",
+        )
+
+    class Runner:
+        def __init__(self, **kwargs: object) -> None:
+            self.scheduler = Scheduler()
+            self.event_sink = kwargs["event_sink"]
+
+        def run(self, _tasks: tuple[WebsiteTask, ...]) -> tuple[WebsiteResult, ...]:
+            try:
+                self.event_sink(
+                    WorkerEvent(
+                        "waiting_for_login",
+                        "run-1",
+                        task.task_id,
+                        {},
+                    )
+                )
+            except RuntimeError:
+                pass  # BrowserTaskScheduler records and swallows sink failures.
+            return ()
+
+    class Controller(web_run.WebsiteRunController):
+        def publish_manual_action(self, action: ManualActionEvent) -> None:
+            del action
+            nonlocal manual_action_published
+            manual_action_published = True
+            raise AssertionError("manual action was shown before checkpoint flush")
+
+    runtime = SimpleNamespace(
+        evidence_capture=lambda: SimpleNamespace(capture=lambda _request: None),
+        capture_context_provider=lambda *_args: None,
+    )
+    monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
+    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
+    controller = Controller()
+    request = web_run.WebsiteRunRequest(
+        run_id="run-1",
+        tasks=(task,),
+        profile_dir=tmp_path / "profile",
+        evidence_dir=tmp_path / "evidence",
+        database_path=tmp_path / "state.sqlite3",
+        controller=controller,
+        event_sink=events.append,
+        checkpoint_sink=lambda _snapshot: (_ for _ in ()).throw(
+            RuntimeError("processing workbook flush failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="processing workbook flush failed"):
+        web_run.run_website_tasks(
+            request,
+            runtime_factory=lambda _registry: runtime,
+        )
+
+    assert manual_action_published is False
+    assert controller.waiting_action is None
+    assert [event.event for event in events] == ["waiting_for_login"]
+
+
 def test_manual_action_controller_unblocks_worker_when_cancelled() -> None:
     from quote_app.tasks.scheduler import ManualActionEvent
     from quote_app.services.web_run import WebsiteRunController

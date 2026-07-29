@@ -57,4 +57,3 @@ def test_click_and_wait_for_navigation_fails_when_no_new_page_appears() -> None:
             semantic_name="店铺搜索",
             attempts=2,
         )
-

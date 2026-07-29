@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 import threading
-import time
 from uuid import uuid4
 import os
 from typing import Protocol
@@ -133,7 +131,6 @@ class IncrementalExcelPublisher:
 
 _LARGE_WORKLOAD_TASK_THRESHOLD = 100
 _LARGE_WORKLOAD_BATCH_SIZE = 25
-_MAX_PUBLICATION_DELAY_SECONDS = 5.0
 
 
 class SnapshotPublisher(Protocol):
@@ -147,7 +144,6 @@ class CoalescingSnapshotQueue:
         self,
         *,
         task_count: int,
-        max_delay_seconds: float = _MAX_PUBLICATION_DELAY_SECONDS,
     ) -> None:
         if type(task_count) is not int or task_count < 0:
             raise ValueError("task_count must be a non-negative integer")
@@ -156,16 +152,8 @@ class CoalescingSnapshotQueue:
             if task_count >= _LARGE_WORKLOAD_TASK_THRESHOLD
             else 1
         )
-        if (
-            not isinstance(max_delay_seconds, int | float)
-            or isinstance(max_delay_seconds, bool)
-            or max_delay_seconds <= 0
-        ):
-            raise ValueError("max_delay_seconds must be positive")
-        self._max_delay_seconds = float(max_delay_seconds)
         self._snapshot: WebsiteRunSnapshot | None = None
         self._offered = 0
-        self._first_offered_at: float | None = None
 
     @property
     def batch_size(self) -> int:
@@ -179,33 +167,12 @@ class CoalescingSnapshotQueue:
     def ready(self) -> bool:
         return self.pending and self._offered >= self._batch_size
 
-    @property
-    def deadline(self) -> float | None:
-        if self._first_offered_at is None:
-            return None
-        return self._first_offered_at + self._max_delay_seconds
-
-    def ready_at(self, now: float) -> bool:
-        if not isinstance(now, int | float) or isinstance(now, bool):
-            raise TypeError("now must be numeric")
-        return self.ready or (
-            self.pending
-            and self.deadline is not None
-            and float(now) >= self.deadline
-        )
-
     def offer(
         self,
         snapshot: WebsiteRunSnapshot,
-        *,
-        offered_at: float = 0.0,
     ) -> None:
         if not isinstance(snapshot, WebsiteRunSnapshot):
             raise TypeError("snapshot must be a WebsiteRunSnapshot")
-        if not isinstance(offered_at, int | float) or isinstance(offered_at, bool):
-            raise TypeError("offered_at must be numeric")
-        if not self.pending:
-            self._first_offered_at = float(offered_at)
         self._snapshot = snapshot
         self._offered += 1
 
@@ -213,15 +180,12 @@ class CoalescingSnapshotQueue:
         self,
         *,
         force: bool = False,
-        now: float | None = None,
     ) -> WebsiteRunSnapshot | None:
-        ready = self.ready if now is None else self.ready_at(now)
-        if not self.pending or (not force and not ready):
+        if not self.pending or (not force and not self.ready):
             return None
         snapshot = self._snapshot
         self._snapshot = None
         self._offered = 0
-        self._first_offered_at = None
         return snapshot
 
 
@@ -233,25 +197,13 @@ class CoalescingPublicationWorker:
         publisher: SnapshotPublisher,
         *,
         task_count: int,
-        max_delay_seconds: float = _MAX_PUBLICATION_DELAY_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not callable(getattr(publisher, "publish", None)):
             raise TypeError("publisher must provide publish")
-        if (
-            not isinstance(max_delay_seconds, int | float)
-            or isinstance(max_delay_seconds, bool)
-            or max_delay_seconds <= 0
-        ):
-            raise ValueError("max_delay_seconds must be positive")
-        if not callable(clock):
-            raise TypeError("clock must be callable")
         self._publisher = publisher
         self._queue = CoalescingSnapshotQueue(
             task_count=task_count,
-            max_delay_seconds=max_delay_seconds,
         )
-        self._clock = clock
         self._condition = threading.Condition()
         self._force = False
         self._active = False
@@ -280,7 +232,7 @@ class CoalescingPublicationWorker:
             self._raise_if_failed()
             if self._stopping:
                 raise RuntimeError("publication worker is closed")
-            self._queue.offer(snapshot, offered_at=self._clock())
+            self._queue.offer(snapshot)
             if self._queue.ready:
                 self._condition.notify_all()
 
@@ -338,20 +290,9 @@ class CoalescingPublicationWorker:
             if self._stopping and not self._queue.pending:
                 return None
             if self._queue.pending:
-                now = self._clock()
-                if (
-                    self._force
-                    or self._queue.ready_at(now)
-                    or self._stopping
-                ):
+                if self._force or self._queue.ready or self._stopping:
                     return self._queue.take(force=True)
-                deadline = self._queue.deadline
-                if deadline is None:
-                    raise AssertionError("pending snapshot has no deadline")
-                remaining = deadline - now
-                if remaining <= 0:
-                    return self._queue.take(force=True)
-                self._condition.wait(timeout=remaining)
+                self._condition.wait()
                 continue
             self._condition.wait()
 

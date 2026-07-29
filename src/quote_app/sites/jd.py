@@ -593,10 +593,8 @@ class JDAdapter:
                 if sellers:
                     if (
                         len(sellers) != 1
-                        or not sellers[0]
-                        .inner_text()
-                        .strip()
-                        .startswith(self.spec.store_name)
+                        or sellers[0].inner_text().strip()
+                        != self.spec.store_name
                     ):
                         raise LayoutRecognitionError(
                             "JD modern product detail seller does not match "
@@ -644,7 +642,7 @@ class JDAdapter:
         sellers = visible_locators(page, JD_MODERN_DETAIL_SELLER_MARKERS)
         if (
             len(sellers) != 1
-            or not sellers[0].inner_text().strip().startswith(self.spec.store_name)
+            or sellers[0].inner_text().strip() != self.spec.store_name
         ):
             raise LayoutRecognitionError(
                 "JD modern product detail seller does not match the approved store"
@@ -874,9 +872,7 @@ class JDAdapter:
         sellers = visible_locators(page, JD_MODERN_DETAIL_SELLER_MARKERS)
         if (
             len(sellers) != 1
-            or not sellers[0].inner_text().strip().startswith(
-                self.spec.store_name
-            )
+            or sellers[0].inner_text().strip() != self.spec.store_name
         ):
             raise LayoutRecognitionError(
                 "JD modern seller changed before legal-no capture"
@@ -1043,9 +1039,7 @@ class JDAdapter:
         sellers = visible_locators(page, JD_MODERN_DETAIL_SELLER_MARKERS)
         if (
             len(sellers) != 1
-            or not sellers[0].inner_text().strip().startswith(
-                self.spec.store_name
-            )
+            or sellers[0].inner_text().strip() != self.spec.store_name
         ):
             raise LayoutRecognitionError(
                 "JD modern product detail seller changed before capture"

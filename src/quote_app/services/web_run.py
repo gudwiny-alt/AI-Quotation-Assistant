@@ -223,7 +223,12 @@ def run_website_tasks(
             capture_acceptance_policy = _capture_acceptance_policy(
                 evidence_capture
             )
-            event_sink = _event_sink_for_request(request, repository)
+            checkpoint_errors: list[Exception] = []
+            event_sink = _event_sink_for_request(
+                request,
+                repository,
+                checkpoint_errors=checkpoint_errors,
+            )
             runner = WebsiteTaskRunner(
                 repository=repository,
                 run_id=request.run_id,
@@ -240,6 +245,7 @@ def run_website_tasks(
             )
             while True:
                 results = runner.run(request.tasks)
+                _raise_checkpoint_error(checkpoint_errors)
                 controller = request.controller
                 if controller is None:
                     break
@@ -315,6 +321,8 @@ def _summarize(
 def _event_sink_for_request(
     request: WebsiteRunRequest,
     repository: SQLiteTaskRepository,
+    *,
+    checkpoint_errors: list[Exception] | None = None,
 ) -> EventSink | None:
     if request.event_sink is None and request.checkpoint_sink is None:
         return None
@@ -330,6 +338,10 @@ def _event_sink_for_request(
                 if snapshot_index is None:
                     raise AssertionError("checkpoint snapshot index is unavailable")
                 request.checkpoint_sink(snapshot_index.update(event.task_id))
+            except Exception as error:
+                if checkpoint_errors is not None and not checkpoint_errors:
+                    checkpoint_errors.append(error)
+                raise
             finally:
                 if request.event_sink is not None:
                     request.event_sink(event)
@@ -338,6 +350,11 @@ def _event_sink_for_request(
             request.event_sink(event)
 
     return sink
+
+
+def _raise_checkpoint_error(checkpoint_errors: list[Exception]) -> None:
+    if checkpoint_errors:
+        raise checkpoint_errors[0]
 
 
 class _WebsiteRunSnapshotIndex:
