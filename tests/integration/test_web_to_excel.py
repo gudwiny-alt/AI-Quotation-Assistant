@@ -139,6 +139,90 @@ def test_legal_no_checkpoint_is_written_without_capture(
         workbook.close()
 
 
+def test_successful_result_wins_over_checkpoint_for_price_url_and_image(
+    tmp_path: Path,
+) -> None:
+    row = make_quote_row()
+    tasks = make_tasks((row,))
+    result = make_business_result(
+        tmp_path,
+        tasks[2],
+        price=Decimal("4499"),
+        url="https://official.example/final",
+    )
+    checkpoint = make_observation_checkpoint(
+        tasks[2],
+        price=Decimal("4999"),
+        url="https://official.example/checkpoint",
+    )
+
+    fixture = run_web_fixture(
+        tmp_path,
+        (row,),
+        tasks,
+        (result,),
+        observations=(checkpoint,),
+    )
+
+    workbook = load_workbook(fixture.quote_path)
+    try:
+        sheet = workbook["5G手机"]
+        assert sheet["AK2"].value == 4499
+        assert sheet["AH2"].value == 4499
+        assert sheet["S2"].value == "https://official.example/final"
+        assert {_anchor_coordinate(image) for image in sheet._images} == {"AN2"}
+    finally:
+        workbook.close()
+
+
+def test_zero_price_checkpoint_is_published_as_minimum_without_image(
+    tmp_path: Path,
+) -> None:
+    row = make_quote_row()
+    tasks = make_tasks((row,))
+    checkpoint = make_observation_checkpoint(
+        tasks[2],
+        price=Decimal("0"),
+    )
+
+    fixture = run_web_fixture(
+        tmp_path,
+        (row,),
+        tasks,
+        (make_technical_result(tasks[2], code="CAPTURE_FOREGROUND"),),
+        observations=(checkpoint,),
+    )
+
+    workbook = load_workbook(fixture.quote_path)
+    try:
+        sheet = workbook["5G手机"]
+        assert [sheet[f"{column}2"].value for column in ("AH", "R", "AK")] == [0, 0, 0]
+        assert sheet["S2"].value == "https://official.example/product"
+        assert len(sheet._images) == 0
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize("kind", ("duplicate", "unknown"))
+def test_checkpoint_rejects_duplicate_and_unknown_task_ids(
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    row = make_quote_row()
+    tasks = make_tasks((row,))
+    checkpoint = make_observation_checkpoint(tasks[2])
+    observations = (
+        (checkpoint, replace(checkpoint, observed_at=checkpoint.observed_at.replace(second=1)))
+        if kind == "duplicate"
+        else (replace(checkpoint, task_id="unknown-checkpoint"),)
+    )
+
+    with pytest.raises(ValueError, match="duplicate|does not belong"):
+        run_web_fixture(tmp_path, (row,), tasks, (), observations=observations)
+
+    assert list(tmp_path.glob("*.xlsx")) == []
+
+
 def test_three_channel_results_populate_minimum_url_images_and_report(
     tmp_path: Path,
 ) -> None:

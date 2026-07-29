@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -9,7 +10,7 @@ from openpyxl import load_workbook  # type: ignore[import-untyped]
 from openpyxl.workbook.workbook import Workbook  # type: ignore[import-untyped]
 import pytest
 
-from quote_app.domain.models import InputPaths, Issue, QuoteMonth, QuoteRow
+from quote_app.domain.models import InputPaths, Issue, QuoteMonth, QuoteRow, WebQuery
 from quote_app.evidence.models import EvidenceRecord, EvidenceState, MacCapturePolicy
 from quote_app.excel import report_writer
 from quote_app.excel.report_writer import ReportWriteRequest, write_execution_report
@@ -90,6 +91,73 @@ def _overview_values(path: Path) -> list[list[object]]:
 
 def _find_row(values: list[list[object]], label: str) -> list[object]:
     return next(row for row in values if row and row[0] == label)
+
+
+def _website_row() -> QuoteRow:
+    return QuoteRow(
+        2,
+        "9101",
+        {"B": "HONOR", "C": "9101", "E": "Magic8", "AG": "经理甲"},
+        web_query=WebQuery(
+            brand="HONOR",
+            model_name="Magic8",
+            ram="16GB",
+            storage="512GB",
+            color="天青釉",
+        ),
+    )
+
+
+def _website_tasks(row: QuoteRow, *, run_id: str = "run-1") -> tuple[WebsiteTask, ...]:
+    return tuple(
+        WebsiteTask(
+            task_id=f"{run_id}-{channel.value}",
+            run_id=run_id,
+            source_row_number=row.source_row_number,
+            output_row_number=2,
+            material_code=row.material_code,
+            brand="HONOR",
+            model_name="Magic8",
+            ram="16GB",
+            storage="512GB",
+            color="天青釉",
+            channel=channel,
+        )
+        for channel in (
+            WebsiteChannel.JD,
+            WebsiteChannel.TMALL,
+            WebsiteChannel.OFFICIAL,
+        )
+    )
+
+
+def _checkpoint(
+    task: WebsiteTask,
+    *,
+    outcome: BusinessOutcome = BusinessOutcome.PRICE_FOUND,
+    price: Decimal | None = Decimal("4999"),
+) -> WebsiteObservationCheckpoint:
+    return WebsiteObservationCheckpoint(
+        task_id=task.task_id,
+        outcome=outcome,
+        price=price if outcome is BusinessOutcome.PRICE_FOUND else None,
+        url=f"https://{task.channel.value}.example/product",
+        observed_at=datetime(2026, 7, 26, tzinfo=timezone.utc),
+    )
+
+
+def _capture_failure(task: WebsiteTask) -> WebsiteResult:
+    return WebsiteResult(
+        task_id=task.task_id,
+        state=TaskState.TECHNICAL_FAILURE,
+        outcome=None,
+        price=None,
+        url=None,
+        evidence=None,
+        diagnostic_path=None,
+        error_code="CAPTURE_FOREGROUND",
+        error_message="截图前台校验失败",
+    )
 
 
 def test_report_has_reconciled_overview_breakdowns_detail_and_formatting(
@@ -364,11 +432,7 @@ def test_report_marks_fully_populated_channels_completed_and_green(
 def test_report_marks_checkpoint_price_as_screenshot_pending(
     tmp_path: Path,
 ) -> None:
-    row = QuoteRow(
-        2,
-        "9101",
-        {"B": "HONOR", "C": "9101", "E": "Magic8", "AG": "经理甲"},
-    )
+    row = _website_row()
     task = WebsiteTask(
         task_id="official-checkpoint",
         run_id="run-1",
@@ -422,20 +486,235 @@ def test_report_marks_checkpoint_price_as_screenshot_pending(
         workbook.close()
 
 
+def test_report_all_price_checkpoints_remain_partial_and_pending(
+    tmp_path: Path,
+) -> None:
+    row = _website_row()
+    tasks = _website_tasks(row)
+    observations = tuple(
+        _checkpoint(task, price=Decimal(4999 - index))
+        for index, task in enumerate(tasks)
+    )
+
+    output = write_execution_report(
+        ReportWriteRequest(
+            QuoteMonth(2026, 8),
+            [row],
+            tmp_path,
+            website_tasks=tasks,
+            website_results=tuple(_capture_failure(task) for task in tasks),
+            website_observations=observations,
+            website_run=True,
+        )
+    )
+
+    workbook = load_workbook(output)
+    try:
+        detail = workbook["处理明细"]
+        overview = [[cell.value for cell in row] for row in workbook["运行总览"].iter_rows()]
+        assert detail["L2"].value == "部分完成"
+        assert detail["O2"].value != "无需操作"
+        assert [detail[f"{column}2"].value for column in ("I", "J", "K")] == [
+            "价格成功（4999）；截图待补（CAPTURE_FOREGROUND）",
+            "价格成功（4998）；截图待补（CAPTURE_FOREGROUND）",
+            "价格成功（4997）；截图待补（CAPTURE_FOREGROUND）",
+        ]
+        assert _find_row(overview, "处理完成")[1] == 0
+        assert _find_row(overview, "部分完成")[1] == 1
+        assert _find_row(overview, "待人工补充")[1] == 1
+        assert [_find_row(overview, label)[1:4] for label in ("京东", "天猫", "官网")] == [
+            [0, 1, 0],
+            [0, 1, 0],
+            [0, 1, 0],
+        ]
+    finally:
+        workbook.close()
+
+
+def test_report_all_legal_no_checkpoints_remain_partial_and_pending(
+    tmp_path: Path,
+) -> None:
+    row = _website_row()
+    tasks = _website_tasks(row)
+    observations = tuple(
+        _checkpoint(task, outcome=outcome, price=None)
+        for task, outcome in zip(
+            tasks,
+            (
+                BusinessOutcome.NO_MODEL,
+                BusinessOutcome.CAPACITY_UNAVAILABLE,
+                BusinessOutcome.COLOR_UNAVAILABLE,
+            ),
+            strict=True,
+        )
+    )
+
+    output = write_execution_report(
+        ReportWriteRequest(
+            QuoteMonth(2026, 8),
+            [row],
+            tmp_path,
+            website_tasks=tasks,
+            website_results=tuple(_capture_failure(task) for task in tasks),
+            website_observations=observations,
+            website_run=True,
+        )
+    )
+
+    workbook = load_workbook(output)
+    try:
+        detail = workbook["处理明细"]
+        overview = [[cell.value for cell in row] for row in workbook["运行总览"].iter_rows()]
+        assert detail["L2"].value == "部分完成"
+        assert detail["O2"].value != "无需操作"
+        assert [detail[f"{column}2"].value for column in ("I", "J", "K")] == [
+            "无（无该机型）；截图待补",
+            "无（容量不可用）；截图待补",
+            "无（颜色不可用）；截图待补",
+        ]
+        assert [_find_row(overview, label)[1:4] for label in ("京东", "天猫", "官网")] == [
+            [0, 1, 0],
+            [0, 1, 0],
+            [0, 1, 0],
+        ]
+    finally:
+        workbook.close()
+
+
+def test_report_mixed_checkpoints_remain_partial_and_pending(
+    tmp_path: Path,
+) -> None:
+    row = _website_row()
+    tasks = _website_tasks(row)
+    observations = (
+        _checkpoint(tasks[0]),
+        _checkpoint(
+            tasks[1],
+            outcome=BusinessOutcome.SOLD_OUT,
+            price=None,
+        ),
+    )
+
+    output = write_execution_report(
+        ReportWriteRequest(
+            QuoteMonth(2026, 8),
+            [row],
+            tmp_path,
+            website_tasks=tasks,
+            website_results=tuple(_capture_failure(task) for task in tasks),
+            website_observations=observations,
+            website_run=True,
+        )
+    )
+
+    workbook = load_workbook(output)
+    try:
+        detail = workbook["处理明细"]
+        overview = [[cell.value for cell in row] for row in workbook["运行总览"].iter_rows()]
+        assert detail["L2"].value == "部分完成"
+        assert detail["O2"].value != "无需操作"
+        assert [_find_row(overview, label)[1:4] for label in ("京东", "天猫", "官网")] == [
+            [0, 1, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+        ]
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (BusinessOutcome.NO_MODEL, "无（无该机型）；截图待补"),
+        (BusinessOutcome.CAPACITY_UNAVAILABLE, "无（容量不可用）；截图待补"),
+        (BusinessOutcome.COLOR_UNAVAILABLE, "无（颜色不可用）；截图待补"),
+        (BusinessOutcome.SOLD_OUT, "无（已售罄）；截图待补"),
+    ],
+)
+def test_report_legal_no_checkpoint_uses_exact_pending_text(
+    outcome: BusinessOutcome,
+    expected: str,
+    tmp_path: Path,
+) -> None:
+    row = _website_row()
+    task = _website_tasks(row)[2]
+
+    output = write_execution_report(
+        ReportWriteRequest(
+            QuoteMonth(2026, 8),
+            [row],
+            tmp_path,
+            website_tasks=(task,),
+            website_results=(_capture_failure(task),),
+            website_observations=(_checkpoint(task, outcome=outcome, price=None),),
+            website_run=True,
+        )
+    )
+
+    workbook = load_workbook(output)
+    try:
+        detail = workbook["处理明细"]
+        assert detail["K2"].value == expected
+        assert detail["L2"].value == "部分完成"
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        (lambda task: replace(task, output_row_number=3), "outside quotation rows"),
+        (lambda task: replace(task, source_row_number=3), "does not bind"),
+        (lambda task: replace(task, material_code="wrong"), "does not bind"),
+        (lambda task: replace(task, storage="1TB"), "查询字段"),
+    ],
+)
+def test_report_rejects_checkpoint_task_with_invalid_row_binding(
+    tamper: object,
+    message: str,
+    tmp_path: Path,
+) -> None:
+    row = _website_row()
+    task = _website_tasks(row)[2]
+    invalid_task = tamper(task)  # type: ignore[operator]
+
+    with pytest.raises(ValueError, match=message):
+        write_execution_report(
+            ReportWriteRequest(
+                QuoteMonth(2026, 8),
+                [row],
+                tmp_path,
+                website_tasks=(invalid_task,),
+                website_observations=(_checkpoint(invalid_task),),
+                website_run=True,
+            )
+        )
+
+
+def test_report_rejects_mixed_task_run_ids_before_checkpoint_publication(
+    tmp_path: Path,
+) -> None:
+    row = _website_row()
+    first, second, _third = _website_tasks(row)
+    mixed = replace(second, run_id="other-run")
+
+    with pytest.raises(ValueError, match="share one run_id"):
+        write_execution_report(
+            ReportWriteRequest(
+                QuoteMonth(2026, 8),
+                [row],
+                tmp_path,
+                website_tasks=(first, mixed),
+                website_observations=(_checkpoint(first), _checkpoint(mixed)),
+                website_run=True,
+            )
+        )
+
+
 def test_report_identifies_waiting_manual_verification_and_recovery_action(
     tmp_path: Path,
 ) -> None:
-    row = QuoteRow(
-        2,
-        "9101",
-        {
-            "B": "HONOR",
-            "C": "9101",
-            "E": "Magic8",
-            "G": "16GB+512GB",
-            "AG": "经理甲",
-        },
-    )
+    row = _website_row()
     task = WebsiteTask(
         task_id="waiting-jd",
         run_id="run-1",

@@ -25,6 +25,10 @@ from quote_app.evidence.models import (
     accepts_capture_validation,
     validate_mac_capture_policy,
 )
+from quote_app.services.web_binding_validation import (
+    SUPPORTED_WEB_BRANDS,
+    validate_website_task_bindings,
+)
 from quote_app.tasks.models import (
     BusinessOutcome,
     TaskState,
@@ -35,7 +39,7 @@ from quote_app.tasks.models import (
 )
 
 
-SUPPORTED_BRANDS = frozenset(("HONOR", "华为", "维沃", "欧珀", "小米", "苹果", "ZTE中兴"))
+SUPPORTED_BRANDS = SUPPORTED_WEB_BRANDS
 CHANNEL_PENDING = "待人工补充"
 CHANNEL_WAITING = "待运行"
 CHANNEL_MANUAL_VERIFICATION = "等待人工验证"
@@ -157,6 +161,7 @@ def assess_rows(
 ) -> list[RowAssessment]:
     """Classify core-only rows using one explicit source of report truth."""
     context = _website_report_context(
+        rows,
         website_tasks,
         website_results,
         website_observations,
@@ -419,6 +424,7 @@ def _channel_state(row: QuoteRow, price_column: str, evidence_column: str) -> st
 
 
 def _website_report_context(
+    rows: list[QuoteRow],
     tasks: tuple[WebsiteTask, ...],
     results: tuple[WebsiteResult, ...],
     observations: tuple[WebsiteObservationCheckpoint, ...],
@@ -438,6 +444,7 @@ def _website_report_context(
             waiting_channels={},
             capture_acceptance_policy=capture_acceptance_policy,
         )
+    tasks_by_id = validate_website_task_bindings(tasks=tasks, rows=rows)
     results_by_task: dict[str, WebsiteResult] = {}
     for result in results:
         if result.task_id in results_by_task:
@@ -457,14 +464,8 @@ def _website_report_context(
         ],
     ] = {}
     waiting_channels: dict[int, set[WebsiteChannel]] = {}
-    task_ids: set[str] = set()
     for task in tasks:
-        if task.task_id in task_ids:
-            raise ValueError("website tasks contain a duplicate task_id")
-        task_ids.add(task.task_id)
         row_channels = by_row.setdefault(task.output_row_number, {})
-        if task.channel in row_channels:
-            raise ValueError("website tasks contain a duplicate row/channel")
         row_channels[task.channel] = (
             results_by_task.get(task.task_id),
             observations_by_task.get(task.task_id),
@@ -472,13 +473,13 @@ def _website_report_context(
         if task.task_id in waiting_task_ids:
             waiting_channels.setdefault(task.output_row_number, set()).add(task.channel)
 
-    unknown_results = set(results_by_task) - task_ids
+    unknown_results = set(results_by_task) - set(tasks_by_id)
     if unknown_results:
         raise ValueError("website result does not belong to a supplied task")
-    unknown_observations = set(observations_by_task) - task_ids
+    unknown_observations = set(observations_by_task) - set(tasks_by_id)
     if unknown_observations:
         raise ValueError("website observation does not belong to a supplied task")
-    unknown_waiting = set(waiting_task_ids) - task_ids
+    unknown_waiting = set(waiting_task_ids) - set(tasks_by_id)
     if unknown_waiting:
         raise ValueError("waiting website task does not belong to a supplied task")
     return _WebsiteReportContext(
@@ -525,7 +526,7 @@ def _website_channel_state(
         if observation.outcome is BusinessOutcome.PRICE_FOUND:
             return f"价格成功（{observation.price}）；截图待补（{code}）"
         if observation.outcome in _LEGAL_NO_LABELS:
-            return f"{_LEGAL_NO_LABELS[observation.outcome]}；截图待补（{code}）"
+            return f"{_LEGAL_NO_LABELS[observation.outcome]}；截图待补"
         raise ValueError("website observation has an unsupported outcome")
     if result is None:
         return CHANNEL_WAITING
@@ -545,8 +546,10 @@ def _concise_diagnostic(message: str | None) -> str:
 def _channel_is_completed(state: str) -> bool:
     return (
         state == "已完成"
-        or state.startswith("价格成功（")
-        or state.startswith("无（")
+        or (
+            (state.startswith("价格成功（") or state.startswith("无（"))
+            and "；截图待补" not in state
+        )
     )
 
 
