@@ -309,7 +309,7 @@ def _event_sink_for_request(
         return None
 
     def sink(event: WorkerEvent) -> None:
-        if request.checkpoint_sink is not None:
+        if request.checkpoint_sink is not None and _is_checkpoint_event(event):
             try:
                 request.checkpoint_sink(
                     _load_snapshot(request.tasks, repository)
@@ -322,6 +322,16 @@ def _event_sink_for_request(
             request.event_sink(event)
 
     return sink
+
+
+def _is_checkpoint_event(event: WorkerEvent) -> bool:
+    if event.event in {"observation", "result", "waiting_for_login"}:
+        return True
+    if event.event != "technical_failure":
+        return False
+    retryable = event.data.get("retryable")
+    retry_remaining = event.data.get("retry_remaining")
+    return retryable is False or retry_remaining == 0
 
 
 def _load_snapshot(

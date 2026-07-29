@@ -1,3 +1,4 @@
+from dataclasses import replace
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -306,6 +307,26 @@ def test_writer_uses_safe_timestamped_name_when_exact_target_exists(
     )
     assert sha256(first.read_bytes()).hexdigest() == first_digest
     assert second.is_file()
+
+
+def test_explicit_destination_is_atomically_replaced(
+    tmp_path: Path,
+) -> None:
+    """Break caught: partial publication creates extra files or leaves stale bytes."""
+    request = QuoteWriteRequest(
+        quote_month=QuoteMonth(2026, 8),
+        rows=_rows()[:1],
+        template_path=TEMPLATE_PATH,
+        output_dir=tmp_path,
+    )
+    destination = tmp_path / "2026年08月终端供货价报价表-处理中.xlsx"
+    destination.write_bytes(b"old-snapshot")
+
+    path = write_quote_workbook(replace(request, destination_path=destination))
+
+    assert path == destination
+    assert load_workbook(path)["5G手机"]["C2"].value == "9101"
+    assert not tuple(tmp_path.glob(".quote-*.tmp.xlsx"))
 
 
 def test_writer_never_overwrites_file_created_during_exclusive_publish(

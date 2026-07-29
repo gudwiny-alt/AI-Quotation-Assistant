@@ -4,6 +4,7 @@ from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import count
+from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -11,6 +12,8 @@ from tempfile import NamedTemporaryFile
 from typing import Iterator
 import warnings
 
+from openpyxl.drawing.image import Image as OpenpyxlImage  # type: ignore[import-untyped]
+from openpyxl.utils.units import points_to_pixels  # type: ignore[import-untyped]
 from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 from openpyxl.worksheet.datavalidation import (  # type: ignore[import-untyped]
     DataValidation,
@@ -40,9 +43,25 @@ MANUAL_COLUMNS = frozenset(("K", "L", "M", "N", "P", "Q"))
 PERCENTAGE_COLUMNS = ("X", "Y", "Z")
 N_VALIDATION_FORMULA = '"货源充足,货源紧缺,新品上市,尾货期"'
 _MONTH_TOKEN = re.compile(r"\d{4}年\d{1,2}月")
+_EVIDENCE_ANCHOR = re.compile(r"^(?:AL|AM|AN)(?:[2-9]|[1-9]\d+)$")
 _TEMPLATE_COLUMNS = frozenset(
     get_column_letter(column) for column in range(1, LAST_TEMPLATE_COLUMN + 1)
 )
+
+
+@dataclass(frozen=True, slots=True)
+class QuoteEvidenceImage:
+    anchor: str
+    payload: bytes
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.anchor, str)
+            or _EVIDENCE_ANCHOR.fullmatch(self.anchor) is None
+        ):
+            raise ValueError("evidence image anchor must be AL/AM/AN data cell")
+        if not isinstance(self.payload, bytes) or not self.payload:
+            raise ValueError("evidence image payload must be non-empty bytes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +70,8 @@ class QuoteWriteRequest:
     rows: list[QuoteRow]
     template_path: str | Path
     output_dir: Path
+    evidence_images: tuple[QuoteEvidenceImage, ...] = ()
+    destination_path: Path | None = None
 
 
 def write_quote_workbook(request: QuoteWriteRequest) -> Path:
@@ -70,6 +91,7 @@ def write_quote_workbook(request: QuoteWriteRequest) -> Path:
 
             _update_month_headers(sheet, request.quote_month)
             _write_rows(sheet, request.rows)
+            _insert_evidence_images(sheet, request.evidence_images)
             temporary_path = _create_temporary_path(output_dir)
             try:
                 workbook.save(temporary_path)
@@ -78,10 +100,18 @@ def write_quote_workbook(request: QuoteWriteRequest) -> Path:
         finally:
             workbook.close()
 
-        published_path = _publish_without_overwrite(
-            temporary_path,
-            output_dir,
-            request.quote_month,
+        published_path = (
+            _publish_to_destination(
+                temporary_path,
+                output_dir,
+                request.destination_path,
+            )
+            if request.destination_path is not None
+            else _publish_without_overwrite(
+                temporary_path,
+                output_dir,
+                request.quote_month,
+            )
         )
         return published_path
     finally:
@@ -153,6 +183,21 @@ def _publish_without_overwrite(
             ) from None
         return candidate
     raise AssertionError("unreachable")
+
+
+def _publish_to_destination(
+    temporary_path: Path,
+    output_dir: Path,
+    destination_path: Path,
+) -> Path:
+    destination = Path(destination_path)
+    if destination.resolve().parent != output_dir.resolve():
+        raise ValueError("报价表指定输出路径必须位于输出目录内")
+    try:
+        os.replace(temporary_path, destination)
+    except OSError:
+        raise ValueError(f"报价表无法安全发布到输出目录：{output_dir}") from None
+    return destination
 
 
 def _remove_temporary_file(temporary_path: Path) -> None:
@@ -252,3 +297,48 @@ def _copy_row_style(
     target_dimension.thickTop = source_dimension.thickTop
     target_dimension.thickBot = source_dimension.thickBot
     target_dimension._style = copy(source_dimension._style)
+
+
+def _insert_evidence_images(
+    sheet: Worksheet,
+    evidence_images: tuple[QuoteEvidenceImage, ...],
+) -> None:
+    anchors = [evidence.anchor for evidence in evidence_images]
+    if len(set(anchors)) != len(anchors):
+        raise ValueError("evidence image anchors must be unique")
+
+    for evidence in evidence_images:
+        image = OpenpyxlImage(BytesIO(evidence.payload))
+        column = re.match(r"[A-Z]+", evidence.anchor)
+        row = re.search(r"\d+$", evidence.anchor)
+        if column is None or row is None:
+            raise AssertionError("validated evidence anchor must be parseable")
+        column_letter = column.group()
+        row_number = int(row.group())
+        width = sheet.column_dimensions[column_letter].width
+        width_pixels = _column_width_pixels(float(width or 13))
+        height_points = (
+            sheet.row_dimensions[row_number].height
+            or sheet.sheet_format.defaultRowHeight
+            or 15
+        )
+        height_pixels = points_to_pixels(float(height_points))
+        available_width = max(1, width_pixels - 4)
+        available_height = max(1, height_pixels - 4)
+        if image.width <= 0 or image.height <= 0:
+            raise ValueError("evidence image dimensions must be positive")
+        scale = min(
+            available_width / image.width,
+            available_height / image.height,
+            1,
+        )
+        image.width *= scale
+        image.height *= scale
+        image.anchor = evidence.anchor
+        sheet.add_image(image)
+
+
+def _column_width_pixels(width: float) -> int:
+    if width < 1:
+        return int(width * 12 + 0.5)
+    return int(width * 7 + 5)

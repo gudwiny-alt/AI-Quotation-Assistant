@@ -91,6 +91,8 @@ class WebToExcelRequest:
     input_paths: InputPaths | None = None
     run_at: datetime | None = None
     capture_acceptance_policy: MacCapturePolicy = MacCapturePolicy.STRICT
+    quote_destination_path: Path | None = None
+    report_destination_path: Path | None = None
 
     def __post_init__(self) -> None:
         validate_mac_capture_policy(
@@ -147,6 +149,7 @@ def write_web_results_to_excel(
             template_path=request.template_path,
             output_dir=request.output_dir,
             evidence_images=images,
+            destination_path=request.quote_destination_path,
         )
     )
     assessments = assess_rows(
@@ -174,9 +177,15 @@ def write_web_results_to_excel(
                 waiting_task_ids=request.waiting_task_ids,
                 website_run=True,
                 capture_acceptance_policy=request.capture_acceptance_policy,
+                destination_path=request.report_destination_path,
             )
         )
     except Exception:
+        if request.quote_destination_path is not None:
+            raise _output_error(
+                "OUTPUT_PAIR_FAILED",
+                "执行报告生成失败，处理中报价表保留为最近一次可用快照",
+            ) from None
         try:
             quote_path.unlink(missing_ok=True)
         except OSError:

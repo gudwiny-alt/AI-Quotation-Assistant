@@ -215,9 +215,109 @@ def test_service_event_sink_forwards_durable_event_and_same_repository_snapshot(
 
     assert [event.event for event in events] == ["progress", "observation", "result"]
     assert len(repositories) == 1
-    assert snapshots[1].observations == (checkpoint,)
-    assert snapshots[1].results == ()
-    assert snapshots[2].results == (result,)
+    assert len(snapshots) == 2
+    assert snapshots[0].observations == (checkpoint,)
+    assert snapshots[0].results == ()
+    assert snapshots[1].results == (result,)
+
+
+def test_checkpoint_sink_receives_only_durable_stage_events_but_ui_receives_all(
+    tmp_path: Path,
+) -> None:
+    """Break caught: progress or retryable failures rewrite partial workbooks."""
+    from quote_app.services import web_run
+
+    task = _task("checkpoint-events")
+    events: list[WorkerEvent] = []
+    snapshots: list[object] = []
+
+    class Repository:
+        def load_observation(self, _task_id: str) -> None:
+            return None
+
+        def load_result(self, _task_id: str) -> None:
+            return None
+
+        def task_state(self, _task_id: str) -> TaskState:
+            return TaskState.PENDING
+
+    request = web_run.WebsiteRunRequest(
+        run_id="run-1",
+        tasks=(task,),
+        profile_dir=tmp_path / "profile",
+        evidence_dir=tmp_path / "evidence",
+        database_path=tmp_path / "state.sqlite3",
+        event_sink=events.append,
+        checkpoint_sink=snapshots.append,
+    )
+    sink = web_run._event_sink_for_request(request, Repository())
+    assert sink is not None
+    source_events = [
+        WorkerEvent("progress", "run-1", task.task_id, {}),
+        WorkerEvent("observation", "run-1", task.task_id, {}),
+        WorkerEvent("result", "run-1", task.task_id, {}),
+        WorkerEvent("waiting_for_login", "run-1", task.task_id, {}),
+        WorkerEvent(
+            "technical_failure",
+            "run-1",
+            task.task_id,
+            {"retryable": True, "retry_remaining": 1},
+        ),
+        WorkerEvent(
+            "technical_failure",
+            "run-1",
+            task.task_id,
+            {"retryable": False, "retry_remaining": 1},
+        ),
+        WorkerEvent(
+            "technical_failure",
+            "run-1",
+            task.task_id,
+            {"retryable": True, "retry_remaining": 0},
+        ),
+    ]
+
+    for event in source_events:
+        sink(event)
+
+    assert events == source_events
+    assert len(snapshots) == 5
+
+
+def test_checkpoint_failure_does_not_prevent_ui_event_delivery(tmp_path: Path) -> None:
+    """Break caught: a failed partial publish hides a durable UI progress event."""
+    from quote_app.services import web_run
+
+    task = _task("checkpoint-failure")
+    events: list[WorkerEvent] = []
+
+    class Repository:
+        def load_observation(self, _task_id: str) -> None:
+            return None
+
+        def load_result(self, _task_id: str) -> None:
+            return None
+
+        def task_state(self, _task_id: str) -> TaskState:
+            return TaskState.PENDING
+
+    request = web_run.WebsiteRunRequest(
+        run_id="run-1",
+        tasks=(task,),
+        profile_dir=tmp_path / "profile",
+        evidence_dir=tmp_path / "evidence",
+        database_path=tmp_path / "state.sqlite3",
+        event_sink=events.append,
+        checkpoint_sink=lambda _snapshot: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    sink = web_run._event_sink_for_request(request, Repository())
+    assert sink is not None
+    event = WorkerEvent("observation", "run-1", task.task_id, {})
+
+    with pytest.raises(RuntimeError, match="boom"):
+        sink(event)
+
+    assert events == [event]
 
 
 def test_manual_action_controller_unblocks_worker_when_cancelled() -> None:

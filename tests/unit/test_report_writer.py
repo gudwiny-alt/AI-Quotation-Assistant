@@ -361,6 +361,20 @@ def test_report_naming_is_collision_safe_and_existing_file_is_unchanged(
     assert sha256(first.read_bytes()).hexdigest() == digest
 
 
+def test_explicit_destination_is_atomically_replaced(tmp_path: Path) -> None:
+    """Break caught: partial report publication creates extra files or leaves stale bytes."""
+    destination = tmp_path / "2026年08月报价执行报告-处理中.xlsx"
+    destination.write_bytes(b"old-snapshot")
+
+    path = write_execution_report(
+        replace(_request(tmp_path), destination_path=destination)
+    )
+
+    assert path == destination
+    assert load_workbook(path)["运行总览"]["B2"].value == "2026年08月"
+    assert not tuple(tmp_path.glob(".report-*.tmp.xlsx"))
+
+
 def test_report_never_overwrites_concurrent_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

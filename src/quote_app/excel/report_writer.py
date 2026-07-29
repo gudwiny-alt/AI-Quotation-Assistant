@@ -111,6 +111,7 @@ class ReportWriteRequest:
     waiting_task_ids: frozenset[str] = frozenset()
     website_run: bool = False
     capture_acceptance_policy: MacCapturePolicy = MacCapturePolicy.STRICT
+    destination_path: Path | None = None
 
     def __post_init__(self) -> None:
         validate_mac_capture_policy(
@@ -227,10 +228,18 @@ def write_execution_report(request: ReportWriteRequest) -> Path:
         except OSError:
             raise ValueError(f"执行报告无法写入输出目录：{output_dir}") from None
         workbook.close()
-        published_path = _publish_without_overwrite(
-            temporary_path,
-            output_dir,
-            request.quote_month,
+        published_path = (
+            _publish_to_destination(
+                temporary_path,
+                output_dir,
+                request.destination_path,
+            )
+            if request.destination_path is not None
+            else _publish_without_overwrite(
+                temporary_path,
+                output_dir,
+                request.quote_month,
+            )
         )
         return published_path
     finally:
@@ -766,6 +775,21 @@ def _publish_without_overwrite(
             raise ValueError(f"执行报告无法安全发布到输出目录：{output_dir}") from None
         return candidate
     raise AssertionError("unreachable")
+
+
+def _publish_to_destination(
+    temporary_path: Path,
+    output_dir: Path,
+    destination_path: Path,
+) -> Path:
+    destination = Path(destination_path)
+    if destination.resolve().parent != output_dir.resolve():
+        raise ValueError("执行报告指定输出路径必须位于输出目录内")
+    try:
+        os.replace(temporary_path, destination)
+    except OSError:
+        raise ValueError(f"执行报告无法安全发布到输出目录：{output_dir}") from None
+    return destination
 
 
 def _remove_temporary_file(temporary_path: Path) -> None:
