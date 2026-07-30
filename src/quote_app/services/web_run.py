@@ -371,13 +371,17 @@ class _WebsiteRunSnapshotIndex:
         self._observations: dict[str, WebsiteObservationCheckpoint] = {}
         self._results: dict[str, WebsiteResult] = {}
         self._waiting: set[str] = set()
-        for task in self._tasks:
-            self._refresh(task.task_id)
+        self._initialized = False
 
     def update(self, task_id: str) -> WebsiteRunSnapshot:
         if task_id not in self._task_ids:
             raise ValueError("checkpoint event does not belong to the requested run")
-        self._refresh(task_id)
+        if self._initialized:
+            self._refresh(task_id)
+        else:
+            for task in self._tasks:
+                self._refresh(task.task_id)
+            self._initialized = True
         return WebsiteRunSnapshot(
             observations=tuple(
                 self._observations[task.task_id]

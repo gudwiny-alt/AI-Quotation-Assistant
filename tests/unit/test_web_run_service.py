@@ -284,6 +284,29 @@ def test_checkpoint_sink_receives_only_durable_stage_events_but_ui_receives_all(
     assert len(snapshots) == 5
 
 
+def test_checkpoint_index_does_not_read_tasks_before_runner_registers_them(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a new run fails before the runner can persist its tasks."""
+    from quote_app.services import web_run
+    from quote_app.tasks.repository import SQLiteTaskRepository
+
+    task = _task("new-run-task")
+    request = web_run.WebsiteRunRequest(
+        run_id="run-1",
+        tasks=(task,),
+        profile_dir=tmp_path / "profile",
+        evidence_dir=tmp_path / "evidence",
+        database_path=tmp_path / "state.sqlite3",
+        checkpoint_sink=lambda _snapshot: None,
+    )
+
+    with SQLiteTaskRepository(request.database_path) as repository:
+        sink = web_run._event_sink_for_request(request, repository)
+
+    assert sink is not None
+
+
 def test_checkpoint_event_updates_only_its_task_after_one_initial_snapshot_scan(
     tmp_path: Path,
 ) -> None:
@@ -320,15 +343,18 @@ def test_checkpoint_event_updates_only_its_task_after_one_initial_snapshot_scan(
     )
     sink = web_run._event_sink_for_request(request, Repository())
     assert sink is not None
-    after_initial_scan = dict(load_calls)
+    assert load_calls == {"observation": 0, "result": 0, "state": 0}
 
     sink(WorkerEvent("observation", "run-1", tasks[-1].task_id, {}))
+    assert load_calls == {"observation": 900, "result": 900, "state": 900}
+    after_initial_scan = dict(load_calls)
 
+    sink(WorkerEvent("result", "run-1", tasks[-1].task_id, {}))
     assert {
         key: load_calls[key] - after_initial_scan[key]
         for key in load_calls
     } == {"observation": 1, "result": 1, "state": 1}
-    assert len(snapshots) == 1
+    assert len(snapshots) == 2
 
 
 def test_checkpoint_failure_does_not_prevent_ui_event_delivery(tmp_path: Path) -> None:
