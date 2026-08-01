@@ -128,6 +128,23 @@ class IncrementalExcelPublisher:
                 _remove_path(staging.quote_path)
                 _remove_path(staging.report_path)
 
+    def discard_checkpoints_after_final_output(
+        self,
+        *,
+        final_quote_path: Path,
+        final_report_path: Path,
+    ) -> None:
+        """Remove only this run's checkpoints after both final workbooks exist."""
+        if not isinstance(final_quote_path, Path):
+            raise TypeError("final_quote_path must be a Path")
+        if not isinstance(final_report_path, Path):
+            raise TypeError("final_report_path must be a Path")
+        if not final_quote_path.is_file() or not final_report_path.is_file():
+            raise RuntimeError("最终报价表或执行报告未成功生成，保留处理中检查点")
+        with _pair_process_lock(self._output_dir, self._quote_month):
+            _remove_path(self._paths.quote_path)
+            _remove_path(self._paths.report_path)
+
 
 _LARGE_WORKLOAD_TASK_THRESHOLD = 100
 _LARGE_WORKLOAD_BATCH_SIZE = 25

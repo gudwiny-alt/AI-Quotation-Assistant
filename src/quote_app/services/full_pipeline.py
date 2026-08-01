@@ -216,6 +216,10 @@ def run_full_pipeline(
             capture_acceptance_policy=request.capture_acceptance_policy,
         )
     )
+    publisher.discard_checkpoints_after_final_output(
+        final_quote_path=output.quote_path,
+        final_report_path=output.report_path,
+    )
     return FullPipelineResult(
         quote_path=output.quote_path,
         report_path=output.report_path,

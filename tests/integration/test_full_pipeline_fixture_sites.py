@@ -590,8 +590,9 @@ def test_full_pipeline_replaces_one_partial_excel_pair_after_each_stage(
         },
     ]
     assert result.quote_path.is_file()
-    assert len(list(request.paths.output_dir.glob("*终端供货价报价表-处理中.xlsx"))) == 1
-    assert len(list(request.paths.output_dir.glob("*报价执行报告-处理中.xlsx"))) == 1
+    assert result.report_path.is_file()
+    assert not list(request.paths.output_dir.glob("*终端供货价报价表-处理中.xlsx"))
+    assert not list(request.paths.output_dir.glob("*报价执行报告-处理中.xlsx"))
 
 
 def test_full_pipeline_blocks_before_creating_run_when_runtime_is_not_ready(
