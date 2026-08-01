@@ -48,7 +48,7 @@ Run: `python -m pytest -q tests/contract/test_official_honor_live.py -k search_u
 
 - [ ] **Step 1: Implement bounded URL readiness**
 
-Poll `_validate_honor_search_url` for the exact `/cn/shop/v/search?keyword=<基础机型>` shape within the existing maximum interval. If the first submit did not transition, use exactly one Enter fallback then repeat the same wait.
+Poll `_validate_honor_search_url` for the `/cn/shop/v/search?keyword=<基础机型>` shape within the existing maximum interval. The comparison removes only a leading HONOR/荣耀 label and display whitespace, so `荣耀畅玩80` matches `畅玩 80`; it does not relax card-title variant matching. If the first submit did not transition, use exactly one Enter fallback then repeat the same wait.
 
 - [ ] **Step 2: Require input keyword and cards after URL readiness**
 

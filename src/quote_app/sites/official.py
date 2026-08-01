@@ -695,9 +695,9 @@ class OfficialSiteAdapter:
             override.search_inputs,
             semantic_name="HONOR result search keyword",
         )
-        if (
-            normalize_product_text(result_input.input_value())
-            != normalize_product_text(task.model_name)
+        if not _honor_search_keyword_matches(
+            result_input.input_value(),
+            task.model_name,
         ):
             raise LayoutRecognitionError(
                 "Official HONOR result search keyword does not match"
@@ -1949,8 +1949,7 @@ def _validate_honor_search_url(
         approved = approved and (
             len(query) == 1
             and query[0][0] == "keyword"
-            and normalize_product_text(query[0][1])
-            == normalize_product_text(expected_model)
+            and _honor_search_keyword_matches(query[0][1], expected_model)
         )
     except ValueError:
         approved = False
@@ -1958,6 +1957,27 @@ def _validate_honor_search_url(
         raise LayoutRecognitionError(
             "Official HONOR store search URL is not approved"
         )
+
+
+def _honor_search_keyword_matches(
+    actual_keyword: object,
+    expected_model: str,
+) -> bool:
+    """Compare HONOR's brandless, space-formatted search keyword safely."""
+    if not isinstance(actual_keyword, str):
+        return False
+    actual = _compact_honor_search_keyword(actual_keyword)
+    expected = _compact_honor_search_keyword(expected_model)
+    return bool(actual and expected and actual == expected)
+
+
+def _compact_honor_search_keyword(value: str) -> str:
+    normalized = normalize_product_text(value)
+    for brand_prefix in ("荣耀", "HONOR"):
+        if normalized.startswith(brand_prefix):
+            normalized = normalized.removeprefix(brand_prefix)
+            break
+    return re.sub(r"\s+", "", normalized)
 
 
 def _required_entry_host(entry_url: str) -> str:

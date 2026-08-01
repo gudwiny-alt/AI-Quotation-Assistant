@@ -340,6 +340,25 @@ def test_honor_live_waits_for_search_url_before_reading_homepage_cards(
     assert page.presses == ["Enter"]
 
 
+def test_honor_live_accepts_space_normalized_brandless_search_keyword(
+    official_case: Any,
+) -> None:
+    """HONOR renders `荣耀Magic8` as the search query `Magic 8`."""
+    adapter, task, page = _live_case(official_case, html=_live_honor_html())
+    original_activate_results = page.activate_results
+
+    def activate_search_results() -> None:
+        original_activate_results()
+        page._url = "https://www.honor.com/cn/shop/v/search?keyword=Magic%208"
+
+    page.activate_results = activate_search_results
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url.endswith(f"/product/{_PRODUCT_ID}.html")
+
+
 def test_honor_live_waits_for_product_title_to_render(
     official_case: Any,
 ) -> None:
