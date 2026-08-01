@@ -8,6 +8,7 @@ import pytest
 
 from quote_app.tasks.models import BusinessOutcome
 from quote_app.tasks.retry import LayoutRecognitionError
+from quote_app.tasks.retry import NonRetryableTechnicalError
 from quote_app.tasks.retry import SecurityVerificationRequired
 from quote_app.sites.official_overrides.honor import HonorOfficialOverride
 
@@ -343,6 +344,28 @@ def test_honor_live_accepts_sku_suffix_in_detail_title_and_selects_task_sku(
     assert page.option_labels == ["5G全网通 12GB+512GB", "天青釉"]
 
 
+def test_honor_live_enters_detail_for_capacity_after_base_model(
+    official_case: Any,
+) -> None:
+    """A whitespace-separated capacity is product metadata, not a new model."""
+    adapter, task, page = _live_case(
+        official_case,
+        task_model="荣耀Power2",
+        html=_live_honor_html(
+            card_model="荣耀Power2 12GB+256GB",
+            detail_model="荣耀Power2",
+            result_keyword="荣耀Power2",
+        ),
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.url == (
+        f"https://www.honor.com/cn/shop/product/{_PRODUCT_ID}.html"
+    )
+    assert page.goto_calls[-1] == observation.url
+
+
 def test_honor_live_rejects_variant_in_detail_title(
     official_case: Any,
 ) -> None:
@@ -529,8 +552,35 @@ def test_honor_live_rejects_variant_card_for_base_model(
         ),
     )
 
-    with pytest.raises(LayoutRecognitionError, match="product result|model"):
+    with pytest.raises(NonRetryableTechnicalError) as failure:
         adapter.observe(task, cast(Any, page))
+
+    assert failure.value.code == "HONOR_PRODUCT_MATCH_MISSING"
+    assert page.url == adapter.spec.entry_url
+
+
+def test_honor_live_stops_once_when_multiple_cards_match_base_model(
+    official_case: Any,
+) -> None:
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html().replace(
+            "</ul>",
+            """
+        <li class=\"grid-items\">
+          <a class=\"thumb\" href=\"/cn/shop/product/10086164863191.html\">
+            荣耀Magic8 第五代骁龙8至尊版 预估到手价¥ 4499 ¥ 4999
+          </a>
+        </li>
+      </ul>""",
+        ),
+    )
+
+    with pytest.raises(NonRetryableTechnicalError) as failure:
+        adapter.observe(task, cast(Any, page))
+
+    assert failure.value.code == "HONOR_PRODUCT_MATCH_AMBIGUOUS"
+    assert page.url == adapter.spec.entry_url
 
 
 @pytest.mark.parametrize(
@@ -555,8 +605,10 @@ def test_honor_live_rejects_immediate_variant_delimiters_at_card_stage(
         ),
     )
 
-    with pytest.raises(LayoutRecognitionError, match="product result"):
+    with pytest.raises(NonRetryableTechnicalError) as failure:
         adapter.observe(task, cast(Any, page))
+
+    assert failure.value.code == "HONOR_PRODUCT_MATCH_MISSING"
 
 
 @pytest.mark.parametrize(

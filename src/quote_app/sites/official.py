@@ -718,9 +718,15 @@ class OfficialSiteAdapter:
                 link.inner_text(),
             ):
                 exact_links.append(link)
+        if not exact_links:
+            raise NonRetryableTechnicalError(
+                "HONOR_PRODUCT_MATCH_MISSING",
+                "荣耀官网搜索结果未唯一匹配基础机型，已停在搜索结果页供检查",
+            )
         if len(exact_links) != 1:
-            raise LayoutRecognitionError(
-                "Official HONOR exact product result is missing or ambiguous"
+            raise NonRetryableTechnicalError(
+                "HONOR_PRODUCT_MATCH_AMBIGUOUS",
+                "荣耀官网搜索结果匹配到多个基础机型候选，已停在搜索结果页供检查",
             )
         detail_url = _approved_product_url(
             exact_links[0].get_attribute("href"),

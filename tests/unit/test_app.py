@@ -62,10 +62,10 @@ def test_beta_notice_describes_login_as_runtime_optional() -> None:
     assert "继续当前任务" in BETA_NOTICE
 
 
-def test_app_build_label_identifies_honor_sandbox_fix_scope() -> None:
+def test_app_build_label_identifies_honor_detail_navigation_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL
 
-    assert APP_BUILD_LABEL == "荣耀官网无沙箱修复版（仅官网、全部荣耀行）2026.08.01.2"
+    assert APP_BUILD_LABEL == "荣耀官网详情页进入修复版（仅官网、全部荣耀行）2026.08.01.3"
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(

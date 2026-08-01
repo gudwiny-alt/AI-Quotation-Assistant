@@ -100,12 +100,15 @@ class HonorOfficialOverride:
         candidate = normalize_product_text(card_text)
         if not model or not candidate.startswith(model):
             return False
-        remainder = candidate[len(model) :].lstrip()
+        raw_remainder = candidate[len(model) :]
+        if not raw_remainder:
+            return True
+        if raw_remainder[0].isascii() and raw_remainder[0].isalnum():
+            return False
+        remainder = raw_remainder.lstrip()
         if not remainder:
             return True
         if remainder[0] in _IMMEDIATE_MODEL_DELIMITERS:
-            return False
-        if remainder[0].isascii() and remainder[0].isalnum():
             return False
         return not remainder.startswith(_IMMEDIATE_MODEL_VARIANTS)
 
