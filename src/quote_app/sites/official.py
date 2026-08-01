@@ -677,8 +677,15 @@ class OfficialSiteAdapter:
         )
         search_input.fill(task.model_name)
         search_action.click()
-        page.wait_for_load_state("domcontentloaded")
-        self._raise_if_blocked(page)
+        result_region = self._wait_for_honor_result_region(page)
+        if result_region is None:
+            search_input.press("Enter")
+            result_region = self._wait_for_honor_result_region(page)
+        if result_region is None:
+            raise NonRetryableTechnicalError(
+                "HONOR_SEARCH_RESULTS_MISSING",
+                "荣耀官网搜索后未出现产品结果，请保留当前页面检查后重试",
+            )
         _validate_honor_search_url(page.url, entry_url=self.spec.entry_url)
         override.require_store_title(page)
 
@@ -694,11 +701,6 @@ class OfficialSiteAdapter:
             raise LayoutRecognitionError(
                 "Official HONOR result search keyword does not match"
             )
-        result_region = self._wait_for_honor_visible(
-            page,
-            override.result_regions,
-            semantic_name="HONOR result region",
-        )
         cards = visible_locators(result_region, ("li.grid-items",))
         if not cards:
             raise LayoutRecognitionError(
@@ -729,6 +731,27 @@ class OfficialSiteAdapter:
         )
         page.goto(detail_url, wait_until="domcontentloaded")
         return self._observe_loaded_honor_detail(task, page, detail_url)
+
+    def _wait_for_honor_result_region(self, page: Any) -> Any | None:
+        """Wait for rendered HONOR cards without navigating or creating a page."""
+        override = self._honor_override
+        if override is None:
+            raise AssertionError("HONOR override must be present")
+        for attempt in range(_HONOR_RENDER_POLLS + 1):
+            self._raise_if_blocked(page)
+            regions = visible_locators(page, override.result_regions)
+            if len(regions) > 1:
+                raise LayoutRecognitionError(
+                    "Official HONOR result region is ambiguous"
+                )
+            if len(regions) == 1 and visible_locators(
+                regions[0],
+                ("li.grid-items",),
+            ):
+                return regions[0]
+            if attempt < _HONOR_RENDER_POLLS:
+                page.wait_for_timeout(_HONOR_RENDER_INTERVAL_MS)
+        return None
 
     def _observe_loaded_honor_detail(
         self,

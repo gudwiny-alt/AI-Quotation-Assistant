@@ -166,10 +166,16 @@ class _OfficialLocator:
     def input_value(self) -> str:
         return self.nodes[0].attrs.get("value", "")
 
+    def press(self, key: str) -> None:
+        self.page.press(key)
+
     def click(self) -> None:
         node = self.nodes[0]
         if node.attrs.get("data-action") == "search":
-            self.page.activate_results()
+            if node.attrs.get("data-requires-enter") == "true":
+                self.page.search_waiting_for_enter = True
+            else:
+                self.page.activate_results()
         option_kind = node.attrs.get("data-option-kind")
         if option_kind is not None:
             if option_kind.startswith("honor-"):
@@ -244,6 +250,8 @@ class _OfficialFixturePage:
         self.price_evaluations = 0
         self.stock_reads = 0
         self.wait_timeout_milliseconds: list[float] = []
+        self.presses: list[str] = []
+        self.search_waiting_for_enter = False
         self._product_urls = {
             urljoin(entry_url, node.attrs["href"])
             for node in self.root.descendants()
@@ -330,6 +338,12 @@ class _OfficialFixturePage:
             prompt.children.append(stock)
             prompt.text_parts.append("，预计明天送达")
             node.children.extend((region, prompt))
+
+    def press(self, key: str) -> None:
+        self.presses.append(key)
+        if key == "Enter" and self.search_waiting_for_enter:
+            self.search_waiting_for_enter = False
+            self.activate_results()
 
     def note_price_evaluation(self, source: _OfficialNode) -> None:
         self.price_evaluations += 1

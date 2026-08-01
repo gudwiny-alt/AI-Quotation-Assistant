@@ -286,6 +286,25 @@ def test_honor_live_waits_for_search_results_to_render(
     assert 500 in page.wait_timeout_milliseconds
 
 
+def test_honor_live_submits_enter_once_when_click_does_not_render_results(
+    official_case: Any,
+) -> None:
+    """A live HONOR search can require the same search box to submit Enter."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html().replace(
+            'data-action="search"',
+            'data-action="search" data-requires-enter="true"',
+        ),
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.presses == ["Enter"]
+    assert page.goto_calls.count(adapter.spec.entry_url) == 1
+
+
 def test_honor_live_waits_for_product_title_to_render(
     official_case: Any,
 ) -> None:
