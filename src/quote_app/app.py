@@ -38,6 +38,7 @@ from quote_app.services.web_run import (
     mac_visual_review_runtime_factory,
     run_website_tasks,
 )
+from quote_app.tasks.models import WebsiteChannel
 
 
 APP_BUILD_LABEL = "荣耀逐条保存·官网京东天猫闭环版（全部荣耀行）2026.07.30.1"
@@ -70,6 +71,7 @@ def make_full_pipeline_request(
     app_paths: AppPaths | None = None,
     controller: WebsiteRunController | None = None,
     selected_brand: str | None = None,
+    selected_channels: frozenset[WebsiteChannel] | None = None,
     event_sink: Callable[[WorkerEvent], None] | None = None,
 ) -> FullPipelineRequest:
     """Bind a user-selected quotation run to durable per-user browser state."""
@@ -83,6 +85,7 @@ def make_full_pipeline_request(
         runtime_readiness=lambda: check_runtime_readiness(state_paths),
         controller=controller,
         selected_brand=selected_brand,
+        selected_channels=selected_channels,
         event_sink=event_sink,
     )
 
@@ -358,7 +361,7 @@ class QuoteApp:
         self.output_dir_var = tk.StringVar()
         self.year_var = tk.StringVar(value=str(current.year))
         self.month_var = tk.StringVar(value=str(current.month))
-        self.brand_mode_var = tk.StringVar(value="仅 HONOR")
+        self.brand_mode_var = tk.StringVar(value="荣耀官网验收（仅官网）")
         self._last_output_dir: Path | None = None
         self._website_controller: WebsiteRunController | None = None
         self._shown_manual_action_task_id: str | None = None
@@ -389,13 +392,13 @@ class QuoteApp:
         ttk.Label(month_frame, text="年").grid(row=0, column=1, padx=(4, 12))
         ttk.Entry(month_frame, width=5, textvariable=self.month_var).grid(row=0, column=2)
         ttk.Label(month_frame, text="月").grid(row=0, column=3, padx=4)
-        ttk.Label(month_frame, text="仅处理品牌").grid(
+        ttk.Label(month_frame, text="运行范围").grid(
             row=0, column=4, padx=(16, 4)
         )
         ttk.Combobox(
             month_frame,
             textvariable=self.brand_mode_var,
-            values=("仅 HONOR",),
+            values=("荣耀官网验收（仅官网）", "荣耀全站闭环（官网、京东、天猫）"),
             state="readonly",
             width=10,
         ).grid(row=0, column=5)
@@ -481,6 +484,7 @@ class QuoteApp:
                 month=_as_optional_int(self.month_var.get()),
             )
             selected_brand = self._selected_brand_from_mode()
+            selected_channels = self._selected_channels_from_mode()
             controller = WebsiteRunController()
             self._website_controller = controller
             self._shown_manual_action_task_id = None
@@ -501,13 +505,16 @@ class QuoteApp:
                 app_paths=self.app_paths,
                 controller=controller,
                 selected_brand=selected_brand,
+                selected_channels=selected_channels,
                 event_sink=queue_worker_event,
             )
         except InputValidationError as error:
             self._set_status(f"输入无效：{error}")
             return
         status = f"{APP_BUILD_LABEL}\n自动报价运行中"
-        if selected_brand == "HONOR":
+        if selected_channels == frozenset({WebsiteChannel.OFFICIAL}):
+            status = f"荣耀官网验收模式（仅官网）\n{status}"
+        elif selected_brand == "HONOR":
             status = f"荣耀闭环穿测模式（仅输出全部荣耀行）\n{status}"
         self._set_status(status)
 
@@ -528,9 +535,23 @@ class QuoteApp:
 
     def _selected_brand_from_mode(self) -> str:
         mode = self.brand_mode_var.get()
-        if mode == "仅 HONOR":
+        if mode in {
+            "仅 HONOR",
+            "荣耀官网验收（仅官网）",
+            "荣耀全站闭环（官网、京东、天猫）",
+        }:
             return "HONOR"
         raise InputValidationError("当前版本仅支持 HONOR")
+
+    def _selected_channels_from_mode(
+        self,
+    ) -> frozenset[WebsiteChannel] | None:
+        mode = self.brand_mode_var.get()
+        if mode == "荣耀官网验收（仅官网）":
+            return frozenset({WebsiteChannel.OFFICIAL})
+        if mode in {"仅 HONOR", "荣耀全站闭环（官网、京东、天猫）"}:
+            return None
+        raise InputValidationError("当前版本仅支持荣耀官网验收或荣耀全站闭环")
 
     def check_readiness(self) -> None:
         """Render the current local capture and browser preflight state."""

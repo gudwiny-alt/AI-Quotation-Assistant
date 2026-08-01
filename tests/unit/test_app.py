@@ -105,6 +105,27 @@ def test_desktop_request_passes_honor_only_mode(tmp_path: Path) -> None:
     assert request.selected_brand == "HONOR"
 
 
+def test_desktop_request_passes_honor_official_scope(tmp_path: Path) -> None:
+    from quote_app.app import make_full_pipeline_request
+    from quote_app.paths import build_app_paths
+
+    request = make_full_pipeline_request(
+        paths=InputPaths(
+            tmp_path / "base.xlsx",
+            tmp_path / "marketing.xlsx",
+            tmp_path / "bop.xlsx",
+            tmp_path / "outputs",
+        ),
+        quote_month=QuoteMonth(2026, 8),
+        app_paths=build_app_paths("Darwin", home=tmp_path / "user"),
+        selected_brand="HONOR",
+        selected_channels=frozenset({WebsiteChannel.OFFICIAL}),
+    )
+
+    assert request.selected_brand == "HONOR"
+    assert request.selected_channels == frozenset({WebsiteChannel.OFFICIAL})
+
+
 def test_desktop_run_sends_selected_inputs_to_the_complete_pipeline(
     tmp_path: Path,
 ) -> None:
