@@ -715,7 +715,7 @@ class OfficialSiteAdapter:
             )
             if override.card_matches_model(
                 task.model_name,
-                link.inner_text(),
+                card.inner_text(),
             ):
                 exact_links.append(link)
         if not exact_links:

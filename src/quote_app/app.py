@@ -41,7 +41,7 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "荣耀官网详情页进入修复版（仅官网、全部荣耀行）2026.08.01.3"
+APP_BUILD_LABEL = "荣耀官网商品卡片修复版（仅官网、全部荣耀行）2026.08.01.4"
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：荣耀官网首次使用无需预先登录；遇到登录或验证页面时，"
     "完成后点击“继续当前任务”。"

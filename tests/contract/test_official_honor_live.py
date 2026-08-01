@@ -366,6 +366,36 @@ def test_honor_live_enters_detail_for_capacity_after_base_model(
     assert page.goto_calls[-1] == observation.url
 
 
+def test_honor_live_matches_caption_outside_the_thumbnail_link(
+    official_case: Any,
+) -> None:
+    """HONOR product labels need not be descendants of the image link."""
+    card_model = "荣耀Power2 12GB+256GB"
+    card_markup = (
+        f'<a class="thumb" href="/cn/shop/product/{_PRODUCT_ID}.html">'
+        '<img src="power2.png"></a>'
+        f'<a class="product-name">新品 {card_model} 幻夜黑 双卡 全网通版</a>'
+    )
+    original_markup = (
+        f'<a class="thumb" href="/cn/shop/product/{_PRODUCT_ID}.html">\n'
+        f"            {card_model} 第五代骁龙8至尊版 预估到手价¥ 4499 ¥ 4999\n"
+        "          </a>"
+    )
+    adapter, task, page = _live_case(
+        official_case,
+        task_model="荣耀Power2",
+        html=_live_honor_html(
+            card_model=card_model,
+            detail_model="荣耀Power2",
+            result_keyword="荣耀Power2",
+        ).replace(original_markup, card_markup),
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.url.endswith(f"/product/{_PRODUCT_ID}.html")
+
+
 def test_honor_live_rejects_variant_in_detail_title(
     official_case: Any,
 ) -> None:

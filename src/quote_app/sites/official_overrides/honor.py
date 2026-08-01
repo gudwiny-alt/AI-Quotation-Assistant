@@ -94,13 +94,26 @@ class HonorOfficialOverride:
     def is_numeric_product_path(path: str) -> bool:
         return _HONOR_PRODUCT_PATH.fullmatch(path) is not None
 
-    @staticmethod
-    def card_matches_model(model_name: str, card_text: str) -> bool:
+    @classmethod
+    def card_matches_model(cls, model_name: str, card_text: str) -> bool:
         model = normalize_product_text(model_name)
         candidate = normalize_product_text(card_text)
-        if not model or not candidate.startswith(model):
+        if not model or not candidate:
             return False
-        raw_remainder = candidate[len(model) :]
+        search_from = 0
+        while (index := candidate.find(model, search_from)) >= 0:
+            raw_prefix = candidate[:index]
+            raw_remainder = candidate[index + len(model) :]
+            if (
+                not raw_prefix
+                or not (raw_prefix[-1].isascii() and raw_prefix[-1].isalnum())
+            ) and cls._card_model_remainder_is_allowed(raw_remainder):
+                return True
+            search_from = index + len(model)
+        return False
+
+    @staticmethod
+    def _card_model_remainder_is_allowed(raw_remainder: str) -> bool:
         if not raw_remainder:
             return True
         if raw_remainder[0].isascii() and raw_remainder[0].isalnum():
