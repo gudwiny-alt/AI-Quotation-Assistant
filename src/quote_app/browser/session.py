@@ -142,6 +142,7 @@ class PersistentBrowserSession:
                     *launch_args,
                     "--force-renderer-accessibility",
                 ],
+                ignore_default_args=["--no-sandbox"],
             )
             if self._startup_preflight is not None:
                 self._startup_preflight(self._context)

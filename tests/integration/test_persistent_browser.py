@@ -182,6 +182,7 @@ def test_context_startup_failure_stops_playwright_and_releases_lock(
                     "--start-maximized",
                     "--force-renderer-accessibility",
                 ],
+                "ignore_default_args": ["--no-sandbox"],
             },
         )
     ]
@@ -236,6 +237,7 @@ def test_beta_launch_args_and_startup_preflight_run_before_page_use(
                     "--window-size=1024,640",
                     "--force-renderer-accessibility",
                 ],
+                "ignore_default_args": ["--no-sandbox"],
             },
         )
     ]
