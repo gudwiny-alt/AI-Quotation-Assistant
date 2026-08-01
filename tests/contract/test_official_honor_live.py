@@ -306,10 +306,10 @@ def test_honor_live_submits_enter_once_when_click_does_not_render_results(
     assert page.goto_calls.count(adapter.spec.entry_url) == 1
 
 
-def test_honor_live_waits_for_search_url_before_reading_homepage_cards(
+def test_honor_live_uses_verified_matching_card_without_search_url(
     official_case: Any,
 ) -> None:
-    """Homepage recommendations must never stand in for search results."""
+    """A matching official product card is sufficient without a route change."""
     home_cards = f"""
       <ul id="mainSaleList">
         <li class="grid-items"><a class="thumb" href="/cn/shop/product/{_PRODUCT_ID}.html">
@@ -337,7 +337,7 @@ def test_honor_live_waits_for_search_url_before_reading_homepage_cards(
     observation = adapter.observe(task, cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert page.presses == ["Enter"]
+    assert page.presses == []
 
 
 def test_honor_live_accepts_space_normalized_brandless_search_keyword(
@@ -388,6 +388,63 @@ def test_honor_live_accepts_root_host_search_redirect(
     assert observation.url == (
         f"https://www.honor.com/cn/shop/product/{_PRODUCT_ID}.html"
     )
+
+
+def test_honor_live_enters_detail_when_target_card_renders_without_search_url(
+    official_case: Any,
+) -> None:
+    """A rendered exact product card is sufficient when HONOR keeps its URL."""
+    adapter, task, page = _live_case(official_case, html=_live_honor_html())
+    original_activate_results = page.activate_results
+
+    def activate_search_results_without_url_change() -> None:
+        original_activate_results()
+        page._url = adapter.spec.entry_url
+
+    page.activate_results = activate_search_results_without_url_change
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url.endswith(f"/product/{_PRODUCT_ID}.html")
+
+
+def test_honor_live_deduplicates_repeated_base_card_among_variant_results(
+    official_case: Any,
+) -> None:
+    """Search results may contain repeats plus Plus/Pro variants of a model."""
+    extra_cards = f"""
+        <li class="grid-items">
+          <a class="thumb" href="/cn/shop/product/{_PRODUCT_ID}.html">
+            荣耀畅玩80 6GB+128GB 碧空蓝
+          </a>
+        </li>
+        <li class="grid-items">
+          <a class="thumb" href="/cn/shop/product/10086164863191.html">
+            荣耀畅玩80 Plus 6GB+128GB
+          </a>
+        </li>
+        <li class="grid-items">
+          <a class="thumb" href="/cn/shop/product/10086164863192.html">
+            荣耀畅玩80 Pro 8GB+256GB
+          </a>
+        </li>
+    """
+    html = _live_honor_html(
+        card_model="荣耀畅玩80",
+        detail_model="荣耀畅玩80",
+        result_keyword="荣耀畅玩80",
+    ).replace("      </ul>", f"{extra_cards}      </ul>")
+    adapter, task, page = _live_case(
+        official_case,
+        task_model="荣耀畅玩80",
+        html=html,
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url.endswith(f"/product/{_PRODUCT_ID}.html")
 
 
 def test_honor_live_waits_for_product_title_to_render(
@@ -641,7 +698,7 @@ def test_honor_live_rejects_delivery_region_that_never_stabilizes(
         adapter.observe(task, cast(Any, page))
 
 
-def test_honor_live_rejects_non_numeric_product_route(
+def test_honor_live_skips_non_numeric_product_route(
     official_case: Any,
 ) -> None:
     adapter, task, page = _live_case(
@@ -651,8 +708,11 @@ def test_honor_live_rejects_non_numeric_product_route(
         ),
     )
 
-    with pytest.raises(LayoutRecognitionError, match="URL|route"):
+    with pytest.raises(NonRetryableTechnicalError, match="正式商品页"):
         adapter.observe(task, cast(Any, page))
+
+    assert page.goto_calls == [adapter.spec.entry_url]
+    assert page.presses == ["Enter"]
 
 
 def test_honor_live_rejects_variant_card_for_base_model(

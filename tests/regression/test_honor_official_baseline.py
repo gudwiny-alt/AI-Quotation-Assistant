@@ -1,45 +1,46 @@
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
+from dataclasses import replace
+from decimal import Decimal
+from typing import Any, cast
+
+from quote_app.tasks.models import BusinessOutcome
+from tests.contract.test_official_honor_live import _live_case, _live_honor_html
 
 
-ROOT = Path(__file__).resolve().parents[2]
-OFFICIAL_MODULE = ROOT / "src/quote_app/sites/official.py"
-HONOR_OVERRIDE_MODULE = ROOT / "src/quote_app/sites/official_overrides/honor.py"
-HONOR_DETAIL_SUFFIX_SHA256 = "fbad96e401fa2f0fa8b2600434491cdca4bd53af677d19728ea5c198261b071e"
-HONOR_OVERRIDE_DETAIL_SUFFIX_SHA256 = "2b2c733f27027ea563451d44d72b5b043edbd127dcf50b5101fbb4c577717f4e"
-
-
-def test_honor_official_entry_uses_the_approved_single_enter_recovery() -> None:
-    """Only the homepage entry may recover one unrendered search submission."""
-    payload = OFFICIAL_MODULE.read_text(encoding="utf-8")
-
-    assert 'search_input.press("Enter")' in payload
-    assert "HONOR_SEARCH_RESULTS_MISSING" in payload
-
-
-def test_honor_official_modules_keep_the_detail_chain_frozen() -> None:
-    """Card matching may evolve; SKU, stock and price validation may not."""
-    payload = OFFICIAL_MODULE.read_text(encoding="utf-8")
-    _entry, separator, detail_and_beyond = payload.partition(
-        "    def _observe_loaded_honor_detail("
+def test_honor_official_baseline_recovers_one_enter_then_enters_detail(
+    official_case: Any,
+) -> None:
+    """A click-only search may recover once through the same input's Enter."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html().replace(
+            'data-action="search"',
+            'data-action="search" data-requires-enter="true"',
+        ),
     )
-    assert separator
-    detail_chain, search_url_helper, _rest = detail_and_beyond.partition(
-        "\ndef _validate_honor_search_url("
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.presses == ["Enter"]
+    assert observation.url.endswith(".html")
+
+
+def test_honor_official_baseline_keeps_detail_sku_and_price_verification(
+    official_case: Any,
+) -> None:
+    """The proven detail path must still select the requested SKU before pricing."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(),
     )
-    assert search_url_helper
-    assert (
-        hashlib.sha256(detail_chain.encode("utf-8")).hexdigest()
-        == HONOR_DETAIL_SUFFIX_SHA256
-    )
-    override_payload = HONOR_OVERRIDE_MODULE.read_text(encoding="utf-8")
-    _matching, separator, detail_and_beyond = override_payload.partition(
-        "    @classmethod\n    def select_task_sku("
-    )
-    assert separator
-    assert (
-        hashlib.sha256(detail_and_beyond.encode("utf-8")).hexdigest()
-        == HONOR_OVERRIDE_DETAIL_SUFFIX_SHA256
-    )
+    task = replace(task, ram="12GB", storage="512GB", color="天青釉")
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4499.00")
+    assert observation.semantic_state.capacity == "12GB+512GB"
+    assert observation.semantic_state.color == "天青釉"
+    assert page.option_clicks == ["honor-version", "honor-color"]

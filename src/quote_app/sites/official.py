@@ -681,74 +681,75 @@ class OfficialSiteAdapter:
         )
         search_input.fill(task.model_name)
         search_action.click()
-        if not self._wait_for_honor_search_url(page, task):
+        detail_urls = self._wait_for_honor_candidate_detail_urls(page, task)
+        if not detail_urls:
             search_input.press("Enter")
-        if not self._wait_for_honor_search_url(page, task):
-            raise NonRetryableTechnicalError(
-                "HONOR_SEARCH_RESULTS_MISSING",
-                "荣耀官网搜索后未出现产品结果，请保留当前页面检查后重试",
-            )
-        override.require_store_title(page)
-
-        result_input = self._wait_for_honor_visible(
-            page,
-            override.search_inputs,
-            semantic_name="HONOR result search keyword",
-        )
-        if not _honor_search_keyword_matches(
-            result_input.input_value(),
-            task.model_name,
-        ):
-            raise LayoutRecognitionError(
-                "Official HONOR result search keyword does not match"
-            )
-        result_region = self._wait_for_honor_result_region(page)
-        if result_region is None:
-            raise NonRetryableTechnicalError(
-                "HONOR_SEARCH_RESULTS_MISSING",
-                "荣耀官网搜索结果页未出现产品卡片，请保留当前页面检查后重试",
-            )
-        cards = visible_locators(result_region, ("li.grid-items",))
-        if not cards:
-            raise LayoutRecognitionError(
-                "Official HONOR result cards are missing"
-            )
-        exact_links: list[Any] = []
-        for card in cards:
-            link = _unique_visible_locator(
-                card,
-                override.product_links,
-                semantic_name="HONOR product card link",
-            )
-            if override.card_matches_model(
-                task.model_name,
-                card.inner_text(),
-            ):
-                exact_links.append(link)
-        if not exact_links:
+            detail_urls = self._wait_for_honor_candidate_detail_urls(page, task)
+        if not detail_urls:
             raise NonRetryableTechnicalError(
                 "HONOR_PRODUCT_MATCH_MISSING",
-                "荣耀官网搜索结果未唯一匹配基础机型，已停在搜索结果页供检查",
+                "荣耀官网搜索后未找到基础机型的正式商品页，请保留当前页面检查后重试",
             )
-        if len(exact_links) != 1:
+        if len(detail_urls) != 1:
             raise NonRetryableTechnicalError(
                 "HONOR_PRODUCT_MATCH_AMBIGUOUS",
-                "荣耀官网搜索结果匹配到多个基础机型候选，已停在搜索结果页供检查",
+                "荣耀官网搜索结果匹配到多个不同基础机型详情页，已停在搜索结果页供检查",
             )
+        page.goto(detail_urls[0], wait_until="domcontentloaded")
+        return self._observe_loaded_honor_detail(task, page, detail_urls[0])
+
+    def _wait_for_honor_candidate_detail_urls(
+        self,
+        page: Any,
+        task: WebsiteTask,
+    ) -> tuple[str, ...]:
+        """Wait for verified base-model detail links, not a URL-shaped result page."""
+        for attempt in range(_HONOR_RENDER_POLLS + 1):
+            self._raise_if_blocked(page)
+            detail_urls = self._honor_candidate_detail_urls(page, task)
+            if detail_urls:
+                return detail_urls
+            if attempt < _HONOR_RENDER_POLLS:
+                page.wait_for_timeout(_HONOR_RENDER_INTERVAL_MS)
+        return ()
+
+    def _honor_candidate_detail_urls(
+        self,
+        page: Any,
+        task: WebsiteTask,
+    ) -> tuple[str, ...]:
+        override = self._honor_override
+        if override is None:
+            raise AssertionError("HONOR override must be present")
         expected_host = _required_entry_host(self.spec.entry_url)
-        detail_url = _approved_product_url(
-            _canonicalize_honor_product_href(
-                exact_links[0].get_attribute("href"),
-                base_url=page.url,
-                expected_host=expected_host,
-            ),
-            base_url=page.url,
-            expected_host=expected_host,
-            brand=self.spec.brand,
-            expected_model=task.model_name,
+        detail_urls: list[str] = []
+        cards = visible_locators(
+            page,
+            ("#mainSaleList li.grid-items", "li.grid-items"),
         )
-        page.goto(detail_url, wait_until="domcontentloaded")
-        return self._observe_loaded_honor_detail(task, page, detail_url)
+        for card in cards:
+            if not override.card_matches_model(task.model_name, card.inner_text()):
+                continue
+            links = visible_locators(card, override.product_links)
+            if len(links) != 1:
+                continue
+            try:
+                detail_url = _approved_product_url(
+                    _canonicalize_honor_product_href(
+                        links[0].get_attribute("href"),
+                        base_url=page.url,
+                        expected_host=expected_host,
+                    ),
+                    base_url=page.url,
+                    expected_host=expected_host,
+                    brand=self.spec.brand,
+                    expected_model=task.model_name,
+                )
+            except LayoutRecognitionError:
+                continue
+            if detail_url not in detail_urls:
+                detail_urls.append(detail_url)
+        return tuple(detail_urls)
 
     def _wait_for_honor_search_url(
         self,
@@ -1809,12 +1810,14 @@ def _approved_product_url(
         resolved = urljoin(base_url, raw_href.strip())
         parsed = urlsplit(resolved)
         port = parsed.port
-        expected_path = _expected_product_path(brand, expected_model)
-        approved_path = parsed.path == expected_path
-        if brand == "HONOR":
-            approved_path = (
-                approved_path
-                or HonorOfficialOverride.is_numeric_product_path(parsed.path)
+        if brand == "HONOR" and HonorOfficialOverride.is_numeric_product_path(
+            parsed.path
+        ):
+            approved_path = True
+        else:
+            approved_path = parsed.path == _expected_product_path(
+                brand,
+                expected_model,
             )
         approved = (
             parsed.scheme.lower() == "https"
