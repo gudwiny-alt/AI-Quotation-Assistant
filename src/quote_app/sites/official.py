@@ -269,11 +269,11 @@ class OfficialSiteAdapter:
         browser_page = _playwright_page(page)
         browser_page.goto(self.spec.entry_url, wait_until="domcontentloaded")
         self._raise_if_blocked(browser_page)
-        if (
-            self._honor_override is not None
-            and self._wait_for_honor_live_contract(browser_page)
-        ):
-            return self._observe_honor_live(task, browser_page)
+        if self._honor_override is not None:
+            if self._honor_override.uses_live_contract(
+                browser_page
+            ) or self._wait_for_honor_live_contract(browser_page):
+                return self._observe_honor_live(task, browser_page)
         self._require_approved_store(browser_page)
 
         result_region, keyword_locator = self._open_model_results(

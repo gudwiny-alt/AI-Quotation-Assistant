@@ -9,6 +9,7 @@ import pytest
 from quote_app.tasks.models import BusinessOutcome
 from quote_app.tasks.retry import LayoutRecognitionError
 from quote_app.tasks.retry import SecurityVerificationRequired
+from quote_app.sites.official_overrides.honor import HonorOfficialOverride
 
 _PRODUCT_ID = "10086164863190"
 _CURRENT_SKU = "10086516771847"
@@ -221,6 +222,33 @@ def test_honor_live_default_selection_returns_bound_hand_price(
     assert observation.semantic_state.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.semantic_state.css_rectangles == ()
     assert page.option_clicks == []
+
+
+def test_honor_live_uses_the_baseline_contract_before_any_new_readiness_gate(
+    official_case: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the proven HONOR storefront entry route as a release baseline."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(),
+    )
+    contract_checks: list[str] = []
+
+    def _baseline_live_contract(_page: Any) -> bool:
+        contract_checks.append("checked")
+        return True
+
+    monkeypatch.setattr(
+        HonorOfficialOverride,
+        "uses_live_contract",
+        staticmethod(_baseline_live_contract),
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert contract_checks == ["checked"]
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_honor_live_waits_for_store_search_to_render(

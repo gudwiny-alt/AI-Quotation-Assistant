@@ -267,7 +267,6 @@ def run_website_tasks(
     finally:
         repository.close()
 
-
 def _summarize(
     request: WebsiteRunRequest,
     repository: SQLiteTaskRepository,
