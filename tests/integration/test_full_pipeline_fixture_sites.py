@@ -22,7 +22,7 @@ from quote_app.services.web_run import (
     WebsiteRunSnapshot,
     WebsiteRunSummary,
 )
-from quote_app.tasks.models import WebsiteChannel
+from quote_app.tasks.models import WebsiteChannel, WebsiteTask
 from quote_app.tasks.repository import SQLiteTaskRepository
 from tests.factories.web_run_factory import (
     make_business_result,
@@ -221,6 +221,7 @@ def _request(
     tmp_path: Path,
     *,
     selected_brand: str | None = None,
+    selected_channels: frozenset[WebsiteChannel] | None = None,
 ) -> FullPipelineRequest:
     return FullPipelineRequest(
         paths=paths,
@@ -229,6 +230,7 @@ def _request(
         database_path=tmp_path / "tasks.sqlite3",
         evidence_dir=tmp_path / "app-data" / "evidence",
         selected_brand=selected_brand,
+        selected_channels=selected_channels,
     )
 
 
@@ -273,6 +275,36 @@ def test_honor_test_mode_outputs_all_honor_rows_in_base_order(
     assert result.summary.total_rows == 2
     assert _saved_task_brands(tmp_path / "tasks.sqlite3") == {"HONOR"}
     assert len(_saved_tasks(tmp_path / "tasks.sqlite3")) == 6
+
+
+def test_honor_official_scope_runs_only_official_tasks_for_all_honor_rows(
+    fixture_inputs: InputPaths,
+    tmp_path: Path,
+) -> None:
+    """Official-only acceptance must never schedule JD or Tmall."""
+    seen: list[WebsiteTask] = []
+
+    def runner(request: WebsiteRunRequest) -> WebsiteRunSummary:
+        seen.extend(request.tasks)
+        return _fixture_website_runner(request)
+
+    result = run_full_pipeline(
+        _request(
+            fixture_inputs,
+            tmp_path,
+            selected_brand="HONOR",
+            selected_channels=frozenset({WebsiteChannel.OFFICIAL}),
+        ),
+        website_runner=runner,
+    )
+
+    assert [row.material_code for row in result.rows] == [
+        "HONOR-FIRST",
+        "HONOR-SECOND",
+    ]
+    assert {task.channel for task in seen} == {WebsiteChannel.OFFICIAL}
+    assert len(seen) == 2
+    assert len(_saved_tasks(tmp_path / "tasks.sqlite3")) == 2
 
 
 def test_honor_test_mode_writes_all_honor_rows_and_three_evidence_images_per_row(

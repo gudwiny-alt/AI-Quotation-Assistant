@@ -38,6 +38,7 @@ from quote_app.tasks.builder import (
 )
 from quote_app.tasks.models import (
     TaskState,
+    WebsiteChannel,
     WebsiteObservationCheckpoint,
     WebsiteResult,
     WebsiteTask,
@@ -74,6 +75,7 @@ class FullPipelineRequest:
     runtime_readiness: RuntimeReadinessChecker | None = None
     controller: WebsiteRunController | None = None
     selected_brand: str | None = None
+    selected_channels: frozenset[WebsiteChannel] | None = None
     event_sink: EventSink | None = None
 
 
@@ -97,6 +99,7 @@ def run_full_pipeline(
     if not callable(website_runner):
         raise TypeError("website_runner must be callable")
     selected_brand = _normalize_selected_brand(request.selected_brand)
+    selected_channels = _normalize_selected_channels(request.selected_channels)
     if request.runtime_readiness is not None and not callable(
         request.runtime_readiness
     ):
@@ -124,8 +127,9 @@ def run_full_pipeline(
     )
     task_build = build_website_tasks(run, rows)
     _apply_task_build_issues(rows, task_build.issues)
+    tasks = _select_channel_tasks(task_build.tasks, selected_channels)
     ui_event_sink = _ui_event_sink_for_tasks(
-        task_build.tasks,
+        tasks,
         request.event_sink,
     )
 
@@ -135,7 +139,7 @@ def run_full_pipeline(
     publisher = IncrementalExcelPublisher(
         quote_month=request.quote_month,
         rows=tuple(rows),
-        tasks=task_build.tasks,
+        tasks=tasks,
         output_dir=request.paths.output_dir,
         template_path=request.template_path,
         input_paths=request.paths,
@@ -152,9 +156,9 @@ def run_full_pipeline(
     publication_worker = (
         CoalescingPublicationWorker(
             publisher,
-            task_count=len(task_build.tasks),
+            task_count=len(tasks),
         )
-        if len(task_build.tasks) >= 100
+        if len(tasks) >= 100
         else None
     )
 
@@ -168,7 +172,7 @@ def run_full_pipeline(
 
     website_request = WebsiteRunRequest(
         run_id=run.run_id,
-        tasks=task_build.tasks,
+        tasks=tasks,
         profile_dir=request.browser_profile_dir,
         evidence_dir=request.evidence_dir,
         database_path=request.database_path,
@@ -182,11 +186,11 @@ def run_full_pipeline(
         if publication_worker is not None:
             publication_worker.close(suppress_error=True)
         raise
-    results = _load_saved_results(request.database_path, task_build.tasks)
-    observations = _load_saved_observations(request.database_path, task_build.tasks)
+    results = _load_saved_results(request.database_path, tasks)
+    observations = _load_saved_observations(request.database_path, tasks)
     waiting_task_ids = _load_waiting_task_ids(
         request.database_path,
-        task_build.tasks,
+        tasks,
     )
     final_snapshot = WebsiteRunSnapshot(
         observations=observations,
@@ -202,7 +206,7 @@ def run_full_pipeline(
         WebToExcelRequest(
             quote_month=request.quote_month,
             rows=tuple(rows),
-            tasks=task_build.tasks,
+            tasks=tasks,
             results=results,
             observations=observations,
             output_dir=request.paths.output_dir,
@@ -261,6 +265,29 @@ def _normalize_selected_brand(selected_brand: str | None) -> str | None:
     if not normalized:
         raise ValueError("selected_brand must not be blank")
     return normalized
+
+
+def _normalize_selected_channels(
+    selected_channels: frozenset[WebsiteChannel] | None,
+) -> frozenset[WebsiteChannel] | None:
+    if selected_channels is None:
+        return None
+    if not isinstance(selected_channels, frozenset):
+        raise TypeError("selected_channels must be a frozenset or None")
+    if not selected_channels:
+        raise ValueError("selected_channels must not be empty")
+    if not all(isinstance(channel, WebsiteChannel) for channel in selected_channels):
+        raise TypeError("selected_channels must contain WebsiteChannel values")
+    return selected_channels
+
+
+def _select_channel_tasks(
+    tasks: tuple[WebsiteTask, ...],
+    selected_channels: frozenset[WebsiteChannel] | None,
+) -> tuple[WebsiteTask, ...]:
+    if selected_channels is None:
+        return tasks
+    return tuple(task for task in tasks if task.channel in selected_channels)
 
 
 def _select_brand_rows(
