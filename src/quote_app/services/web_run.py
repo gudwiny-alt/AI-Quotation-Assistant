@@ -14,6 +14,7 @@ from quote_app.evidence.macos_runtime import MacFormalCaptureRuntime
 from quote_app.evidence.models import MacCapturePolicy, validate_mac_capture_policy
 from quote_app.evidence.validation import read_validated_evidence
 from quote_app.sites.catalog import site_session_family
+from quote_app.sites.honor_diagnostics import capture_honor_search_diagnostic
 from quote_app.sites.registry import AdapterRegistry
 from quote_app.browser.worker import WorkerEvent
 from quote_app.tasks.models import (
@@ -239,6 +240,14 @@ def run_website_tasks(
                 capture_context_provider=runtime.capture_context_provider,
                 capture_acceptance_policy=capture_acceptance_policy,
                 event_sink=event_sink,
+                diagnostic_capture=lambda task, error, path: (
+                    capture_honor_search_diagnostic(
+                        task,
+                        error,
+                        path,
+                        browser.automation_page(),
+                    )
+                ),
                 # A technical failure is recorded per task; it must not prevent
                 # the next brand from being processed in the same run.
                 stop_after_brand_issue=False,
