@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 OFFICIAL_MODULE = ROOT / "src/quote_app/sites/official.py"
 HONOR_OVERRIDE_MODULE = ROOT / "src/quote_app/sites/official_overrides/honor.py"
-HONOR_DETAIL_SUFFIX_SHA256 = "141253dd7627e6cd7f5ca492facc6ae84df17d77e4a1600bebec196c027a6fe6"
+HONOR_DETAIL_SUFFIX_SHA256 = "fbad96e401fa2f0fa8b2600434491cdca4bd53af677d19728ea5c198261b071e"
 HONOR_OVERRIDE_DETAIL_SUFFIX_SHA256 = "2b2c733f27027ea563451d44d72b5b043edbd127dcf50b5101fbb4c577717f4e"
 
 
@@ -26,8 +26,12 @@ def test_honor_official_modules_keep_the_detail_chain_frozen() -> None:
         "    def _observe_loaded_honor_detail("
     )
     assert separator
+    detail_chain, search_url_helper, _rest = detail_and_beyond.partition(
+        "\ndef _validate_honor_search_url("
+    )
+    assert search_url_helper
     assert (
-        hashlib.sha256(detail_and_beyond.encode("utf-8")).hexdigest()
+        hashlib.sha256(detail_chain.encode("utf-8")).hexdigest()
         == HONOR_DETAIL_SUFFIX_SHA256
     )
     override_payload = HONOR_OVERRIDE_MODULE.read_text(encoding="utf-8")

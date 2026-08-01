@@ -524,7 +524,11 @@ class OfficialSiteAdapter:
         self._raise_if_blocked(page)
         if self._honor_override is not None:
             override = self._honor_override
-            _validate_honor_search_url(page.url, entry_url=self.spec.entry_url)
+            _validate_honor_search_url(
+                page.url,
+                entry_url=self.spec.entry_url,
+                expected_model=task.model_name,
+            )
             override.require_store_title(page)
             keyword = self._wait_for_honor_visible(
                 page,
@@ -677,16 +681,13 @@ class OfficialSiteAdapter:
         )
         search_input.fill(task.model_name)
         search_action.click()
-        result_region = self._wait_for_honor_result_region(page)
-        if result_region is None:
+        if not self._wait_for_honor_search_url(page, task):
             search_input.press("Enter")
-            result_region = self._wait_for_honor_result_region(page)
-        if result_region is None:
+        if not self._wait_for_honor_search_url(page, task):
             raise NonRetryableTechnicalError(
                 "HONOR_SEARCH_RESULTS_MISSING",
                 "荣耀官网搜索后未出现产品结果，请保留当前页面检查后重试",
             )
-        _validate_honor_search_url(page.url, entry_url=self.spec.entry_url)
         override.require_store_title(page)
 
         result_input = self._wait_for_honor_visible(
@@ -700,6 +701,12 @@ class OfficialSiteAdapter:
         ):
             raise LayoutRecognitionError(
                 "Official HONOR result search keyword does not match"
+            )
+        result_region = self._wait_for_honor_result_region(page)
+        if result_region is None:
+            raise NonRetryableTechnicalError(
+                "HONOR_SEARCH_RESULTS_MISSING",
+                "荣耀官网搜索结果页未出现产品卡片，请保留当前页面检查后重试",
             )
         cards = visible_locators(result_region, ("li.grid-items",))
         if not cards:
@@ -737,6 +744,28 @@ class OfficialSiteAdapter:
         )
         page.goto(detail_url, wait_until="domcontentloaded")
         return self._observe_loaded_honor_detail(task, page, detail_url)
+
+    def _wait_for_honor_search_url(
+        self,
+        page: Any,
+        task: WebsiteTask,
+    ) -> bool:
+        """Wait for the live HONOR search route before inspecting cards."""
+        for attempt in range(_HONOR_RENDER_POLLS + 1):
+            self._raise_if_blocked(page)
+            try:
+                _validate_honor_search_url(
+                    page.url,
+                    entry_url=self.spec.entry_url,
+                    expected_model=task.model_name,
+                )
+            except LayoutRecognitionError:
+                pass
+            else:
+                return True
+            if attempt < _HONOR_RENDER_POLLS:
+                page.wait_for_timeout(_HONOR_RENDER_INTERVAL_MS)
+        return False
 
     def _wait_for_honor_result_region(self, page: Any) -> Any | None:
         """Wait for rendered HONOR cards without navigating or creating a page."""
@@ -1891,6 +1920,7 @@ def _validate_honor_search_url(
     raw_url: object,
     *,
     entry_url: str,
+    expected_model: str,
 ) -> None:
     if not isinstance(raw_url, str) or not raw_url.strip():
         raise LayoutRecognitionError(
@@ -1905,10 +1935,22 @@ def _validate_honor_search_url(
             and parsed.port is None
             and parsed.username is None
             and parsed.password is None
-            and parsed.path == expected.path
-            and parsed.query == expected.query
+            and parsed.path == "/cn/shop/v/search"
             and not parsed.fragment
             and not url_contains_credentials(raw_url)
+        )
+        query = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+            encoding="utf-8",
+            errors="strict",
+        )
+        approved = approved and (
+            len(query) == 1
+            and query[0][0] == "keyword"
+            and normalize_product_text(query[0][1])
+            == normalize_product_text(expected_model)
         )
     except ValueError:
         approved = False

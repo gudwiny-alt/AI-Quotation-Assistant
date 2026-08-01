@@ -306,6 +306,40 @@ def test_honor_live_submits_enter_once_when_click_does_not_render_results(
     assert page.goto_calls.count(adapter.spec.entry_url) == 1
 
 
+def test_honor_live_waits_for_search_url_before_reading_homepage_cards(
+    official_case: Any,
+) -> None:
+    """Homepage recommendations must never stand in for search results."""
+    home_cards = f"""
+      <ul id="mainSaleList">
+        <li class="grid-items"><a class="thumb" href="/cn/shop/product/{_PRODUCT_ID}.html">
+          荣耀Magic8 首页推荐商品
+        </a></li>
+      </ul>
+    """
+    html = _live_honor_html().replace(
+        '      <input class="button iconfont" type="submit" data-action="search">\n'
+        "    </main>",
+        '      <input class="button iconfont" type="submit" data-action="search" '
+        'data-requires-enter="true">\n'
+        f"{home_cards}"
+        "    </main>",
+    )
+    adapter, task, page = _live_case(official_case, html=html)
+    original_activate_results = page.activate_results
+
+    def activate_search_results() -> None:
+        original_activate_results()
+        page._url = "https://www.honor.com/cn/shop/v/search?keyword=荣耀Magic8"
+
+    page.activate_results = activate_search_results
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.presses == ["Enter"]
+
+
 def test_honor_live_waits_for_product_title_to_render(
     official_case: Any,
 ) -> None:
@@ -586,7 +620,7 @@ def test_honor_live_rejects_variant_card_for_base_model(
         adapter.observe(task, cast(Any, page))
 
     assert failure.value.code == "HONOR_PRODUCT_MATCH_MISSING"
-    assert page.url == adapter.spec.entry_url
+    assert "/cn/shop/v/search?keyword=" in page.url
 
 
 def test_honor_live_stops_once_when_multiple_cards_match_base_model(
@@ -610,7 +644,7 @@ def test_honor_live_stops_once_when_multiple_cards_match_base_model(
         adapter.observe(task, cast(Any, page))
 
     assert failure.value.code == "HONOR_PRODUCT_MATCH_AMBIGUOUS"
-    assert page.url == adapter.spec.entry_url
+    assert "/cn/shop/v/search?keyword=" in page.url
 
 
 @pytest.mark.parametrize(

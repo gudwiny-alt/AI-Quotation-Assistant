@@ -439,7 +439,7 @@ class _OfficialFixturePage:
         origin = f"{parsed.scheme}://{parsed.netloc}"
         self.activate("results")
         self._url = (
-            self.entry_url
+            f"{origin}/cn/shop/v/search?keyword={quote(keyword)}"
             if is_live_honor
             else f"{origin}/search?q={quote(keyword)}"
         )
