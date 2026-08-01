@@ -307,6 +307,65 @@ def test_honor_official_scope_runs_only_official_tasks_for_all_honor_rows(
     assert len(_saved_tasks(tmp_path / "tasks.sqlite3")) == 2
 
 
+def test_honor_official_scope_writes_multiple_prices_and_images(
+    fixture_inputs: InputPaths,
+    tmp_path: Path,
+) -> None:
+    """Official-only completion writes both HONOR rows without JD/Tmall debt."""
+    def runner(request: WebsiteRunRequest) -> WebsiteRunSummary:
+        request.evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_paths: list[Path] = []
+        prices = {"HONOR-FIRST": Decimal("4499"), "HONOR-SECOND": Decimal("4599")}
+        with SQLiteTaskRepository(request.database_path) as repository:
+            for task in request.tasks:
+                assert task.channel is WebsiteChannel.OFFICIAL
+                repository.upsert_task(task)
+                token = repository.start_attempt(task.task_id)
+                result = make_business_result(
+                    request.evidence_dir,
+                    task,
+                    price=prices[task.material_code],
+                )
+                repository.save_result(result, token=token)
+                assert result.evidence is not None
+                evidence_paths.append(result.evidence.path)
+        return WebsiteRunSummary(
+            succeeded=2,
+            waiting_for_login=0,
+            technical_failure=0,
+            evidence_paths=tuple(evidence_paths),
+        )
+
+    result = run_full_pipeline(
+        _request(
+            fixture_inputs,
+            tmp_path,
+            selected_brand="HONOR",
+            selected_channels=frozenset({WebsiteChannel.OFFICIAL}),
+        ),
+        website_runner=runner,
+    )
+
+    quote = load_workbook(result.quote_path, data_only=False)
+    try:
+        sheet = quote["5G手机"]
+        assert sheet["AK2"].value == 4499
+        assert sheet["AK3"].value == 4599
+        assert sheet["AI2"].value is None
+        assert sheet["AJ2"].value is None
+        assert len(sheet._images) == 2
+        assert {
+            f"{get_column_letter(image.anchor._from.col + 1)}"
+            f"{image.anchor._from.row + 1}"
+            for image in sheet._images
+        } == {"AN2", "AN3"}
+    finally:
+        quote.close()
+
+    assert result.summary.completed_rows == 2
+    assert result.summary.failed_rows == 0
+
+
 def test_honor_test_mode_writes_all_honor_rows_and_three_evidence_images_per_row(
     fixture_inputs: InputPaths,
     tmp_path: Path,

@@ -42,6 +42,7 @@ from quote_app.tasks.models import (
 SUPPORTED_BRANDS = SUPPORTED_WEB_BRANDS
 CHANNEL_PENDING = "待人工补充"
 CHANNEL_WAITING = "待运行"
+CHANNEL_NOT_PLANNED = "本轮未执行"
 CHANNEL_MANUAL_VERIFICATION = "等待人工验证"
 CHANNEL_UNSUPPORTED = "不支持"
 _CHANNEL_ORDER = (
@@ -147,6 +148,7 @@ class _WebsiteReportContext:
         ],
     ]
     waiting_channels: dict[int, frozenset[WebsiteChannel]]
+    planned_channels: dict[int, frozenset[WebsiteChannel]]
     capture_acceptance_policy: MacCapturePolicy
 
 
@@ -298,11 +300,24 @@ def _assess_row(
         )
         recommendation = "人工补充 AI:AN 的价格、链接和截图，并反馈新增品牌规则"
     elif website_context.active:
+        planned_channels = website_context.planned_channels.get(
+            output_row_number,
+            frozenset(),
+        )
+        planned_channel_states = tuple(
+            state
+            for channel, state in zip(
+                _CHANNEL_ORDER,
+                channel_states,
+                strict=True,
+            )
+            if channel in planned_channels
+        )
         completed_channels = sum(
-            _channel_is_completed(state) for state in channel_states
+            _channel_is_completed(state) for state in planned_channel_states
         )
         technical_channels = sum(
-            _channel_is_technical(state) for state in channel_states
+            _channel_is_technical(state) for state in planned_channel_states
         )
         channel_reason = "；".join(
             f"{channel}：{state}"
@@ -311,8 +326,9 @@ def _assess_row(
                 channel_states,
                 strict=True,
             )
+            if state != CHANNEL_NOT_PLANNED
         )
-        if CHANNEL_MANUAL_VERIFICATION in channel_states:
+        if CHANNEL_MANUAL_VERIFICATION in planned_channel_states:
             status = RowStatus.PARTIAL
             manual_supplement = True
             failed_step = "网站人工验证"
@@ -320,20 +336,32 @@ def _assess_row(
                 part for part in (issue_reason, channel_reason) if part
             )
             recommendation = "完成人工验证后继续当前任务"
-        elif completed_channels == 3 and not issue_codes:
+        elif (
+            planned_channel_states
+            and completed_channels == len(planned_channel_states)
+            and not issue_codes
+        ):
             status = RowStatus.COMPLETED
             manual_supplement = False
             failed_step = ""
-            reason = "核心关联及三个网站渠道均已完成"
+            reason = "；".join(
+                part
+                for part in ("核心关联及本次计划网站渠道均已完成", channel_reason)
+                if part
+            )
             recommendation = "无需操作"
-        elif technical_channels == 3 and completed_channels == 0:
+        elif (
+            planned_channel_states
+            and technical_channels == len(planned_channel_states)
+            and completed_channels == 0
+        ):
             status = RowStatus.FAILED
             manual_supplement = False
             failed_step = "网站渠道自动处理"
             reason = "；".join(
                 part for part in (issue_reason, channel_reason) if part
             )
-            recommendation = "检查三个渠道的稳定错误代码后重试失败任务"
+            recommendation = "检查本次计划渠道的稳定错误代码后重试失败任务；如仍失败请人工补充对应字段"
         else:
             status = RowStatus.PARTIAL
             manual_supplement = True
@@ -341,7 +369,7 @@ def _assess_row(
             reason = "；".join(
                 part for part in (issue_reason, channel_reason) if part
             )
-            recommendation = "重试失败或待运行渠道；仍未完成时人工补充 AI:AN"
+            recommendation = "重试失败或待运行的本次计划渠道；仍未完成时人工补充对应字段"
     elif all(state == "已完成" for state in channel_states) and not issue_codes:
         status = RowStatus.COMPLETED
         manual_supplement = False
@@ -402,17 +430,25 @@ def _channel_states(
             output_row_number,
             {},
         )
+        planned_channels = website_context.planned_channels.get(
+            output_row_number,
+            frozenset(),
+        )
         states = tuple(
-            _website_channel_state(
-                *(channel_observations.get(channel, (None, None))),
-                waiting_for_manual_verification=(
-                    channel
-                    in website_context.waiting_channels.get(
-                        output_row_number,
-                        frozenset(),
-                    )
-                ),
-                capture_acceptance_policy=website_context.capture_acceptance_policy,
+            (
+                _website_channel_state(
+                    *(channel_observations.get(channel, (None, None))),
+                    waiting_for_manual_verification=(
+                        channel
+                        in website_context.waiting_channels.get(
+                            output_row_number,
+                            frozenset(),
+                        )
+                    ),
+                    capture_acceptance_policy=website_context.capture_acceptance_policy,
+                )
+                if channel in planned_channels
+                else CHANNEL_NOT_PLANNED
             )
             for channel in _CHANNEL_ORDER
         )
@@ -451,6 +487,7 @@ def _website_report_context(
             active=False,
             by_row={},
             waiting_channels={},
+            planned_channels={},
             capture_acceptance_policy=capture_acceptance_policy,
         )
     tasks_by_id = validate_website_task_bindings(tasks=tasks, rows=rows)
@@ -473,8 +510,10 @@ def _website_report_context(
         ],
     ] = {}
     waiting_channels: dict[int, set[WebsiteChannel]] = {}
+    planned_channels: dict[int, set[WebsiteChannel]] = {}
     for task in tasks:
         row_channels = by_row.setdefault(task.output_row_number, {})
+        planned_channels.setdefault(task.output_row_number, set()).add(task.channel)
         row_channels[task.channel] = (
             results_by_task.get(task.task_id),
             observations_by_task.get(task.task_id),
@@ -497,6 +536,10 @@ def _website_report_context(
         waiting_channels={
             row_number: frozenset(channels)
             for row_number, channels in waiting_channels.items()
+        },
+        planned_channels={
+            row_number: frozenset(channels)
+            for row_number, channels in planned_channels.items()
         },
         capture_acceptance_policy=capture_acceptance_policy,
     )

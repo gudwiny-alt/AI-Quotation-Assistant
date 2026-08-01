@@ -139,7 +139,7 @@ def test_validated_honor_mac_evidence_is_standard_embedded_image(
     try:
         detail = report["处理明细"]
         assert detail["K2"].value == "价格成功（4499）；截图成功"
-        assert detail["L2"].value == "部分完成"
+        assert detail["L2"].value == "完成"
         assert "官网：价格成功（4499）；截图成功" in str(
             detail["N2"].value
         )
@@ -405,7 +405,7 @@ def test_invalid_honor_evidence_is_not_embedded_and_is_reported_technical(
         assert str(detail["K2"].value).startswith(
             "技术失败（EVIDENCE_"
         )
-        assert detail["L2"].value == "部分完成"
+        assert detail["L2"].value == "失败"
         assert "人工" in str(detail["O2"].value)
     finally:
         report.close()
