@@ -359,6 +359,37 @@ def test_honor_live_accepts_space_normalized_brandless_search_keyword(
     assert observation.url.endswith(f"/product/{_PRODUCT_ID}.html")
 
 
+def test_honor_live_accepts_root_host_search_redirect(
+    official_case: Any,
+) -> None:
+    """HONOR may redirect its official search page from www to its root host."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(
+            detail_path=(
+                f"https://honor.com/cn/shop/product/{_PRODUCT_ID}.html"
+            ),
+        ),
+    )
+    page._product_urls.add(
+        f"https://www.honor.com/cn/shop/product/{_PRODUCT_ID}.html"
+    )
+    original_activate_results = page.activate_results
+
+    def activate_search_results() -> None:
+        original_activate_results()
+        page._url = "https://honor.com/cn/shop/v/search?keyword=Magic8"
+
+    page.activate_results = activate_search_results
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == (
+        f"https://www.honor.com/cn/shop/product/{_PRODUCT_ID}.html"
+    )
+
+
 def test_honor_live_waits_for_product_title_to_render(
     official_case: Any,
 ) -> None:

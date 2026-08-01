@@ -41,10 +41,10 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "荣耀搜索词兼容修复版（仅官网、全部荣耀行）2026.08.01.7"
+APP_BUILD_LABEL = "荣耀官网域名跳转修复版（仅官网、全部荣耀行）2026.08.01.8"
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：荣耀官网首次使用无需预先登录；遇到登录或验证页面时，"
-    "完成后点击“继续当前任务”。程序会兼容搜索词中的品牌前缀和空格。"
+    "完成后点击“继续当前任务”。程序会兼容搜索词格式及 www 与根域名跳转。"
 )
 
 CorePipeline = Callable[[InputPaths, QuoteMonth], CoreRunResult]

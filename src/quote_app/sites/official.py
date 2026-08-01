@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from urllib.parse import parse_qsl, urljoin, urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.platform import PlatformEvidenceCapture
@@ -735,10 +735,15 @@ class OfficialSiteAdapter:
                 "HONOR_PRODUCT_MATCH_AMBIGUOUS",
                 "荣耀官网搜索结果匹配到多个基础机型候选，已停在搜索结果页供检查",
             )
+        expected_host = _required_entry_host(self.spec.entry_url)
         detail_url = _approved_product_url(
-            exact_links[0].get_attribute("href"),
+            _canonicalize_honor_product_href(
+                exact_links[0].get_attribute("href"),
+                base_url=page.url,
+                expected_host=expected_host,
+            ),
             base_url=page.url,
-            expected_host=_required_entry_host(self.spec.entry_url),
+            expected_host=expected_host,
             brand=self.spec.brand,
             expected_model=task.model_name,
         )
@@ -1931,7 +1936,10 @@ def _validate_honor_search_url(
         expected = urlsplit(entry_url)
         approved = (
             parsed.scheme.lower() == "https"
-            and parsed.hostname == expected.hostname
+            and _honor_official_host_matches(
+                parsed.hostname,
+                expected_host=expected.hostname,
+            )
             and parsed.port is None
             and parsed.username is None
             and parsed.password is None
@@ -1978,6 +1986,58 @@ def _compact_honor_search_keyword(value: str) -> str:
             normalized = normalized.removeprefix(brand_prefix)
             break
     return re.sub(r"\s+", "", normalized)
+
+
+def _honor_official_host_matches(
+    hostname: str | None,
+    *,
+    expected_host: str | None,
+) -> bool:
+    """Allow only HONOR's root domain and its official www alias."""
+    if not isinstance(hostname, str) or not isinstance(expected_host, str):
+        return False
+    root_host = expected_host.lower().removeprefix("www.")
+    return (
+        root_host == "honor.com"
+        and hostname.lower() in {root_host, f"www.{root_host}"}
+    )
+
+
+def _canonicalize_honor_product_href(
+    raw_href: object,
+    *,
+    base_url: str,
+    expected_host: str,
+) -> object:
+    """Return the existing approved HONOR host for a root-domain card link."""
+    if not isinstance(raw_href, str) or not raw_href.strip():
+        return raw_href
+    try:
+        resolved = urljoin(base_url, raw_href.strip())
+        parsed = urlsplit(resolved)
+        if not (
+            parsed.scheme.lower() == "https"
+            and parsed.port is None
+            and parsed.username is None
+            and parsed.password is None
+            and _honor_official_host_matches(
+                parsed.hostname,
+                expected_host=expected_host,
+            )
+            and not url_contains_credentials(resolved)
+        ):
+            return raw_href
+        return urlunsplit(
+            (
+                parsed.scheme,
+                expected_host,
+                parsed.path,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+    except ValueError:
+        return raw_href
 
 
 def _required_entry_host(entry_url: str) -> str:
