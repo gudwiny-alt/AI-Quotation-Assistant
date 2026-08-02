@@ -79,8 +79,8 @@ _WEB_OUTPUT_COLUMNS = (
     "AM",
     "AN",
 )
-_THUMBNAIL_MAX_SIZE = (960, 600)
-_THUMBNAIL_MAX_BYTES = 192 * 1024
+_THUMBNAIL_MAX_SIZE = (1920, 1200)
+_THUMBNAIL_MAX_BYTES = 1536 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,7 +491,7 @@ def _excel_thumbnail(payload: bytes) -> bytes:
         image = source.convert("RGB")
     image.thumbnail(_THUMBNAIL_MAX_SIZE, Image.Resampling.LANCZOS)
     for _ in range(12):
-        for quality in (82, 70, 58, 46):
+        for quality in (92, 86, 80, 74):
             output = BytesIO()
             image.save(
                 output,

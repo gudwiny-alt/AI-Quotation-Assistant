@@ -65,8 +65,8 @@ def test_beta_notice_describes_login_as_runtime_optional() -> None:
 def test_app_build_label_identifies_honor_candidate_navigation_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
-    assert APP_BUILD_LABEL == "荣耀候选详情跳转修复版（仅官网、全部荣耀行）2026.08.01.9"
-    assert "商品卡与正式详情链接" in BETA_NOTICE
+    assert APP_BUILD_LABEL == "Excel高清截图版（仅官网、全部荣耀行）2026.08.02.18"
+    assert "当前受控页" in BETA_NOTICE
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(

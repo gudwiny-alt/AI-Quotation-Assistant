@@ -11,11 +11,25 @@ import pytest
 
 from quote_app.domain.models import QuoteMonth
 from quote_app.evidence.models import MacCapturePolicy
+from quote_app.services import web_to_excel
 from quote_app.services.web_to_excel import (
     WebToExcelRequest,
     write_web_results_to_excel,
 )
 from tests.factories.web_run_factory import make_business_result, make_quote_row, make_tasks
+
+
+def test_excel_thumbnail_preserves_high_resolution_for_readable_zoom() -> None:
+    """Catches shrinking an Excel evidence image below the approved HD size."""
+    source = BytesIO()
+    Image.new("RGB", (2880, 1800), "white").save(source, format="PNG")
+
+    payload = web_to_excel._excel_thumbnail(source.getvalue())
+
+    with Image.open(BytesIO(payload)) as thumbnail:
+        assert thumbnail.format == "JPEG"
+        assert thumbnail.size == (1920, 1200)
+    assert len(payload) <= 1536 * 1024
 
 
 def test_default_excel_publication_rejects_mac_visual_review_evidence(tmp_path) -> None:
@@ -218,9 +232,9 @@ def test_large_formal_screenshot_is_embedded_as_bounded_readable_thumbnail(
 
     thumbnail = payloads[result.task_id]
     assert report_results == (result,)
-    assert len(thumbnail) <= 192 * 1024
+    assert len(thumbnail) <= 1536 * 1024
     assert cache.total_payload_bytes == len(thumbnail)
     with Image.open(BytesIO(thumbnail)) as image:
         assert image.format == "JPEG"
-        assert image.width <= 960
-        assert image.height <= 600
+        assert image.width <= 1920
+        assert image.height <= 1200

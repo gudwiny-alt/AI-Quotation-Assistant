@@ -41,10 +41,10 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "荣耀候选详情跳转修复版（仅官网、全部荣耀行）2026.08.01.9"
+APP_BUILD_LABEL = "Excel高清截图版（仅官网、全部荣耀行）2026.08.02.18"
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：荣耀官网首次使用无需预先登录；遇到登录或验证页面时，"
-    "完成后点击“继续当前任务”。程序以商品卡与正式详情链接进入详情页。"
+    "完成后点击“继续当前任务”。程序在当前受控页中搜索、读取匹配商品卡并进入正式详情页。"
 )
 
 CorePipeline = Callable[[InputPaths, QuoteMonth], CoreRunResult]
