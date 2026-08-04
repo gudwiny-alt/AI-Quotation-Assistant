@@ -776,6 +776,14 @@ _LIVE_RESULTS_STATIC_QUERY = (
 )
 
 
+def _honor_power2_result_url() -> str:
+    return (
+        "https://hihonor.tmall.com/"
+        "?q=%E8%8D%A3%E8%80%80Power2"
+        + _LIVE_RESULTS_STATIC_QUERY
+    )
+
+
 def test_live_observed_store_search_results_and_product_selectors_drive_path() -> None:
     html = _live_observed_html().replace(
         "item.htm?id=123456789018",
@@ -803,6 +811,42 @@ def test_tmall_rich_product_card_title_enters_the_exact_base_model() -> None:
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
+
+
+def test_honor_power2_marketing_detail_title_reaches_price_and_capture_stage() -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    html = html.replace(
+        '<h1 class="ItemTitle--fixture">荣耀Power2</h1>',
+        '<h1 class="ItemTitle--fixture">【政府补贴15%】HONOR/荣耀Power2智能手机10080mAh官方旗舰店</h1>',
+    )
+    task = _task(brand="HONOR", model_name="荣耀Power2")
+    page = _FixturePage(html=html, after_search_url=_honor_power2_result_url())
+    adapter = TmallAdapter(_honor_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.capture_scales == [0.8]
+
+
+def test_honor_power2_variant_detail_title_does_not_match_power2_task() -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("小米 15", "荣耀Power2 Pro")
+    html = html.replace("小米15", "荣耀Power2 Pro")
+    page = _FixturePage(html=html)
+    page.activate("product")
+
+    with pytest.raises(LayoutRecognitionError, match="detail model does not match"):
+        TmallAdapter(_honor_spec())._matching_detail_titles(
+            cast(Any, page),
+            _task(brand="HONOR", model_name="荣耀Power2"),
+        )
 
 
 def test_tmall_enters_an_exact_base_model_card_even_when_its_card_lists_other_sku_values() -> None:

@@ -1027,7 +1027,7 @@ class TmallAdapter:
             locator = page.locator(selector)
             for index in range(locator.count()):
                 title = locator.nth(index)
-                if title.is_visible() and model_matches(
+                if title.is_visible() and _tmall_result_card_matches(
                     task.model_name,
                     title.inner_text(),
                 ):
