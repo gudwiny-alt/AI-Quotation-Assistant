@@ -1393,6 +1393,60 @@ def test_modern_detail_prefers_the_verified_struck_through_price_over_subsidy_pr
     assert observation.price == Decimal("4499")
 
 
+def test_modern_selected_exact_capacity_is_quoted_when_page_is_sold_out() -> None:
+    """A shortage marker must not invalidate an exact option that is selected."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace("小米京东自营旗舰店", "荣耀京东自营旗舰店")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    html = html.replace(
+        'specification-item-sku specification-item-sku--selected">'
+        "12GB+256GB",
+        'specification-item-sku specification-item-sku--selected '
+        'specification-item-sku--lack">12GB+256GB',
+        1,
+    )
+    html = html.replace(
+        ">黑色</div>",
+        ">幻夜黑</div>",
+        1,
+    )
+    html = html.replace(
+        '<div class="product-price-panel">'
+        '<span class="product-price--main">¥4,299</span></div>',
+        '<div class="product-price-panel">'
+        '<span class="product-price--main">¥2,166.65</span>国补领后价'
+        '<span class="product-price--gray-line-through" '
+        'style="text-decoration:line-through">¥2,699</span>'
+        "</div>",
+        1,
+    )
+    task = _task(
+        brand="HONOR",
+        model_name="荣耀Power2",
+        ram="12GB",
+        storage="256GB",
+        color="幻夜黑",
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000000904-99-1-24-1.html"
+            "?keyword=%E8%8D%A3%E8%80%80Power2"
+        ),
+    )
+
+    observation = JDAdapter(_honor_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("2699")
+    assert observation.semantic_state.capacity == "12GB+256GB"
+    assert observation.semantic_state.color == "幻夜黑"
+
+
 def test_modern_price_found_exposes_a_live_formal_capture_reader() -> None:
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
