@@ -198,12 +198,15 @@ class _Locator:
                 self.page.capture_view_positions.append(option_kind)
             elif node.attrs.get("id") == "key01":
                 self.page.capture_view_positions.append("search")
+                self.page.apply_result_title_after_search_anchor()
             elif "gl-item" in node.attrs.get("class", "").split():
                 self.page.capture_view_positions.append("result-card")
             return ""
         if "getBoundingClientRect" in script:
             if node.attrs.get("id") == "key01":
                 self.page.search_input_visibility_checks += 1
+            if "search-empty" in node.attrs.get("class", "").split():
+                return self.page.empty_state_in_viewport
             return True
         if "parentElement?.innerText" in script:
             return node.parent.text if node.parent is not None else node.text
@@ -244,6 +247,10 @@ class _FixturePage:
         detail_ready_after: int | None = None,
         detail_seller_ready_after: int | None = None,
         modern_sku_ready_after_scroll: int | None = None,
+        modern_exclusive_selection: bool = True,
+        modern_price_after_selection: tuple[str, ...] | None = None,
+        result_title_after_search_anchor: str | None = None,
+        empty_state_in_viewport: bool = True,
     ) -> None:
         parser = _DocumentParser()
         parser.feed(html if html is not None else (FIXTURES / fixture).read_text("utf-8"))
@@ -275,8 +282,14 @@ class _FixturePage:
         self.detail_ready_after = detail_ready_after
         self.detail_seller_ready_after = detail_seller_ready_after
         self.modern_sku_ready_after_scroll = modern_sku_ready_after_scroll
+        self.modern_exclusive_selection = modern_exclusive_selection
+        self.modern_price_after_selection = modern_price_after_selection
+        self.result_title_after_search_anchor = result_title_after_search_anchor
+        self.empty_state_in_viewport = empty_state_in_viewport
         self.detail_scan_scrolls: list[int] = []
         self.pending_capacity_context: int | None = None
+        self.pending_modern_price_update: int | None = None
+        self.pending_modern_deselection: _Node | None = None
         self.color_access_before_capacity_context = False
         if capacity_context_mode in {"async", "never"}:
             for node in self.root.descendants():
@@ -407,6 +420,35 @@ class _FixturePage:
                     if "data-delayed-detail-seller" in node.attrs:
                         node.attrs.pop("hidden", None)
                 self.detail_seller_ready_after = None
+        if self.pending_modern_price_update is not None:
+            self.pending_modern_price_update -= 1
+            if self.pending_modern_price_update <= 0:
+                price_nodes = [
+                    node
+                    for node in self.root.descendants()
+                    if {
+                        "product-price--main",
+                        "product-price--gray-line-through",
+                    }
+                    & set(node.attrs.get("class", "").split())
+                ]
+                assert self.modern_price_after_selection is not None
+                assert len(price_nodes) == len(self.modern_price_after_selection)
+                for node, text in zip(
+                    price_nodes,
+                    self.modern_price_after_selection,
+                    strict=True,
+                ):
+                    node.text_parts = [text]
+                self.pending_modern_price_update = None
+        if self.pending_modern_deselection is not None:
+            node = self.pending_modern_deselection
+            node.attrs["aria-selected"] = "false"
+            classes = set(node.attrs.get("class", "").split())
+            classes.discard("specification-item-sku--selected")
+            node.attrs["class"] = " ".join(sorted(classes))
+            self.selected_options.discard(node.text)
+            self.pending_modern_deselection = None
         return None
 
     def evaluate(
@@ -463,18 +505,27 @@ class _FixturePage:
         elif screen == "product":
             self._url = "https://item.jd.com/100012345678.html"
 
+    def apply_result_title_after_search_anchor(self) -> None:
+        if self.result_title_after_search_anchor is None:
+            return
+        result_titles = _select(self.root.descendants(), ".p-name em")
+        assert result_titles
+        result_titles[0].text_parts = [self.result_title_after_search_anchor]
+        self.result_title_after_search_anchor = None
+
     def click_option(self, node: _Node) -> None:
         if self.selection_mode == "never":
             return
+        was_selected = self._node_is_selected(node)
         if self.selection_mode == "async":
             self.pending_selections[node] = 2
             return
-        node.attrs["aria-selected"] = "true"
-        classes = set(node.attrs.get("class", "").split())
-        if "specification-item-sku" in classes:
-            classes.add("specification-item-sku--selected")
-            node.attrs["class"] = " ".join(sorted(classes))
-        self.selected_options.add(node.text)
+        self._apply_selection(node)
+        if not was_selected and self.option_kind(node).startswith("modern-"):
+            if self.modern_price_after_selection is not None:
+                self.pending_modern_price_update = 1
+            if self.selection_mode == "non_stabilizing":
+                self.pending_modern_deselection = node
         if "GB" in node.text and self.capacity_context_mode == "async":
             self.pending_capacity_context = 2
 
@@ -485,9 +536,39 @@ class _FixturePage:
         if remaining > 0:
             self.pending_selections[node] = remaining - 1
             return
-        node.attrs["aria-selected"] = "true"
-        self.selected_options.add(node.text)
+        self._apply_selection(node)
+        if (
+            self.option_kind(node).startswith("modern-")
+            and self.modern_price_after_selection is not None
+        ):
+            self.pending_modern_price_update = 1
         del self.pending_selections[node]
+
+    @staticmethod
+    def _node_is_selected(node: _Node) -> bool:
+        return (
+            node.attrs.get("aria-selected") == "true"
+            or "specification-item-sku--selected"
+            in node.attrs.get("class", "").split()
+        )
+
+    def _apply_selection(self, node: _Node) -> None:
+        option_kind = self.option_kind(node)
+        if option_kind.startswith("modern-") and self.modern_exclusive_selection:
+            for sibling in self.root.descendants():
+                if sibling is node or self.option_kind(sibling) != option_kind:
+                    continue
+                sibling.attrs["aria-selected"] = "false"
+                sibling_classes = set(sibling.attrs.get("class", "").split())
+                sibling_classes.discard("specification-item-sku--selected")
+                sibling.attrs["class"] = " ".join(sorted(sibling_classes))
+                self.selected_options.discard(sibling.text)
+        node.attrs["aria-selected"] = "true"
+        classes = set(node.attrs.get("class", "").split())
+        if "specification-item-sku" in classes:
+            classes.add("specification-item-sku--selected")
+            node.attrs["class"] = " ".join(sorted(classes))
+        self.selected_options.add(node.text)
 
     def advance_capacity_context(self, node: _Node, name: str) -> None:
         if name != "data-current-sku" or self.pending_capacity_context is None:
@@ -1397,7 +1478,7 @@ def test_modern_detail_prefers_the_verified_struck_through_price_over_subsidy_pr
 
 
 def _honor_power2_modern_html() -> str:
-    """Build the Honor Power2 modern-detail fixture with its exact option selected."""
+    """Build the Honor Power2 modern-detail fixture before its target update."""
 
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
@@ -1420,9 +1501,9 @@ def _honor_power2_modern_html() -> str:
         '<div class="product-price-panel">'
         '<span class="product-price--main">¥4,299</span></div>',
         '<div class="product-price-panel">'
-        '<span class="product-price--main">¥2,466.65</span>国补领后价'
+        '<span class="product-price--main">¥3,699</span>国补领后价'
         '<span class="product-price--gray-line-through" '
-        'style="text-decoration:line-through">¥2,999</span>'
+        'style="text-decoration:line-through">¥4,499</span>'
         "</div>",
         1,
     )
@@ -1436,7 +1517,10 @@ def test_modern_exact_shortage_capacity_is_clicked_before_price_decision() -> No
         "specification-item-sku specification-item-sku--lack'>12GB+256GB 无货",
         1,
     )
-    page = _FixturePage(html=html)
+    page = _FixturePage(
+        html=html,
+        modern_price_after_selection=("¥2,466.65", "¥2,999"),
+    )
     page.after_search_url = (
         "https://mall.jd.com/view_search-1000000904-99-1-24-1.html"
         "?keyword=%E8%8D%A3%E8%80%80Power2"
@@ -1454,6 +1538,68 @@ def test_modern_exact_shortage_capacity_is_clicked_before_price_decision() -> No
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.price == Decimal("2999")
     assert "click:modern-capacity" in page.option_events
+
+
+def test_modern_dual_selected_capacity_cannot_bind_a_stale_global_price() -> None:
+    html = _honor_power2_modern_html()
+    html = html.replace(
+        "specification-item-sku specification-item-sku--selected'>12GB+256GB",
+        "specification-item-sku specification-item-sku--lack'>12GB+256GB 无货",
+        1,
+    ).replace(
+        'specification-item-sku specification-item-sku--lack" '
+        'style="left:20px;top:120px;width:150px;height:28px">'
+        "16GB+512GB 无货",
+        'specification-item-sku specification-item-sku--selected" '
+        'style="left:20px;top:120px;width:150px;height:28px">'
+        "16GB+512GB",
+        1,
+    )
+    page = _FixturePage(
+        html=html,
+        modern_exclusive_selection=False,
+    )
+    page.after_search_url = (
+        "https://mall.jd.com/view_search-1000000904-99-1-24-1.html"
+        "?keyword=%E8%8D%A3%E8%80%80Power2"
+    )
+    task = _task(
+        brand="HONOR",
+        model_name="荣耀Power2",
+        ram="12GB",
+        storage="256GB",
+        color="幻夜黑",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="configuration|selected"):
+        JDAdapter(_honor_spec()).observe(task, cast(Any, page))
+
+
+def test_modern_transient_selection_cannot_stabilize_a_price_after_it_drops() -> None:
+    html = _honor_power2_modern_html().replace(
+        "specification-item-sku specification-item-sku--selected'>12GB+256GB",
+        "specification-item-sku specification-item-sku--lack'>12GB+256GB 无货",
+        1,
+    )
+    page = _FixturePage(
+        html=html,
+        selection_mode="non_stabilizing",
+        modern_price_after_selection=("¥2,466.65", "¥2,999"),
+    )
+    page.after_search_url = (
+        "https://mall.jd.com/view_search-1000000904-99-1-24-1.html"
+        "?keyword=%E8%8D%A3%E8%80%80Power2"
+    )
+    task = _task(
+        brand="HONOR",
+        model_name="荣耀Power2",
+        ram="12GB",
+        storage="256GB",
+        color="幻夜黑",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="configuration|selected"):
+        JDAdapter(_honor_spec()).observe(task, cast(Any, page))
 
 
 def test_modern_price_found_exposes_a_live_formal_capture_reader() -> None:
@@ -2208,6 +2354,52 @@ def test_jd_no_model_prepares_a_search_first_result_view_with_readable_card_name
         "search_keyword",
         "result_region",
     )
+
+
+def test_jd_no_model_rereads_the_first_product_title_after_search_positioning() -> None:
+    page = _FixturePage(
+        "no_model.html",
+        result_title_after_search_anchor="小米 15 12GB+256GB 手机",
+    )
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    with pytest.raises(LayoutRecognitionError, match="after no-model positioning"):
+        adapter.prepare_capture_view(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+
+    assert page.capture_scales == [0.8]
+    assert page.capture_view_positions == ["search"]
+
+
+def test_jd_empty_no_model_capture_requires_the_empty_marker_in_viewport() -> None:
+    html = re.sub(
+        r'(<section id="J_goodsList"[^>]*>).*?(</section>)',
+        r'\1<div class="search-empty">未找到相关商品</div>\2',
+        (FIXTURES / "no_model.html").read_text("utf-8"),
+        flags=re.DOTALL,
+    )
+    page = _FixturePage(
+        html=html,
+        empty_state_in_viewport=False,
+    )
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    with pytest.raises(LayoutRecognitionError, match="empty state"):
+        adapter.prepare_capture_view(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert page.capture_scales == [0.8]
 
 
 def test_jd_no_model_rereads_capture_rectangles_after_result_positioning() -> None:

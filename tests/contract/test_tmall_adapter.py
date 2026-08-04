@@ -849,6 +849,27 @@ def test_honor_power2_variant_detail_title_does_not_match_power2_task() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "variant_title",
+    ("荣耀Power2-Pro", "荣耀Power2·Plus"),
+)
+def test_honor_power2_punctuated_variant_detail_title_is_not_the_base_model(
+    variant_title: str,
+) -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("小米 15", variant_title)
+    html = html.replace("小米15", variant_title)
+    page = _FixturePage(html=html)
+    page.activate("product")
+
+    with pytest.raises(LayoutRecognitionError, match="detail model does not match"):
+        TmallAdapter(_honor_spec())._matching_detail_titles(
+            cast(Any, page),
+            _task(brand="HONOR", model_name="荣耀Power2"),
+        )
+
+
 def test_tmall_enters_an_exact_base_model_card_even_when_its_card_lists_other_sku_values() -> None:
     html = _live_observed_html().replace(
         "新品 小米15 12GB+256GB 手机",
@@ -1804,6 +1825,45 @@ def test_legal_no_exposes_a_live_formal_capture_reader(
         observation.semantic_state,
     )
 
+    assert reader() == observation.semantic_state
+
+
+@pytest.mark.parametrize(
+    ("fixture", "outcome"),
+    [
+        ("capacity_disabled.html", BusinessOutcome.CAPACITY_UNAVAILABLE),
+        ("color_disabled.html", BusinessOutcome.COLOR_UNAVAILABLE),
+    ],
+)
+def test_honor_power2_promotional_title_survives_legal_no_capture_revalidation(
+    fixture: str,
+    outcome: BusinessOutcome,
+) -> None:
+    html = _live_observed_html(fixture)
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    html = html.replace(
+        '<h1 class="ItemTitle--fixture">荣耀Power2</h1>',
+        '<h1 class="ItemTitle--fixture">'
+        '【政府补贴15%】HONOR/荣耀Power2智能手机10080mAh官方旗舰店'
+        "</h1>",
+    )
+    task = _task(brand="HONOR", model_name="荣耀Power2")
+    page = _FixturePage(
+        html=html,
+        after_search_url=_honor_power2_result_url(),
+    )
+    adapter = TmallAdapter(_honor_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    reader = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert observation.outcome is outcome
     assert reader() == observation.semantic_state
 
 

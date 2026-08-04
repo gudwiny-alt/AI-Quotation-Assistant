@@ -112,6 +112,7 @@ _TMALL_RESULT_MODEL_VARIANTS = (
     "竞速版",
     "至尊版",
 )
+_TMALL_RESULT_VARIANT_SEPARATORS = " -·"
 _TMALL_RESULT_ACCESSORY_MARKERS = (
     "手机壳",
     "保护壳",
@@ -784,14 +785,7 @@ class TmallAdapter:
             expected.canonical_url,
         )
         self._require_approved_detail_seller(page)
-        titles = visible_locators(page, TMALL_DETAIL_TITLES)
-        if not titles or any(
-            not model_matches(task.model_name, title.inner_text())
-            for title in titles
-        ):
-            raise LayoutRecognitionError(
-                "Tmall model changed before legal-no capture"
-            )
+        self._matching_detail_titles(page, task)
         capacity = self._exact_option(
             self._sku_option_group(page, "存储容量"),
             TMALL_SKU_VALUES,
@@ -1639,7 +1633,7 @@ def _tmall_result_card_matches(model_name: str, card_text: str) -> bool:
     suffix = actual[match.end() :]
     if suffix and _is_attached_ascii(suffix[0]):
         return False
-    meaningful_suffix = suffix.lstrip()
+    meaningful_suffix = suffix.lstrip(_TMALL_RESULT_VARIANT_SEPARATORS)
     return not any(
         meaningful_suffix.startswith(variant)
         for variant in _TMALL_RESULT_MODEL_VARIANTS

@@ -175,6 +175,20 @@ def test_search_anchor_result_capture_can_anchor_search_before_validating_card_n
     assert page.scroll_targets == ["search"]
 
 
+def test_result_card_without_a_post_position_name_fails_closed() -> None:
+    page = _Page()
+
+    with pytest.raises(LayoutRecognitionError, match="product card name"):
+        position_result_cards_for_capture(
+            page,
+            search_input=_Locator(page, "search"),
+            product_name=None,
+            product_card=_Locator(page, "card"),
+            site_name="JD",
+            prefer_search_anchor=True,
+        )
+
+
 def test_no_model_result_requires_search_input_and_card_name_in_viewport() -> None:
     page = _Page()
 

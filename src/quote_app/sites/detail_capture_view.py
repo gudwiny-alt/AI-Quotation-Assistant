@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from quote_app.tasks.retry import LayoutRecognitionError
@@ -126,6 +126,8 @@ def position_result_cards_for_capture(
     product_card: Any | None,
     site_name: str,
     prefer_search_anchor: bool = False,
+    product_name_reader: Callable[[], Any | None] | None = None,
+    empty_state: Any | None = None,
 ) -> None:
     """Place a legal no-model result where its visible card name is readable.
 
@@ -137,9 +139,18 @@ def position_result_cards_for_capture(
     """
 
     if product_card is None:
+        if prefer_search_anchor and search_input is not None:
+            search_input.evaluate(_ALIGN_SEARCH_TO_VIEWPORT_TOP)
+            page.wait_for_timeout(_POSITION_WAIT_MS)
         if search_input is not None and not _in_viewport(search_input):
             raise LayoutRecognitionError(
                 f"{site_name} no-model search input is not visible for capture"
+            )
+        if prefer_search_anchor and (
+            empty_state is None or not _in_viewport(empty_state)
+        ):
+            raise LayoutRecognitionError(
+                f"{site_name} no-model empty state is not visible for capture"
             )
         return
     # JD's no-model screenshot must establish the searched keyword first while
@@ -154,7 +165,9 @@ def position_result_cards_for_capture(
         raise LayoutRecognitionError(
             f"{site_name} no-model search input is not visible for capture"
         )
-    if product_name is not None and not _in_viewport(product_name):
+    if product_name_reader is not None:
+        product_name = product_name_reader()
+    if product_name is None or not _in_viewport(product_name):
         raise LayoutRecognitionError(
             f"{site_name} no-model product card name is not visible for capture"
         )

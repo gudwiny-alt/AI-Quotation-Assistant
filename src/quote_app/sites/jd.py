@@ -128,6 +128,10 @@ _JD_RESULT_ACCESSORY_MARKERS = (
     "支架",
 )
 _NUMERIC_SKU = re.compile(r"^[0-9]+$")
+_JD_MODERN_CAPACITY_LABEL = re.compile(
+    r"^\d+(?:\.\d+)?(?:GB|TB)[+/,|、;；]"
+    r"\d+(?:\.\d+)?(?:GB|TB)$"
+)
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _MAX_SELECTION_POLLS = 5
 _MAX_MODERN_SELECTION_POLLS = 20
@@ -705,6 +709,8 @@ class JDAdapter:
         if not _modern_result_card_matches(task.model_name, title.inner_text()):
             raise LayoutRecognitionError("JD modern product detail model does not match")
         self._wait_for_modern_sku_options(page, task)
+        initial_configuration = self._modern_configuration_snapshot(page)
+        initial_price_fingerprint = self._modern_price_fingerprint(page)
         capacity = self._exact_option(
             page,
             JD_MODERN_SKU_OPTIONS,
@@ -742,20 +748,10 @@ class JDAdapter:
         self._prepare_exact_option(color)
         color = self._wait_for_modern_selected(page, color_matcher, "color")
         self._raise_if_authentication_blocked(page)
-        selected_labels = {
-            _modern_option_label(option.inner_text())
-            for option in visible_locators(page, JD_MODERN_SKU_OPTIONS)
-            if _is_modern_selected(option)
-        }
-        expected_capacity = _modern_option_label(f"{task.ram}+{task.storage}")
-        has_selected_colour = any(
-            _jd_color_matches(task.color, selected_label)
-            for selected_label in selected_labels
+        target_began_unselected = not (
+            self._snapshot_has_selected(initial_configuration, capacity_matcher)
+            and self._snapshot_has_selected(initial_configuration, color_matcher)
         )
-        if expected_capacity not in selected_labels or not has_selected_colour:
-            raise LayoutRecognitionError(
-                "JD modern selected options do not match the requested configuration"
-            )
         canonical_url = _approved_result_item_url(page.url, base_url=detail_url)
         current_sku = _sku_from_item_url(canonical_url)
         region = unique_visible_locator(
@@ -765,7 +761,13 @@ class JDAdapter:
         ).inner_text().strip()
         if not region:
             raise LayoutRecognitionError("JD modern delivery region is blank")
-        selected_price = self._modern_selected_price(page)
+        selected_price = self._modern_selected_price(
+            page,
+            task,
+            initial_configuration=initial_configuration,
+            initial_price_fingerprint=initial_price_fingerprint,
+            require_transition=target_began_unselected,
+        )
         semantic_state = self._semantic_state(
             task,
             page,
@@ -969,18 +971,34 @@ class JDAdapter:
                     "JD no-model search keyword is not visible for capture"
                 )
             product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
-            product_name = _first_visible_product_title(
-                result_region,
-                JD_PRODUCT_CARDS,
-                JD_PRODUCT_TITLES,
-            )
+            empty_states = visible_locators(result_region, JD_EMPTY_RESULTS)
+
+            def positioned_product_name() -> Any | None:
+                current_cards = visible_locators(
+                    result_region,
+                    JD_PRODUCT_CARDS,
+                )
+                if self._exact_product_cards(current_cards, task.model_name):
+                    raise LayoutRecognitionError(
+                        "JD exact product appeared after no-model positioning"
+                    )
+                return _first_visible_product_title(
+                    result_region,
+                    JD_PRODUCT_CARDS,
+                    JD_PRODUCT_TITLES,
+                )
+
             position_result_cards_for_capture(
                 browser_page,
                 search_input=result_search_input,
-                product_name=product_name,
+                product_name=None,
                 product_card=product_cards[0] if product_cards else None,
                 site_name="JD",
                 prefer_search_anchor=True,
+                product_name_reader=(
+                    positioned_product_name if product_cards else None
+                ),
+                empty_state=empty_states[0] if not product_cards else None,
             )
             return
         if expected.outcome is not BusinessOutcome.PRICE_FOUND:
@@ -1319,24 +1337,6 @@ class JDAdapter:
             raise LayoutRecognitionError(
                 "JD modern product detail model changed before capture"
             )
-        selected_labels = {
-            _modern_option_label(option.inner_text())
-            for option in visible_locators(page, JD_MODERN_SKU_OPTIONS)
-            if _is_modern_selected(option)
-        }
-        expected_capacity = _modern_option_label(
-            f"{task.ram}+{task.storage}"
-        )
-        if (
-            expected_capacity not in selected_labels
-            or not any(
-                _jd_color_matches(task.color, selected_label)
-                for selected_label in selected_labels
-            )
-        ):
-            raise LayoutRecognitionError(
-                "JD modern selected configuration changed before capture"
-            )
         region = unique_visible_locator(
             page,
             JD_MODERN_DELIVERY_REGIONS,
@@ -1350,7 +1350,7 @@ class JDAdapter:
             task,
             page,
             outcome=BusinessOutcome.PRICE_FOUND,
-            price=self._modern_selected_price(page),
+            price=self._modern_selected_price(page, task),
             rectangles=(),
             current_sku=_sku_from_item_url(canonical_url),
             region=region,
@@ -1605,60 +1605,181 @@ class JDAdapter:
             f"JD modern exact {semantic_name} option did not reach a selected state"
         )
 
-    def _modern_selected_price(self, page: Any) -> Decimal:
-        previous: tuple[PriceCandidate, ...] | None = None
-        for _ in range(_MAX_PRICE_POLLS):
-            price_nodes = tuple(
-                locator.nth(index)
-                for selector in JD_MODERN_CURRENT_SKU_SELLING_PRICES
-                for locator in (page.locator(selector),)
-                for index in range(locator.count())
-                if locator.nth(index).is_visible()
+    @staticmethod
+    def _modern_configuration_snapshot(
+        page: Any,
+    ) -> tuple[tuple[str, bool], ...]:
+        return tuple(
+            (
+                _modern_option_label(option.inner_text()),
+                _is_modern_selected(option),
             )
-            candidates: list[PriceCandidate] = []
-            for locator in price_nodes:
-                style = locator.evaluate(_PRICE_STYLE_SCRIPT)
-                is_struck_through = (
-                    bool(style.get("effectiveLineThrough"))
-                    if isinstance(style, dict)
-                    else False
+            for option in visible_locators(page, JD_MODERN_SKU_OPTIONS)
+        )
+
+    @staticmethod
+    def _snapshot_has_selected(
+        snapshot: tuple[tuple[str, bool], ...],
+        matcher: Any,
+    ) -> bool:
+        return any(selected and matcher(label) for label, selected in snapshot)
+
+    @staticmethod
+    def _require_exact_modern_configuration(
+        task: WebsiteTask,
+        snapshot: tuple[tuple[str, bool], ...],
+    ) -> None:
+        selected_capacities = tuple(
+            label
+            for label, selected in snapshot
+            if selected and _is_modern_capacity_label(label)
+        )
+        selected_colours = tuple(
+            label
+            for label, selected in snapshot
+            if selected and not _is_modern_capacity_label(label)
+        )
+        if (
+            len(selected_capacities) != 1
+            or not capacity_matches(
+                selected_capacities[0],
+                task.ram,
+                task.storage,
+            )
+            or len(selected_colours) != 1
+            or not _jd_color_matches(task.color, selected_colours[0])
+        ):
+            raise LayoutRecognitionError(
+                "JD modern selected configuration is not exact and exclusive"
+            )
+
+    @staticmethod
+    def _modern_price_nodes(page: Any) -> tuple[Any, ...]:
+        return tuple(
+            locator.nth(index)
+            for selector in JD_MODERN_CURRENT_SKU_SELLING_PRICES
+            for locator in (page.locator(selector),)
+            for index in range(locator.count())
+            if locator.nth(index).is_visible()
+        )
+
+    def _modern_price_fingerprint(
+        self,
+        page: Any,
+    ) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (
+                locator.inner_text(),
+                locator.get_attribute("class") or "",
+            )
+            for locator in self._modern_price_nodes(page)
+        )
+
+    def _modern_price_snapshot(
+        self,
+        page: Any,
+    ) -> tuple[tuple[PriceCandidate, ...], tuple[tuple[str, str], ...]]:
+        price_nodes = self._modern_price_nodes(page)
+        fingerprint = tuple(
+            (
+                locator.inner_text(),
+                locator.get_attribute("class") or "",
+            )
+            for locator in price_nodes
+        )
+        candidates: list[PriceCandidate] = []
+        for locator in price_nodes:
+            style = locator.evaluate(_PRICE_STYLE_SCRIPT)
+            is_struck_through = (
+                bool(style.get("effectiveLineThrough"))
+                if isinstance(style, dict)
+                else False
+            )
+            is_struck_through = is_struck_through or (
+                "product-price--gray-line-through"
+                in (locator.get_attribute("class") or "").split()
+            )
+            context = (
+                "京东当前已选配置"
+                if is_struck_through
+                else locator.evaluate(_PRICE_CONTEXT_SCRIPT)
+            )
+            if (
+                not isinstance(style, dict)
+                or not isinstance(context, str)
+                or not isinstance(style.get("color"), str)
+                or type(style.get("effectiveLineThrough")) is not bool
+            ):
+                raise LayoutRecognitionError("JD modern selling price is invalid")
+            candidates.append(
+                PriceCandidate(
+                    text=locator.inner_text(),
+                    context=context,
+                    visible=locator.is_visible(),
+                    computed_color=style["color"],
+                    selling_evidence=(
+                        SellingPriceEvidence.VERIFIED_CURRENT_SKU_STRUCK_THROUGH_PRICE
+                        if is_struck_through
+                        else SellingPriceEvidence.VERIFIED_CURRENT_SKU_SELLING_NODE
+                    ),
+                    effective_line_through=style["effectiveLineThrough"],
                 )
-                is_struck_through = is_struck_through or (
-                    "product-price--gray-line-through"
-                    in (locator.get_attribute("class") or "").split()
-                )
-                context = (
-                    "京东当前已选配置"
-                    if is_struck_through
-                    else locator.evaluate(_PRICE_CONTEXT_SCRIPT)
-                )
-                if (
-                    not isinstance(style, dict)
-                    or not isinstance(context, str)
-                    or not isinstance(style.get("color"), str)
-                    or type(style.get("effectiveLineThrough")) is not bool
-                ):
-                    raise LayoutRecognitionError("JD modern selling price is invalid")
-                candidates.append(
-                    PriceCandidate(
-                        text=locator.inner_text(),
-                        context=context,
-                        visible=locator.is_visible(),
-                        computed_color=style["color"],
-                        selling_evidence=(
-                            SellingPriceEvidence.VERIFIED_CURRENT_SKU_STRUCK_THROUGH_PRICE
-                            if is_struck_through
-                            else SellingPriceEvidence.VERIFIED_CURRENT_SKU_SELLING_NODE
-                        ),
-                        effective_line_through=style["effectiveLineThrough"],
-                    )
-                )
-            selected = choose_price(tuple(candidates), self.spec.price_policy)
-            if selected is not None and tuple(candidates) == previous:
+            )
+        return tuple(candidates), fingerprint
+
+    def _modern_selected_price(
+        self,
+        page: Any,
+        task: WebsiteTask,
+        *,
+        initial_configuration: tuple[tuple[str, bool], ...] | None = None,
+        initial_price_fingerprint: tuple[tuple[str, str], ...] | None = None,
+        require_transition: bool = False,
+    ) -> Decimal:
+        previous: (
+            tuple[tuple[tuple[str, bool], ...], tuple[PriceCandidate, ...]]
+            | None
+        ) = None
+        transition_observed = not require_transition
+        previous_exact_configuration: tuple[tuple[str, bool], ...] | None = None
+        exact_configuration_streak = 0
+        for _ in range(_MAX_PRICE_POLLS):
+            configuration = self._modern_configuration_snapshot(page)
+            candidates, price_fingerprint = self._modern_price_snapshot(page)
+            if require_transition and (
+                configuration != initial_configuration
+                or price_fingerprint != initial_price_fingerprint
+            ):
+                transition_observed = True
+            try:
+                self._require_exact_modern_configuration(task, configuration)
+            except LayoutRecognitionError:
+                previous = None
+                previous_exact_configuration = None
+                exact_configuration_streak = 0
+                page.wait_for_timeout(_POLL_INTERVAL_MS)
+                self._raise_if_authentication_blocked(page)
+                continue
+            if configuration == previous_exact_configuration:
+                exact_configuration_streak += 1
+            else:
+                previous_exact_configuration = configuration
+                exact_configuration_streak = 1
+            selected = choose_price(candidates, self.spec.price_policy)
+            atomic_snapshot = (configuration, candidates)
+            if (
+                selected is not None
+                and atomic_snapshot == previous
+                and transition_observed
+            ):
                 return selected
-            previous = tuple(candidates)
+            previous = atomic_snapshot
             page.wait_for_timeout(_POLL_INTERVAL_MS)
             self._raise_if_authentication_blocked(page)
+        if exact_configuration_streak < 2 or not transition_observed:
+            raise LayoutRecognitionError(
+                "JD modern exact configuration did not reach an exclusive stable state"
+            )
         raise NonRetryableTechnicalError(
             "NO_VALID_SELLING_PRICE",
             "目标配置仅展示补贴价或划线原价，需人工补充",
@@ -1983,6 +2104,10 @@ def _is_modern_selected(locator: Any) -> bool:
 
 def _modern_option_label(value: str) -> str:
     return normalize_product_text(value).replace("无货", " ").strip()
+
+
+def _is_modern_capacity_label(value: str) -> bool:
+    return _JD_MODERN_CAPACITY_LABEL.fullmatch(value.replace(" ", "")) is not None
 
 
 def _jd_color_matches(target: str, candidate: str) -> bool:
