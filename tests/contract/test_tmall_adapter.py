@@ -14,7 +14,12 @@ import pytest
 from quote_app.sites.catalog import SUPPORTED_BRANDS, SiteSpec, load_site_catalog
 from quote_app.sites.protocol import SiteObservationAdapter
 from quote_app.sites.registry import AdapterRegistry, RegisteredSiteAdapter
-from quote_app.sites.tmall import TmallAdapter
+from quote_app.sites.tmall import (
+    TmallAdapter,
+    _approved_item_url,
+    _approved_result_item_url,
+    _tmall_color_matches,
+)
 from quote_app.tasks.models import (
     BusinessOutcome,
     WebsiteChannel,
@@ -192,13 +197,15 @@ class _Locator:
             "height": _pixels(styles.get("height"), 30),
         }
 
-    def evaluate(self, script: str) -> dict[str, object] | str:
+    def evaluate(self, script: str) -> dict[str, object] | str | bool:
         node = self.nodes[0]
         if "scrollIntoView" in script:
             option_kind = self.page.option_kind(node)
             if option_kind is not None:
                 self.page.capture_view_positions.append(option_kind)
             return ""
+        if "getBoundingClientRect" in script:
+            return True
         color = "rgb(0, 0, 0)"
         effective_line_through = False
         context_text: str | None = None
@@ -249,6 +256,7 @@ class _FixturePage:
         final_selection_mode: str = "normal",
         stock_snapshots: tuple[str, ...] | None = None,
         capacity_transition_url: str | None = None,
+        color_transition_url: str | None = None,
         poll_identity_mode: str = "normal",
         delayed_nodes_ready_after: int | None = None,
         store_ready_after: int | None = None,
@@ -279,6 +287,7 @@ class _FixturePage:
         self.stock_snapshots = stock_snapshots
         self.stock_snapshot_reads = 0
         self.capacity_transition_url = capacity_transition_url
+        self.color_transition_url = color_transition_url
         self.poll_identity_mode = poll_identity_mode
         self.delayed_nodes_ready_after = delayed_nodes_ready_after
         self.store_ready_after = store_ready_after
@@ -291,6 +300,8 @@ class _FixturePage:
         self.option_scrolls: list[str] = []
         self.option_events: list[str] = []
         self.capture_view_positions: list[str] = []
+        self.capture_scales: list[float] = []
+        self.scale_restored = False
         self.window_scroll_offsets: list[int] = []
         self.wait_timeout_milliseconds: list[float] = []
         self.pending_selections: dict[_Node, int] = {}
@@ -337,6 +348,8 @@ class _FixturePage:
             and self.selected_options != {"12GB + 256GB", "黑色"}
         ):
             return _Locator(self, [])
+        if selector == "body":
+            return _Locator(self, _select(self.root.descendants(), selector))
         screens = [
             node
             for node in self.root.descendants()
@@ -420,9 +433,21 @@ class _FixturePage:
             marker.attrs["data-current-sku"] = "999999999999"
         self.poll_waits += 1
 
-    def evaluate(self, script: str) -> None:
+    def evaluate(
+        self,
+        script: str,
+        value: float | None = None,
+    ) -> bool | None:
+        if "quotation-capture-scale" in script:
+            if "root.removeAttribute" in script:
+                self.scale_restored = True
+                return True
+            assert value is not None
+            self.capture_scales.append(value)
+            return True
         if script == "() => window.scrollBy(0, -120)":
             self.window_scroll_offsets.append(-120)
+        return None
 
     def _reveal_delayed_nodes(self, attribute: str, counter: str) -> None:
         remaining = getattr(self, counter)
@@ -473,6 +498,8 @@ class _FixturePage:
             self.pending_capacity_context = 2
         if "GB" in node.text and self.capacity_transition_url is not None:
             self._url = self.capacity_transition_url
+        if "GB" not in node.text and self.color_transition_url is not None:
+            self._url = self.color_transition_url
         if node.text == "黑色":
             self.apply_final_selection_mutation()
 
@@ -765,6 +792,111 @@ def test_live_observed_store_search_results_and_product_selectors_drive_path() -
     assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
 
 
+def test_tmall_rich_product_card_title_enters_the_exact_base_model() -> None:
+    html = _live_observed_html().replace(
+        "新品 小米15 12GB+256GB 手机",
+        "【政府补贴15%】小米15智能手机大电池第二代通信官方旗舰店",
+        1,
+    )
+
+    observation = _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
+
+
+def test_tmall_enters_an_exact_base_model_card_even_when_its_card_lists_other_sku_values() -> None:
+    html = _live_observed_html().replace(
+        "新品 小米15 12GB+256GB 手机",
+        "小米15 16GB+512GB 蓝色 官方旗舰店",
+        1,
+    )
+
+    observation = _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
+
+
+def test_tmall_store_controls_accept_live_store_page_form_action() -> None:
+    """Search is executed by the bounded button, not by the form action URL."""
+    html = _live_observed_html().replace(
+        'action="https://xiaomi.tmall.com/search.htm?scene=taobao_shop"',
+        'action="https://xiaomi.tmall.com/shop/view_shop.htm"',
+        1,
+    )
+    page = _FixturePage(html=html)
+
+    search_input, search_action = TmallAdapter(_xiaomi_spec())._wait_for_store_search_controls(
+        cast(Any, page)
+    )
+
+    assert search_input.get_attribute("id") == "mq"
+    assert search_action.get_attribute("id") == "J_CurrShopBtn"
+
+
+def test_tmall_prefers_available_exact_model_card_over_sold_out_duplicate() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        '''        <article class="tmall-product-card"><a class="tmall-product-link" href="//detail.tmall.com/item.htm?id=123456789018" target="_blank"><span class="tmall-product-title">新品 小米15 12GB+256GB 手机</span></a></article>''',
+        '''        <article class="tmall-product-card"><a class="tmall-product-link" href="//detail.tmall.com/item.htm?id=123456789019"><span class="tmall-product-title">新品 小米15 12GB+256GB 手机</span></a><span class="stock-state">暂时缺货</span></article>
+        <article class="tmall-product-card"><a class="tmall-product-link" href="//detail.tmall.com/item.htm?id=123456789018" target="_blank"><span class="tmall-product-title">新品 小米15 12GB+256GB 手机</span></a></article>''',
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
+
+
+def test_tmall_accepts_the_unique_marketing_colour_for_a_generic_base_colour() -> None:
+    assert _tmall_color_matches("黑色", "幻夜黑")
+    assert not _tmall_color_matches("黑色", "雪原白")
+
+
+def test_tmall_uses_the_first_available_exact_model_card_when_the_store_lists_duplicates() -> None:
+    """Live flagship-store results can repeat one exact model with offers."""
+
+    html = _live_observed_html().replace(
+        "item.htm?id=123456789018",
+        "item.htm?id=123456789020",
+        1,
+    ).replace(
+        "</section>",
+        '<dl class="item"><a class="item-name J_TGoldData" '
+        'href="//detail.tmall.com/item.htm?id=123456789018">'
+        "新品 小米15 12GB+256GB 手机</a></dl></section>",
+        1,
+    )
+    page = _FixturePage(html=html)
+    page.activate("results")
+    cards = tuple(
+        page.locator("dl.item").nth(index)
+        for index in range(page.locator("dl.item").count())
+    )
+
+    adapter = TmallAdapter(_xiaomi_spec())
+    detail_url = adapter._exact_product_detail_url(
+        adapter._exact_product_cards(cards, _task().model_name),
+        base_url=_LIVE_RESULTS_URL,
+    )
+
+    assert detail_url == "https://detail.tmall.com/item.htm?id=123456789020"
+
+
+def test_tmall_sold_out_selected_sku_with_bound_price_is_quoted() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'data-sku="123456789018">现货</div>',
+        'data-sku="123456789018">已售罄</div>',
+        1,
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
+    assert observation.semantic_state.stock_state == "已售罄"
+
+
 def test_price_found_exposes_a_live_formal_capture_reader() -> None:
     task = _task()
     page = _FixturePage()
@@ -846,24 +978,26 @@ def test_honor_store_entry_can_open_one_exact_item_without_search_form() -> None
     ]
 
 
-def test_live_store_search_form_action_is_required_and_fail_closed() -> None:
+def test_live_store_search_uses_the_bounded_button_not_form_action() -> None:
     html = _live_observed_html().replace(
         "https://xiaomi.tmall.com/search.htm?scene=taobao_shop",
         "https://list.tmall.com/search_product.htm?q=x",
     )
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+    observation = _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
-def test_store_search_form_action_rejects_overencoded_scene() -> None:
+def test_live_store_search_ignores_overencoded_unused_form_action_scene() -> None:
     html = _live_observed_html().replace(
         "scene=taobao_shop",
         "scene=%2525",
     )
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+    observation = _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_adapter_binds_exact_tmall_spec_and_both_runtime_protocols() -> None:
@@ -944,6 +1078,28 @@ def test_embedded_taobao_login_frame_pauses_for_user_action() -> None:
 
     assert caught.value.site == "tmall"
     assert caught.value.reason == "天猫需要人工登录"
+
+
+def test_store_benefit_login_gate_pauses_before_searching() -> None:
+    """A signed-out flagship-store landing page is still a login state."""
+
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        '<form action="#results">',
+        """<section class="member-benefit-gate">
+          <p>登录后可查看完整店铺优惠权益</p>
+          <button>立即登录</button>
+        </section>
+        <form action="#results">""",
+        1,
+    )
+    page = _FixturePage(html=html)
+
+    with pytest.raises(LoginRequired) as caught:
+        TmallAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+
+    assert caught.value.site == "tmall"
+    assert caught.value.reason == "天猫需要人工登录"
+    assert len(page.goto_calls) == 1
 
 
 def test_delayed_embedded_login_frame_pauses_before_store_layout_failure() -> None:
@@ -1200,8 +1356,83 @@ def test_store_search_accepts_observed_exact_gbk_keyword_bytes(
     )
 
 
+def test_tmall_uses_verified_gbk_url_when_result_search_input_is_blank() -> None:
+    html = _live_observed_html().replace(
+        'name="q" value="小米 15"',
+        'name="q" value=""',
+        1,
+    )
+    result_url = (
+        "https://xiaomi.tmall.com/?q=%D0%A1%C3%D7%2015"
+        + _LIVE_RESULTS_STATIC_QUERY
+    )
+
+    observation = _observe(html=html, after_search_url=result_url)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_tmall_blank_result_input_can_record_a_verified_no_model_result() -> None:
+    html = _live_observed_html().replace(
+        'name="q" value="小米 15"',
+        'name="q" value=""',
+        1,
+    ).replace("新品 小米15 12GB+256GB 手机", "新品 小米14 手机", 1)
+    result_url = (
+        "https://xiaomi.tmall.com/?q=%D0%A1%C3%D7%2015"
+        + _LIVE_RESULTS_STATIC_QUERY
+    )
+
+    observation = _observe(html=html, after_search_url=result_url)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rect.role for rect in observation.css_rectangles) == (
+        "result_region",
+    )
+
+
+def test_tmall_no_model_prepares_a_result_view_with_readable_card_names() -> None:
+    page = _FixturePage("no_model.html")
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert page.capture_scales == [0.8]
+    assert 300 in page.wait_timeout_milliseconds
+    adapter.restore_capture_view(task, cast(Any, page), observation.semantic_state)
+    assert page.scale_restored is True
+
+
+def test_tmall_no_model_rereads_capture_rectangles_after_result_positioning() -> None:
+    page = _FixturePage("no_model.html")
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    reader = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    assert reader() == observation.semantic_state
+
+
 @pytest.mark.parametrize(
-    "result_url",
+"result_url",
     [
         "https://xiaomi.tmall.com/?q=" + _LIVE_RESULTS_STATIC_QUERY,
         "https://xiaomi.tmall.com/?q=%E5%B0%8F%E7%B1%B3%2014"
@@ -1239,8 +1470,8 @@ def test_store_search_url_rejects_unapproved_or_nonexact_shapes(
         _observe("no_model.html", after_search_url=result_url)
 
 
-@pytest.mark.parametrize("value", ["", "小米 14"])
-def test_result_input_must_prove_exact_keyword_before_price_or_no_model(
+@pytest.mark.parametrize("value", ["小米 14"])
+def test_nonblank_result_input_must_prove_exact_keyword_before_price_or_no_model(
     value: str,
 ) -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8")
@@ -1270,6 +1501,18 @@ def test_unknown_or_empty_layout_is_technical(result_html: str) -> None:
     )
     with pytest.raises(LayoutRecognitionError):
         _observe(html=html)
+
+
+def test_tmall_layout_error_identifies_the_failed_page_stage() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        "小米官方旗舰店",
+        "未知店铺",
+    )
+
+    with pytest.raises(LayoutRecognitionError) as caught:
+        _observe(html=html)
+
+    assert caught.value.stage == "天猫店铺页"
 
 
 def test_unobserved_synthetic_empty_state_is_technical() -> None:
@@ -1302,6 +1545,69 @@ def test_target_blank_item_uses_controlled_existing_page_navigation() -> None:
     assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
 
 
+def test_tmall_item_link_strips_observed_opaque_mi_id_tracking_key() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'href="//detail.tmall.com/item.htm?id=123456789018" target="_blank"',
+        'href="//detail.tmall.com/item.htm?id=123456789018&rn=fixture&'
+        'abbucket=3&mi_id=opaque-tracking-key" target="_blank"',
+        1,
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
+
+
+def test_tmall_item_link_strips_the_observed_spm_tracking_key() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'href="//detail.tmall.com/item.htm?id=123456789018" target="_blank"',
+        'href="//detail.tmall.com/item.htm?id=123456789018&spm=fixture-tracking" '
+        'target="_blank"',
+        1,
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
+
+
+def test_tmall_item_link_strips_the_observed_ali_tracking_keys() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'href="//detail.tmall.com/item.htm?id=123456789018" target="_blank"',
+        'href="//detail.tmall.com/item.htm?id=123456789018&'
+        'ali_refid=fixture-ref&ali_trackid=fixture-track&bxsign=fixture-sign" '
+        'target="_blank"',
+        1,
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.url == "https://detail.tmall.com/item.htm?id=123456789018"
+
+
+def test_selected_tmall_sku_properties_keeps_the_same_approved_item() -> None:
+    """Selecting a colour can add Tmall's own SKU-properties query key."""
+
+    assert _approved_item_url(
+        "https://detail.tmall.com/item.htm?id=123456789018&"
+        "sku_properties=5919063%3A6536025",
+        base_url="https://detail.tmall.com/item.htm?id=123456789018",
+    ) == "https://detail.tmall.com/item.htm?id=123456789018"
+
+
+def test_tmall_color_selection_keeps_processing_on_the_same_item_url() -> None:
+    observation = _observe(
+        color_transition_url=(
+            "https://detail.tmall.com/item.htm?id=123456789018&"
+            "sku_properties=5919063%3A6536025"
+        ),
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url.endswith("sku_properties=5919063%3A6536025")
+
+
 @pytest.mark.parametrize(
     "href",
     [
@@ -1311,7 +1617,6 @@ def test_target_blank_item_uses_controlled_existing_page_navigation() -> None:
         "https://detail.tmall.com/item.htm?id=not-a-number",
         "https://detail.tmall.com/item.htm",
         "https://detail.tmall.com/item.htm?id=123456789018&id=123456789018",
-        "https://detail.tmall.com/item.htm?id=123456789018&page=1",
         "https://detail.tmall.com:443/item.htm?id=123456789018",
         "https://detail.tmall.com/item.htm?id=123456789018#sku",
         "https://user:password@detail.tmall.com/item.htm?id=123456789018",
@@ -1388,7 +1693,7 @@ def test_two_bounded_live_detail_titles_are_accepted_only_when_both_match() -> N
     )
 
 
-def test_conflicting_bounded_live_detail_title_fails_closed() -> None:
+def test_nonmatching_auxiliary_live_detail_title_does_not_replace_matching_product_title() -> None:
     title = '<h1 class="ItemTitle--fixture">小米 15</h1>'
     html = _live_observed_html().replace(
         title,
@@ -1396,8 +1701,24 @@ def test_conflicting_bounded_live_detail_title_fails_closed() -> None:
         1,
     )
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+    observation = _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_tmall_accepts_a_verified_legacy_product_title_when_live_css_class_changes() -> None:
+    """The product title is semantic evidence, not a generated CSS classname."""
+
+    html = _live_observed_html().replace(
+        'class="ItemTitle--fixture"',
+        'class="tb-main-title"',
+        1,
+    )
+
+    assert (
+        _observe(html=html, after_search_url=_LIVE_RESULTS_URL).outcome
+        is BusinessOutcome.PRICE_FOUND
+    )
 
 
 @pytest.mark.parametrize(
@@ -1535,10 +1856,12 @@ def test_normal_selects_exact_variant_and_highest_bound_selling_price() -> None:
     assert observation.semantic_state.stock_state == "现货"
 
 
-def test_tmall_scrolls_options_before_clicking_and_positions_capacity_for_capture() -> None:
+def test_tmall_positions_the_selected_detail_only_when_formal_capture_is_prepared() -> None:
     page = _FixturePage()
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
 
-    observation = TmallAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+    observation = adapter.observe(task, cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.option_events == [
@@ -1548,9 +1871,16 @@ def test_tmall_scrolls_options_before_clicking_and_positions_capacity_for_captur
         "click:color",
     ]
     assert page.option_scrolls == ["capacity", "color"]
+    assert page.capture_view_positions == []
+    assert page.window_scroll_offsets == []
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert page.capture_scales == [0.8]
     assert page.capture_view_positions == ["capacity"]
-    assert page.window_scroll_offsets == [-120]
-    assert 500 in page.wait_timeout_milliseconds
+    assert 300 in page.wait_timeout_milliseconds
+    adapter.restore_capture_view(task, cast(Any, page), observation.semantic_state)
+    assert page.scale_restored is True
 
 
 def test_tmall_resume_goes_directly_to_saved_detail_without_store_search() -> None:
@@ -1589,6 +1919,16 @@ def test_tmall_resume_revalidates_saved_no_model_without_search_submit() -> None
 
     assert resumed == original
     assert resumed_page.goto_calls == [checkpoint.url]
+
+
+def test_tmall_card_link_discards_unrecognized_nonempty_tracking_query_parameters() -> None:
+    """A product card may add tracking data that is irrelevant after ID canonicalization."""
+
+    assert _approved_result_item_url(
+        "https://detail.tmall.com/item.htm?id=123456&pvid=live-card&"
+        "trace=abc&wxid=runtime-card-token",
+        base_url="https://xiaomi.tmall.com/",
+    ) == "https://detail.tmall.com/item.htm?id=123456"
 
 
 def test_async_selected_state_is_confirmed() -> None:

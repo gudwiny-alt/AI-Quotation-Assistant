@@ -12,6 +12,12 @@ from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.platform import PlatformEvidenceCapture
 from quote_app.evidence.semantic_state import VerifiedSemanticState
 from quote_app.sites.catalog import SiteSpec
+from quote_app.sites.detail_capture_view import (
+    apply_capture_scale,
+    position_detail_for_capture,
+    position_result_cards_for_capture,
+    restore_capture_scale,
+)
 from quote_app.sites.locators import (
     TMALL_CURRENT_SKU_MARKERS,
     TMALL_CURRENT_SKU_SELLING_PRICES,
@@ -88,6 +94,55 @@ _DISABLED_CLASSES = frozenset(
     }
 )
 _SELECTED_CLASSES = frozenset({"selected", "checked", "active"})
+_TMALL_RESULT_MODEL_VARIANTS = (
+    "PRO",
+    "PLUS",
+    "ULTRA",
+    "MAX",
+    "MINI",
+    "LITE",
+    "NEO",
+    "AIR",
+    "RSR",
+    "EDGE",
+    "FE",
+    "GT",
+    "青春版",
+    "活力版",
+    "竞速版",
+    "至尊版",
+)
+_TMALL_RESULT_ACCESSORY_MARKERS = (
+    "手机壳",
+    "保护壳",
+    "保护套",
+    "手机套",
+    "钢化膜",
+    "屏幕膜",
+    "贴膜",
+    "充电器",
+    "数据线",
+    "耳机",
+    "配件",
+    "适用",
+    "支架",
+)
+_GENERIC_COLOR_NAMES = frozenset(
+    {
+        "黑色",
+        "白色",
+        "蓝色",
+        "绿色",
+        "红色",
+        "紫色",
+        "灰色",
+        "银色",
+        "金色",
+        "橙色",
+        "粉色",
+        "黄色",
+    }
+)
 _TMALL_ITEM_PATH = "/item.htm"
 _TMALL_SEARCH_PATH = "/"
 _TMALL_STORE_FORM_PATH = "/search.htm"
@@ -102,8 +157,26 @@ _TMALL_SEARCH_QUERY_KEYS = frozenset(
         "spm",
     }
 )
-_TMALL_ITEM_OPTIONAL_QUERY_KEYS = frozenset({"rn", "abbucket", "skuId"})
+_TMALL_ITEM_OPTIONAL_QUERY_KEYS = frozenset(
+    {
+        "rn",
+        "abbucket",
+        "skuId",
+        "sku_properties",
+        "mi_id",
+        "spm",
+        "ali_refid",
+        "ali_trackid",
+        "bxsign",
+        "scm",
+        "scm_id",
+        "utparam",
+        "from",
+        "source",
+    }
+)
 _NUMERIC_SKU = re.compile(r"^[0-9]+$")
+_TMALL_SKU_PROPERTIES = re.compile(r"^[0-9]+:[0-9]+(?:;[0-9]+:[0-9]+)*$")
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _LOGIN_HOSTS = frozenset({"login.tmall.com", "login.taobao.com"})
 _RISK_HOSTS = frozenset(
@@ -121,6 +194,7 @@ _MAX_PRICE_CONTEXT_LENGTH = 1000
 _POLL_INTERVAL_MS = 100
 _STORE_READY_INTERVAL_MS = 500
 _OBSERVED_SUBSIDY_PRICE_MARKER = "平台加补后"
+_STORE_LOGIN_BENEFIT_GATE = "登录后可查看完整店铺优惠权益"
 _PRICE_STYLE_SCRIPT = """
 (element) => {
   let current = element;
@@ -183,87 +257,85 @@ class TmallAdapter:
         task: WebsiteTask,
         page: BrowserPage,
     ) -> AdapterObservation:
-        self._validate_task(task)
-        browser_page = _playwright_page(page)
-        browser_page.goto(self.spec.entry_url, wait_until="domcontentloaded")
-        self._wait_for_approved_store(browser_page)
-        detail_url = self._exact_entry_product_url(
-            browser_page,
-            task.model_name,
-        )
-        if detail_url is None:
-            search_input, search_action = self._wait_for_store_search_controls(
-                browser_page,
-            )
-            search_input.fill(task.model_name)
-            click_and_wait_for_navigation(
-                browser_page,
-                search_action,
-                semantic_name="天猫店铺搜索",
-            )
-            self._raise_if_blocked_or_error(browser_page)
-            _validate_store_search_url(
-                browser_page.url,
-                expected_host=_required_entry_host(self.spec.entry_url),
-                expected_model=task.model_name,
-            )
+        stage = ["天猫店铺页"]
+        try:
+            self._validate_task(task)
+            browser_page = _playwright_page(page)
+            browser_page.goto(self.spec.entry_url, wait_until="domcontentloaded")
             self._wait_for_approved_store(browser_page)
-
-            result_region = self._wait_for_result_region(browser_page)
-            result_search_input = self._validated_result_search_input(
+            detail_url = self._exact_entry_product_url(
                 browser_page,
                 task.model_name,
             )
-            product_cards = visible_locators(
-                result_region,
-                TMALL_PRODUCT_CARDS,
-            )
-            empty_states = visible_locators(
-                result_region,
-                TMALL_EMPTY_RESULTS,
-            )
-            if not product_cards:
-                if len(empty_states) != 1:
-                    raise LayoutRecognitionError(
-                        "Tmall result cards are missing and no explicit "
-                        "empty state is visible"
-                    )
-                return self._no_model_observation(
-                    task,
+            if detail_url is None:
+                search_input, search_action = self._wait_for_store_search_controls(
                     browser_page,
-                    result_region,
-                    result_search_input,
                 )
-            if empty_states:
-                raise LayoutRecognitionError(
-                    "Tmall result cards conflict with an explicit empty state"
-                )
-            exact_cards = self._exact_product_cards(
-                product_cards,
-                task.model_name,
-            )
-            if not exact_cards:
-                return self._no_model_observation(
-                    task,
+                stage[0] = "天猫搜索页"
+                search_input.fill(task.model_name)
+                click_and_wait_for_navigation(
                     browser_page,
-                    result_region,
-                    result_search_input,
+                    search_action,
+                    semantic_name="天猫店铺搜索",
                 )
-            if len(exact_cards) != 1:
-                raise LayoutRecognitionError(
-                    "Tmall exact product result is ambiguous"
+                self._raise_if_blocked_or_error(browser_page)
+                _validate_store_search_url(
+                    browser_page.url,
+                    expected_host=_required_entry_host(self.spec.entry_url),
+                    expected_model=task.model_name,
                 )
+                self._wait_for_approved_store(browser_page)
 
-            product_link = _unique_visible_locator(
-                exact_cards[0],
-                TMALL_PRODUCT_LINKS,
-                semantic_name="exact product link",
-            )
-            detail_url = _approved_item_url(
-                product_link.get_attribute("href"),
-                base_url=browser_page.url,
-            )
-        return self._observe_detail(task, browser_page, detail_url)
+                result_region = self._wait_for_result_region(browser_page)
+                result_search_input = self._validated_result_search_input(
+                    browser_page,
+                    task.model_name,
+                )
+                product_cards = visible_locators(
+                    result_region,
+                    TMALL_PRODUCT_CARDS,
+                )
+                empty_states = visible_locators(
+                    result_region,
+                    TMALL_EMPTY_RESULTS,
+                )
+                if not product_cards:
+                    if len(empty_states) != 1:
+                        raise LayoutRecognitionError(
+                            "Tmall result cards are missing and no explicit "
+                            "empty state is visible"
+                        )
+                    return self._no_model_observation(
+                        task,
+                        browser_page,
+                        result_region,
+                        result_search_input,
+                    )
+                if empty_states:
+                    raise LayoutRecognitionError(
+                        "Tmall result cards conflict with an explicit empty state"
+                    )
+                exact_cards = self._exact_product_cards(
+                    product_cards,
+                    task.model_name,
+                )
+                if not exact_cards:
+                    return self._no_model_observation(
+                        task,
+                        browser_page,
+                        result_region,
+                        result_search_input,
+                    )
+                detail_url = self._exact_product_detail_url(
+                    exact_cards,
+                    base_url=browser_page.url,
+                )
+            stage[0] = "天猫商品详情页"
+            return self._observe_detail(task, browser_page, detail_url)
+        except LayoutRecognitionError as error:
+            if error.stage is not None:
+                raise
+            raise LayoutRecognitionError(str(error), stage=stage[0]) from error
 
     def _observe_detail(
         self,
@@ -329,7 +401,7 @@ class TmallAdapter:
         color = self._exact_option(
             color_group,
             TMALL_SKU_VALUES,
-            lambda label: color_matches(task.color, label),
+            lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
         color_context_sku = _required_numeric_sku(
@@ -360,8 +432,6 @@ class TmallAdapter:
         self._wait_for_selected(browser_page, color, "color")
         self._raise_if_blocked_or_error(browser_page)
         self._require_exact_detail_url(browser_page, detail_url)
-
-        self._position_specification_for_capture(browser_page, capacity)
 
         current_sku = self._selected_sku_identity(
             browser_page,
@@ -396,6 +466,124 @@ class TmallAdapter:
             css_rectangles=(),
             semantic_state=semantic_state,
         )
+
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        """Apply Tmall-only 80% framing for the pending formal screenshot."""
+
+        self._validate_task(task)
+        browser_page = _playwright_page(page)
+        apply_capture_scale(browser_page, scale=0.8)
+        try:
+            self._prepare_capture_view_at_scale(task, browser_page, expected)
+        except BaseException:
+            try:
+                restore_capture_scale(browser_page)
+            except Exception:
+                pass
+            raise
+
+    def _prepare_capture_view_at_scale(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        """Set the final screenshot view only after the offer is verified."""
+
+        self._validate_task(task)
+        browser_page = _playwright_page(page)
+        self._raise_if_blocked_or_error(browser_page)
+        if expected.outcome is BusinessOutcome.NO_MODEL:
+            self._read_legal_no_state(task, browser_page, expected)
+            result_region = _unique_visible_locator(
+                browser_page,
+                TMALL_RESULT_REGIONS,
+                semantic_name="result region",
+            )
+            product_cards = visible_locators(
+                result_region,
+                TMALL_PRODUCT_CARDS,
+            )
+            product_name = _first_visible_product_title(
+                result_region,
+                TMALL_PRODUCT_CARDS,
+                TMALL_PRODUCT_TITLES,
+            )
+            position_result_cards_for_capture(
+                browser_page,
+                product_name=product_name,
+                product_card=product_cards[0] if product_cards else None,
+                site_name="Tmall",
+            )
+            return
+        if expected.outcome is not BusinessOutcome.PRICE_FOUND:
+            return
+        self._require_exact_detail_url(browser_page, expected.canonical_url)
+        self._require_approved_detail_seller(browser_page)
+        title = self._matching_detail_titles(browser_page, task)[0]
+        capacity = self._exact_option(
+            self._sku_option_group(browser_page, "存储容量"),
+            TMALL_SKU_VALUES,
+            lambda label: capacity_matches(label, task.ram, task.storage),
+            semantic_name="capacity",
+        )
+        color = self._exact_option(
+            self._sku_option_group(browser_page, "机身颜色"),
+            TMALL_SKU_VALUES,
+            lambda label: _tmall_color_matches(task.color, label),
+            semantic_name="color",
+        )
+        if not _is_approved_selected(capacity) or not _is_approved_selected(color):
+            raise LayoutRecognitionError(
+                "Tmall selected configuration changed before formal capture"
+            )
+        current_sku = self._selected_sku_identity(browser_page, task)
+        price, stock = self._stable_selected_price(browser_page, task, current_sku)
+        current = self._semantic_state(
+            task,
+            browser_page,
+            outcome=BusinessOutcome.PRICE_FOUND,
+            price=price,
+            rectangles=(),
+            current_sku=current_sku,
+            region=stock.region,
+            stock_state=stock.state,
+        )
+        if current != expected:
+            raise LayoutRecognitionError(
+                "Tmall verified offer changed before formal capture"
+            )
+        position_detail_for_capture(
+            browser_page,
+            title=title,
+            prices=visible_locators(
+                browser_page,
+                TMALL_CURRENT_SKU_SELLING_PRICES,
+            ),
+            capacity=capacity,
+            color=color,
+            site_name="Tmall",
+        )
+
+    def restore_capture_view(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        """Restore the page scale after the runner consumes Tmall evidence."""
+
+        self._validate_task(task)
+        if not isinstance(expected, VerifiedSemanticState):
+            raise LayoutRecognitionError(
+                "Tmall capture state is unavailable for restoration"
+            )
+        restore_capture_scale(_playwright_page(page))
 
     def resume(
         self,
@@ -473,16 +661,17 @@ class TmallAdapter:
         def read() -> VerifiedSemanticState:
             self._raise_if_blocked_or_error(browser_page)
             if expected.outcome is not BusinessOutcome.PRICE_FOUND:
-                current = self._read_legal_no_state(
+                self._read_legal_no_state(
                     task,
                     browser_page,
                     expected,
                 )
-                if current != expected:
-                    raise LayoutRecognitionError(
-                        "Tmall legal-no evidence changed before formal capture"
-                    )
-                return current
+                # The current page has been revalidated above.  Keep the
+                # original state coordinates in the stable semantic probe:
+                # final screenshot positioning may deliberately scroll the
+                # result list, which changes geometry but not the legal-no
+                # business fact.
+                return expected
             if expected.css_rectangles:
                 raise LayoutRecognitionError(
                     "Tmall price state has unexpected evidence rectangles"
@@ -492,18 +681,7 @@ class TmallAdapter:
                 expected.canonical_url,
             )
             self._require_approved_detail_seller(browser_page)
-            detail_title = _unique_visible_locator(
-                browser_page,
-                TMALL_DETAIL_TITLES,
-                semantic_name="product detail title",
-            )
-            if not model_matches(
-                task.model_name,
-                detail_title.inner_text(),
-            ):
-                raise LayoutRecognitionError(
-                    "Tmall product detail model changed before capture"
-                )
+            self._matching_detail_titles(browser_page, task)
             current_sku = self._selected_sku_identity(
                 browser_page,
                 task,
@@ -534,6 +712,36 @@ class TmallAdapter:
             return current
 
         return read
+
+    def capture_rectangles_for_capture(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> tuple[CssRect, ...]:
+        """Read evidence geometry after the final marketplace view is positioned."""
+
+        self._validate_task(task)
+        browser_page = _playwright_page(page)
+        self._raise_if_blocked_or_error(browser_page)
+        if expected.outcome is not BusinessOutcome.NO_MODEL:
+            return expected.css_rectangles
+        self._read_legal_no_state(task, browser_page, expected)
+        result_region = _unique_visible_locator(
+            browser_page,
+            TMALL_RESULT_REGIONS,
+            semantic_name="result region",
+        )
+        result_search_input = self._validated_result_search_input(
+            browser_page,
+            task.model_name,
+        )
+        if result_search_input is None:
+            return (_css_rect(result_region, "result_region"),)
+        return (
+            _css_rect(result_search_input, "search_keyword"),
+            _css_rect(result_region, "result_region"),
+        )
 
     def _read_legal_no_state(
         self,
@@ -632,7 +840,7 @@ class TmallAdapter:
         color = self._exact_option(
             self._sku_option_group(page, "机身颜色"),
             TMALL_SKU_VALUES,
-            lambda label: color_matches(task.color, label),
+            lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
         color_sku = _required_numeric_sku(
@@ -685,6 +893,8 @@ class TmallAdapter:
             )
         if hostname in _LOGIN_HOSTS or visible_locators(page, TMALL_LOGIN_MARKERS):
             raise LoginRequired("tmall", "天猫需要人工登录")
+        if _visible_page_contains(page, _STORE_LOGIN_BENEFIT_GATE):
+            raise LoginRequired("tmall", "天猫需要人工登录")
         if visible_locators(page, TMALL_SYSTEM_ERROR_MARKERS):
             raise LayoutRecognitionError("Tmall recognized system error page")
 
@@ -736,14 +946,10 @@ class TmallAdapter:
             self._raise_if_blocked_or_error(page)
             try:
                 self._require_approved_store(page)
-                search_form = _unique_locator(
+                _unique_locator(
                     page,
                     TMALL_STORE_SEARCH_FORMS,
                     semantic_name="store search navigation form",
-                )
-                _validate_store_search_form_action(
-                    search_form.get_attribute("action"),
-                    expected_host=_required_entry_host(self.spec.entry_url),
                 )
                 search_container = _unique_visible_locator(
                     page,
@@ -793,14 +999,7 @@ class TmallAdapter:
             try:
                 self._require_exact_detail_url(page, detail_url)
                 self._require_approved_detail_seller(page)
-                detail_titles = visible_locators(page, TMALL_DETAIL_TITLES)
-                if not detail_titles or any(
-                    not model_matches(task.model_name, title.inner_text())
-                    for title in detail_titles
-                ):
-                    raise LayoutRecognitionError(
-                        "Tmall product detail model does not match"
-                    )
+                self._matching_detail_titles(page, task)
                 return
             except LayoutRecognitionError:
                 if poll + 1 == _MAX_STORE_READY_POLLS:
@@ -817,6 +1016,25 @@ class TmallAdapter:
             raise LayoutRecognitionError(
                 "Tmall product detail seller does not match the approved store"
             )
+
+    @staticmethod
+    def _matching_detail_titles(page: Any, task: WebsiteTask) -> tuple[Any, ...]:
+        matching: list[Any] = []
+        # Tmall's generated ItemTitle classname is not a contract.  Inspect
+        # each bounded title family and retain only a title whose visible text
+        # proves the requested base model.
+        for selector in TMALL_DETAIL_TITLES:
+            locator = page.locator(selector)
+            for index in range(locator.count()):
+                title = locator.nth(index)
+                if title.is_visible() and model_matches(
+                    task.model_name,
+                    title.inner_text(),
+                ):
+                    matching.append(title)
+        if not matching:
+            raise LayoutRecognitionError("Tmall product detail model does not match")
+        return tuple(matching)
 
     @staticmethod
     def _require_exact_detail_url(page: Any, detail_url: str) -> None:
@@ -837,38 +1055,91 @@ class TmallAdapter:
                 TMALL_PRODUCT_TITLES,
                 semantic_name="product card title",
             )
-            if model_matches(model_name, title.inner_text()):
+            if _tmall_result_card_matches(model_name, title.inner_text()):
                 exact.append(card)
         return tuple(exact)
+
+    def _exact_product_detail_url(
+        self,
+        cards: tuple[Any, ...],
+        *,
+        base_url: str,
+    ) -> str:
+        available_cards = tuple(
+            card for card in cards if not _result_card_is_unavailable(card)
+        )
+        candidates = available_cards or cards
+        if not candidates:
+            raise LayoutRecognitionError("Tmall exact product link is missing")
+        # The same approved base model can appear more than once with separate
+        # platform offers.  Stock status remains the first tie-breaker; within
+        # the same visible state retain the store's rendered order so the
+        # selection is repeatable rather than treating normal duplicate offers
+        # as a technical fault.
+        return self._card_detail_url(candidates[0], base_url=base_url)
+
+    @staticmethod
+    def _card_detail_url(card: Any, *, base_url: str) -> str:
+        product_link = _unique_visible_locator(
+            card,
+            TMALL_PRODUCT_LINKS,
+            semantic_name="exact product link",
+        )
+        return _approved_result_item_url(
+            product_link.get_attribute("href"),
+            base_url=base_url,
+        )
 
     def _validated_result_search_input(
         self,
         page: Any,
         model_name: str,
-    ) -> Any:
+    ) -> Any | None:
         result_search_input = _unique_visible_locator(
             page,
             TMALL_SEARCH_INPUTS,
             semantic_name="result search keyword",
         )
         actual_keyword = result_search_input.input_value()
-        if (
-            not isinstance(actual_keyword, str)
-            or normalize_product_text(actual_keyword)
-            != normalize_product_text(model_name)
-        ):
+        if not isinstance(actual_keyword, str):
             raise LayoutRecognitionError(
                 "Tmall result search keyword does not match the requested model"
             )
-        return result_search_input
+        if normalize_product_text(actual_keyword) == normalize_product_text(model_name):
+            return result_search_input
+        if actual_keyword.strip():
+            raise LayoutRecognitionError(
+                "Tmall result search keyword does not match the requested model"
+            )
+        try:
+            _validate_store_search_url(
+                page.url,
+                expected_host=_required_entry_host(self.spec.entry_url),
+                expected_model=model_name,
+            )
+        except LayoutRecognitionError:
+            raise LayoutRecognitionError(
+                "Tmall result search keyword does not match the requested model"
+            ) from None
+        return None
 
     def _no_model_observation(
         self,
         task: WebsiteTask,
         page: Any,
         result_region: Any,
-        result_search_input: Any,
+        result_search_input: Any | None,
     ) -> AdapterObservation:
+        if result_search_input is None:
+            # The live store keeps the result input blank after a successful
+            # GBK/UTF-8 query.  The approved result URL has already proven the
+            # requested model, so retain the visible result region as evidence.
+            return self._legal_no(
+                task,
+                BusinessOutcome.NO_MODEL,
+                page,
+                (_css_rect(result_region, "result_region"),),
+            )
         return self._legal_no(
             task,
             BusinessOutcome.NO_MODEL,
@@ -903,15 +1174,6 @@ class TmallAdapter:
     def _prepare_exact_option(option: Any) -> None:
         option.scroll_into_view_if_needed()
         option.click()
-
-    @staticmethod
-    def _position_specification_for_capture(page: Any, capacity: Any) -> None:
-        capacity.evaluate(
-            "(element) => element.scrollIntoView({block: 'start', "
-            "inline: 'nearest'})"
-        )
-        page.evaluate("() => window.scrollBy(0, -120)")
-        page.wait_for_timeout(500)
 
     def _sku_option_group(self, page: Any, label_text: str) -> Any:
         option_root = _unique_visible_locator(
@@ -991,7 +1253,7 @@ class TmallAdapter:
         color = self._unique_selected_option(
             self._sku_option_group(page, "机身颜色"),
             TMALL_SKU_VALUES,
-            lambda label: color_matches(task.color, label),
+            lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
         marker = _unique_visible_locator(
@@ -1047,7 +1309,7 @@ class TmallAdapter:
             )
         return selected[0]
 
-    def _require_current_stock_available(
+    def _require_current_stock_sample(
         self,
         page: Any,
         current_sku: str,
@@ -1076,10 +1338,6 @@ class TmallAdapter:
         if is_available == is_unavailable:
             raise LayoutRecognitionError(
                 "Tmall current SKU stock state is unrecognized or conflicting"
-            )
-        if is_unavailable:
-            raise LayoutRecognitionError(
-                "Tmall coarse SKU wrapper cannot prove exact sold-out evidence"
             )
         regions = visible_locators(page, TMALL_DELIVERY_REGIONS)
         if len(regions) != 1:
@@ -1161,15 +1419,20 @@ class TmallAdapter:
         current_sku: str,
     ) -> tuple[Decimal, TmallStockSample]:
         previous: tuple[PriceCandidate, ...] | None = None
+        previous_stock: TmallStockSample | None = None
         for _ in range(_MAX_PRICE_POLLS):
             if self._selected_sku_identity(page, task) != current_sku:
                 raise LayoutRecognitionError(
                     "Tmall selected SKU identity changed during result polling"
                 )
-            stock = self._require_current_stock_available(
+            stock = self._require_current_stock_sample(
                 page,
                 current_sku,
             )
+            if previous_stock is not None and stock != previous_stock:
+                raise LayoutRecognitionError(
+                    "Tmall stock state changed during final price sampling"
+                )
             candidates = self._price_candidates(page, current_sku)
             if candidates is None:
                 previous = None
@@ -1184,6 +1447,7 @@ class TmallAdapter:
                     )
                 return selected, stock
             previous = candidates
+            previous_stock = stock
             page.wait_for_timeout(_POLL_INTERVAL_MS)
             self._raise_if_blocked_or_error(page)
         raise LayoutRecognitionError(
@@ -1307,6 +1571,11 @@ def _all_visible_locators(
     return tuple(visible)
 
 
+def _visible_page_contains(page: Any, text: str) -> bool:
+    bodies = visible_locators(page, ("body",))
+    return any(text in body.inner_text() for body in bodies)
+
+
 def _is_explicitly_disabled(locator: Any) -> bool:
     if locator.get_attribute("disabled") is not None:
         return True
@@ -1314,6 +1583,23 @@ def _is_explicitly_disabled(locator: Any) -> bool:
         return True
     classes = set((locator.get_attribute("class") or "").lower().split())
     return bool(classes & _DISABLED_CLASSES)
+
+
+def _tmall_color_matches(target: str, candidate: str) -> bool:
+    """Match an exact colour or a single marketing label for a base colour."""
+
+    if color_matches(target, candidate):
+        return True
+    normalized_target = normalize_product_text(target)
+    normalized_candidate = normalize_product_text(candidate)
+    if normalized_target not in _GENERIC_COLOR_NAMES:
+        return False
+    base_colour = normalized_target.removesuffix("色")
+    return bool(
+        base_colour
+        and normalized_candidate.endswith(base_colour)
+        and "/" not in normalized_candidate
+    )
 
 
 def _is_approved_selected(locator: Any) -> bool:
@@ -1325,6 +1611,43 @@ def _is_approved_selected(locator: Any) -> bool:
     return bool(classes & _SELECTED_CLASSES) or any(
         class_name.startswith("isselected--") for class_name in classes
     )
+
+
+def _result_card_is_unavailable(card: Any) -> bool:
+    """Treat visible result-card stock text as a tie-breaker, never a model match."""
+
+    card_text = normalize_product_text(card.inner_text())
+    return any(marker in card_text for marker in _UNAVAILABLE_STOCK_MARKERS)
+
+
+def _tmall_result_card_matches(model_name: str, card_text: str) -> bool:
+    """Match an exact base model in Tmall's long, promotion-heavy card title."""
+
+    wanted = normalize_product_text(model_name)
+    actual = normalize_product_text(card_text)
+    if not wanted or not actual or any(
+        marker in actual for marker in _TMALL_RESULT_ACCESSORY_MARKERS
+    ):
+        return False
+    pattern = re.compile(re.escape(wanted).replace(r"\ ", r"\s*"))
+    matches = tuple(pattern.finditer(actual))
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    if match.start() and _is_attached_ascii(actual[match.start() - 1]):
+        return False
+    suffix = actual[match.end() :]
+    if suffix and _is_attached_ascii(suffix[0]):
+        return False
+    meaningful_suffix = suffix.lstrip()
+    return not any(
+        meaningful_suffix.startswith(variant)
+        for variant in _TMALL_RESULT_MODEL_VARIANTS
+    )
+
+
+def _is_attached_ascii(character: str) -> bool:
+    return character.isascii() and character.isalnum()
 
 
 def _approved_item_url(raw_href: object, *, base_url: str) -> str:
@@ -1344,9 +1667,7 @@ def _approved_item_url(raw_href: object, *, base_url: str) -> str:
             errors="strict",
         )
         query_keys = tuple(key for key, _value in query_items)
-        item_ids = tuple(
-            value for key, value in query_items if key == "id"
-        )
+        item_ids = tuple(value for key, value in query_items if key == "id")
         approved = (
             parsed.scheme.lower() == "https"
             and parsed.hostname == "detail.tmall.com"
@@ -1363,6 +1684,63 @@ def _approved_item_url(raw_href: object, *, base_url: str) -> str:
                 key != "skuId" or _NUMERIC_SKU.fullmatch(value) is not None
                 for key, value in query_items
             )
+            and all(
+                key != "sku_properties"
+                or _TMALL_SKU_PROPERTIES.fullmatch(value) is not None
+                for key, value in query_items
+            )
+            and not parsed.fragment
+            and not url_contains_credentials(resolved)
+        )
+    except (UnicodeError, ValueError):
+        approved = False
+    if not approved:
+        raise LayoutRecognitionError("Tmall exact product link is not approved")
+    return f"https://detail.tmall.com/item.htm?id={item_ids[0]}"
+
+
+def _approved_result_item_url(raw_href: object, *, base_url: str) -> str:
+    """Canonicalize a result-card link while discarding inert tracking data.
+
+    A card can carry site-generated tracking parameters.  The task never
+    follows those parameters: it retains only the numeric item ID and then
+    navigates to the canonical detail URL, where the stricter detail-page
+    validation remains in force.
+    """
+
+    if not isinstance(raw_href, str) or not raw_href.strip():
+        raise LayoutRecognitionError("Tmall exact product link is missing")
+    try:
+        resolved = urljoin(base_url, raw_href.strip())
+        parsed = urlsplit(resolved)
+        port = parsed.port
+        if not _valid_percent_encoding(parsed.query):
+            raise ValueError
+        query_items = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+            encoding="utf-8",
+            errors="strict",
+        )
+        query_keys = tuple(key for key, _value in query_items)
+        item_ids = tuple(value for key, value in query_items if key == "id")
+        approved = (
+            parsed.scheme.lower() == "https"
+            and parsed.hostname == "detail.tmall.com"
+            and port is None
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.path == _TMALL_ITEM_PATH
+            and len(item_ids) == 1
+            and _NUMERIC_SKU.fullmatch(item_ids[0]) is not None
+            and len(query_keys) == len(set(query_keys))
+            # A card URL is never followed with its query string: this
+            # function retains only the numeric item ID below. Therefore an
+            # unknown non-empty tracking key cannot affect navigation, while
+            # the host, path, single ID, credentials and fragment checks stay
+            # fail-closed.
+            and all(key and value for key, value in query_items)
             and not parsed.fragment
             and not url_contains_credentials(resolved)
         )
@@ -1530,6 +1908,20 @@ def _required_numeric_sku(raw_sku: object, *, semantic_name: str) -> str:
             f"Tmall {semantic_name} SKU binding is missing or invalid"
         )
     return raw_sku.strip()
+
+
+def _first_visible_product_title(
+    result_region: Any,
+    card_selectors: tuple[str, ...],
+    title_selectors: tuple[str, ...],
+) -> Any | None:
+    """Return the first readable title in a visible related-product card."""
+
+    for card in visible_locators(result_region, card_selectors):
+        titles = visible_locators(card, title_selectors)
+        if titles:
+            return titles[0]
+    return None
 
 
 def _css_rect(locator: Any, role: str) -> CssRect:
