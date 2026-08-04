@@ -1145,7 +1145,7 @@ def test_jd_modern_positions_the_selected_detail_only_when_formal_capture_is_pre
 
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
 
-    assert page.capture_scales == [0.9]
+    assert page.capture_scales == [0.8]
     assert page.capture_view_positions == ["modern-capacity"]
     assert len(page.goto_calls) == goto_count
     assert 300 in page.wait_timeout_milliseconds
@@ -2186,7 +2186,7 @@ def test_jd_no_model_prepares_a_result_view_with_readable_card_names() -> None:
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
 
     assert observation.outcome is BusinessOutcome.NO_MODEL
-    assert page.capture_scales == [0.9]
+    assert page.capture_scales == [0.8]
     assert page.capture_view_positions == ["result-card"]
     assert page.search_input_visibility_checks == 1
     assert 300 in page.wait_timeout_milliseconds

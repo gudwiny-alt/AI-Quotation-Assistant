@@ -944,11 +944,11 @@ class JDAdapter:
         page: Any,
         expected: VerifiedSemanticState,
     ) -> None:
-        """Apply JD-only 90% framing for the pending formal screenshot."""
+        """Apply JD-only 80% framing for the pending formal screenshot."""
 
         self._validate_task(task)
         browser_page = _playwright_page(page)
-        apply_capture_scale(browser_page, scale=0.9)
+        apply_capture_scale(browser_page, scale=0.8)
         try:
             self._prepare_capture_view_at_scale(task, browser_page, expected)
         except BaseException:
