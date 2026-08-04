@@ -980,6 +980,7 @@ class JDAdapter:
                 product_name=product_name,
                 product_card=product_cards[0] if product_cards else None,
                 site_name="JD",
+                prefer_search_anchor=True,
             )
             return
         if expected.outcome is not BusinessOutcome.PRICE_FOUND:

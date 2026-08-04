@@ -27,6 +27,7 @@ class _Page:
             "search": False,
         }
         self.centered: list[str] = []
+        self.scroll_targets: list[str] = []
         self.position_scripts: list[str] = []
         self.waits: list[int] = []
         self.can_position = can_position
@@ -49,6 +50,7 @@ class _Page:
 
     def center(self, name: str) -> None:
         self.centered.append(name)
+        self.scroll_targets.append(name)
         if name == "capacity" and self.can_position and (
             self.current_scale <= self.succeeds_at_scale
         ):
@@ -152,6 +154,25 @@ def test_positions_a_no_model_result_by_its_card_so_the_name_is_brought_onscreen
     assert "block: 'end'" in page.position_scripts[0]
     assert page.waits == [300]
     assert page.capture_scales == []
+
+
+def test_search_anchor_result_capture_can_anchor_search_before_validating_card_name() -> None:
+    page = _Page()
+    search = _Locator(page, "search")
+    title = _Locator(page, "title")
+    card = _Locator(page, "card")
+    page.in_viewport["title"] = True
+
+    position_result_cards_for_capture(
+        page,
+        search_input=search,
+        product_name=title,
+        product_card=card,
+        site_name="JD",
+        prefer_search_anchor=True,
+    )
+
+    assert page.scroll_targets == ["search"]
 
 
 def test_no_model_result_requires_search_input_and_card_name_in_viewport() -> None:

@@ -196,6 +196,8 @@ class _Locator:
             option_kind = self.page.option_kind(node)
             if option_kind is not None:
                 self.page.capture_view_positions.append(option_kind)
+            elif node.attrs.get("id") == "key01":
+                self.page.capture_view_positions.append("search")
             elif "gl-item" in node.attrs.get("class", "").split():
                 self.page.capture_view_positions.append("result-card")
             return ""
@@ -2184,7 +2186,7 @@ def test_no_model_with_visible_result_cards_accepts_approved_query_when_input_is
     )
 
 
-def test_jd_no_model_prepares_a_result_view_with_readable_card_names() -> None:
+def test_jd_no_model_prepares_a_search_first_result_view_with_readable_card_names() -> None:
     page = _FixturePage("no_model.html")
     task = _task()
     adapter = JDAdapter(_xiaomi_spec())
@@ -2194,9 +2196,18 @@ def test_jd_no_model_prepares_a_result_view_with_readable_card_names() -> None:
 
     assert observation.outcome is BusinessOutcome.NO_MODEL
     assert page.capture_scales == [0.8]
-    assert page.capture_view_positions == ["result-card"]
+    assert page.capture_view_positions == ["search"]
     assert page.search_input_visibility_checks == 1
     assert 300 in page.wait_timeout_milliseconds
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
 
 
 def test_jd_no_model_rereads_capture_rectangles_after_result_positioning() -> None:

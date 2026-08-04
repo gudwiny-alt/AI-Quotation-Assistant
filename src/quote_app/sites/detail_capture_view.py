@@ -11,6 +11,9 @@ _CENTER_IN_NEAREST_SCROLL_AREA = (
 _ALIGN_RESULT_CARD_TO_VIEWPORT_BOTTOM = (
     "(element) => element.scrollIntoView({block: 'end', inline: 'nearest'})"
 )
+_ALIGN_SEARCH_TO_VIEWPORT_TOP = (
+    "(element) => element.scrollIntoView({block: 'start', inline: 'nearest'})"
+)
 _IN_VIEWPORT = """
 (element) => {
   const rect = element.getBoundingClientRect();
@@ -122,6 +125,7 @@ def position_result_cards_for_capture(
     product_name: Any | None,
     product_card: Any | None,
     site_name: str,
+    prefer_search_anchor: bool = False,
 ) -> None:
     """Place a legal no-model result where its visible card name is readable.
 
@@ -138,10 +142,13 @@ def position_result_cards_for_capture(
                 f"{site_name} no-model search input is not visible for capture"
             )
         return
-    # On JD the product-name node may be virtualized until it approaches the
-    # viewport.  Position the card itself at the viewport bottom first, rather
-    # than relying on that late-rendered node as the scroll anchor.
-    product_card.evaluate(_ALIGN_RESULT_CARD_TO_VIEWPORT_BOTTOM)
+    # JD's no-model screenshot must establish the searched keyword first while
+    # retaining the visible product title used to rule out the requested model.
+    if prefer_search_anchor and search_input is not None:
+        search_input.evaluate(_ALIGN_SEARCH_TO_VIEWPORT_TOP)
+    else:
+        # The default result-card framing retains Tmall's existing behavior.
+        product_card.evaluate(_ALIGN_RESULT_CARD_TO_VIEWPORT_BOTTOM)
     page.wait_for_timeout(_POSITION_WAIT_MS)
     if search_input is not None and not _in_viewport(search_input):
         raise LayoutRecognitionError(
