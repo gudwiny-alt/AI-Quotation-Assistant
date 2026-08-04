@@ -12,6 +12,12 @@ from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.platform import PlatformEvidenceCapture
 from quote_app.evidence.semantic_state import VerifiedSemanticState
 from quote_app.sites.catalog import SiteSpec
+from quote_app.sites.detail_capture_view import (
+    apply_capture_scale,
+    position_detail_for_capture,
+    position_result_cards_for_capture,
+    restore_capture_scale,
+)
 from quote_app.sites.locators import (
     JD_CAPACITY_OPTIONS,
     JD_COLOR_OPTIONS,
@@ -127,12 +133,45 @@ _MAX_SELECTION_POLLS = 5
 _MAX_MODERN_SELECTION_POLLS = 20
 _MAX_PRICE_POLLS = 5
 _MAX_STORE_READY_POLLS = 10
+_MAX_RESULT_READY_POLLS = 30
+_MAX_DETAIL_READY_POLLS = 30
+_MAX_MODERN_SKU_SCAN_STEPS = 8
 _MAX_SEARCH_URL_POLLS = 20
 _MAX_VERIFIED_STATE_POLLS = 10
 _POLL_INTERVAL_MS = 100
 _STORE_READY_INTERVAL_MS = 500
 _MODERN_SELECTION_INTERVAL_MS = 250
+_MODERN_SKU_SCAN_INTERVAL_MS = 500
+_MODERN_SKU_SCAN_PIXELS = 520
 _VERIFIED_STATE_INTERVAL_MS = 250
+_JD_MODERN_SELLER_UI_SUFFIXES = (
+    "自营",
+    "关注店铺",
+    "进店逛逛",
+)
+_JD_RISK_CONTROL_TEXTS = (
+    "访问过于频繁",
+    "操作过于频繁",
+    "请完成安全验证",
+    "拖动滑块",
+    "请在下方验证",
+)
+_GENERIC_COLOR_NAMES = frozenset(
+    {
+        "黑色",
+        "白色",
+        "蓝色",
+        "绿色",
+        "红色",
+        "紫色",
+        "灰色",
+        "银色",
+        "金色",
+        "橙色",
+        "粉色",
+        "黄色",
+    }
+)
 _PRICE_STYLE_SCRIPT = """
 (element) => {
   let current = element;
@@ -261,13 +300,24 @@ class JDAdapter:
     ) -> AdapterObservation:
         self._validate_task(task)
         browser_page = _playwright_page(page)
-        browser_page.goto(self.spec.entry_url, wait_until="domcontentloaded")
         self._raise_if_authentication_blocked(browser_page)
-        self._require_approved_store(browser_page)
-        detail_url = self._exact_entry_product_url(
+        current_search_result = self._current_search_result(
+            task,
             browser_page,
-            task.model_name,
         )
+        if current_search_result is not None:
+            stage[0] = "京东搜索页"
+            if isinstance(current_search_result, AdapterObservation):
+                return current_search_result
+            detail_url = current_search_result
+        else:
+            browser_page.goto(self.spec.entry_url, wait_until="domcontentloaded")
+            self._raise_if_authentication_blocked(browser_page)
+            self._require_approved_store(browser_page)
+            detail_url = self._exact_entry_product_url(
+                browser_page,
+                task.model_name,
+            )
         if detail_url is None:
             search_input, search_action = self._wait_for_store_search_controls(
                 browser_page,
@@ -284,54 +334,66 @@ class JDAdapter:
                 browser_page,
                 task.model_name,
             )
-            self._require_approved_store(browser_page)
-
-            result_region = self._wait_for_result_region(browser_page)
-            result_search_input = self._validated_result_search_input(
-                browser_page,
-                task.model_name,
-            )
-            product_cards = visible_locators(
-                result_region,
-                JD_PRODUCT_CARDS,
-            )
-            empty_states = visible_locators(
-                result_region,
-                JD_EMPTY_RESULTS,
-            )
-            if not product_cards:
-                if len(empty_states) != 1:
-                    raise LayoutRecognitionError(
-                        "JD result cards are missing and no explicit "
-                        "empty state is visible"
-                    )
-                return self._no_model_observation(
-                    task,
-                    browser_page,
-                    result_region,
-                    result_search_input,
-                )
-            if empty_states:
-                raise LayoutRecognitionError(
-                    "JD result cards conflict with an explicit empty state"
-                )
-            exact_cards = self._exact_product_cards(
-                product_cards,
-                task.model_name,
-            )
-            if not exact_cards:
-                return self._no_model_observation(
-                    task,
-                    browser_page,
-                    result_region,
-                    result_search_input,
-                )
-            detail_url = self._exact_product_detail_url(
-                exact_cards,
-                base_url=browser_page.url,
-            )
+            searched = self._search_result(task, browser_page)
+            if isinstance(searched, AdapterObservation):
+                return searched
+            detail_url = searched
         stage[0] = "京东商品详情页"
         return self._observe_detail(task, browser_page, detail_url)
+
+    def _current_search_result(
+        self,
+        task: WebsiteTask,
+        page: Any,
+    ) -> AdapterObservation | str | None:
+        """Reuse a verified, visible store-search page after manual handling."""
+
+        try:
+            _validate_store_search_url(page.url, expected_model=task.model_name)
+        except LayoutRecognitionError:
+            return None
+        return self._search_result(task, page)
+
+    def _search_result(
+        self,
+        task: WebsiteTask,
+        page: Any,
+    ) -> AdapterObservation | str:
+        self._require_approved_store(page)
+        result_region = self._wait_for_result_region(page)
+        result_search_input = self._validated_result_search_input(
+            page,
+            task.model_name,
+        )
+        product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
+        empty_states = visible_locators(result_region, JD_EMPTY_RESULTS)
+        if not product_cards:
+            if len(empty_states) != 1:
+                raise LayoutRecognitionError(
+                    "JD result cards are missing and no explicit empty state is visible"
+                )
+            return self._no_model_observation(
+                task,
+                page,
+                result_region,
+                result_search_input,
+            )
+        if empty_states:
+            raise LayoutRecognitionError(
+                "JD result cards conflict with an explicit empty state"
+            )
+        exact_cards = self._exact_product_cards(product_cards, task.model_name)
+        if not exact_cards:
+            return self._no_model_observation(
+                task,
+                page,
+                result_region,
+                result_search_input,
+            )
+        return self._exact_product_detail_url(
+            exact_cards,
+            base_url=page.url,
+        )
 
     def _observe_detail(
         self,
@@ -381,7 +443,7 @@ class JDAdapter:
         color = self._exact_option(
             browser_page,
             JD_COLOR_OPTIONS,
-            lambda label: color_matches(task.color, label),
+            lambda label: _jd_color_matches(task.color, label),
             semantic_name="color",
         )
         color_context_sku = _required_numeric_sku(
@@ -402,8 +464,6 @@ class JDAdapter:
         self._prepare_exact_option(color)
         self._wait_for_selected(browser_page, color, "color")
         self._raise_if_authentication_blocked(browser_page)
-        self._position_specification_for_capture(browser_page, capacity)
-
         current_sku = self._selected_sku_identity(
             browser_page,
             capacity,
@@ -420,20 +480,10 @@ class JDAdapter:
                 "JD selected SKU does not explain the changed item URL"
             )
 
-        stock, stock_locator = self._stock_snapshot(
+        stock, _stock_locator = self._stock_snapshot(
             browser_page,
             current_sku,
         )
-        if stock.unavailable:
-            return self._legal_no(
-                task,
-                BusinessOutcome.SOLD_OUT,
-                browser_page,
-                (_css_rect(stock_locator, "stock_status"),),
-                current_sku=current_sku,
-                region=stock.region,
-                stock_state=stock.state,
-            )
 
         selected_price, final_stock = self._stable_selected_price(
             browser_page,
@@ -473,6 +523,7 @@ class JDAdapter:
             hostname == "cfe.m.jd.com"
             or any(marker in path for marker in ("/captcha", "/risk_", "/risk/"))
             or visible_locators(page, JD_RISK_CONTROL_MARKERS)
+            or _jd_visible_risk_text(page)
         ):
             raise SecurityVerificationRequired(
                 "jd",
@@ -560,7 +611,7 @@ class JDAdapter:
         raise AssertionError("JD store-search URL readiness loop did not return")
 
     def _wait_for_result_region(self, page: Any) -> Any:
-        for poll in range(_MAX_STORE_READY_POLLS):
+        for poll in range(_MAX_RESULT_READY_POLLS):
             self._raise_if_authentication_blocked(page)
             try:
                 return unique_visible_locator(
@@ -569,7 +620,7 @@ class JDAdapter:
                     semantic_name="result region",
                 )
             except LayoutRecognitionError:
-                if poll + 1 == _MAX_STORE_READY_POLLS:
+                if poll + 1 == _MAX_RESULT_READY_POLLS:
                     raise
                 page.wait_for_timeout(_STORE_READY_INTERVAL_MS)
         raise AssertionError("JD result-region readiness loop did not return")
@@ -577,7 +628,7 @@ class JDAdapter:
     def _wait_for_detail_layout(self, page: Any) -> bool:
         """Wait for one detail layout and its exact approved seller identity."""
 
-        for poll in range(_MAX_STORE_READY_POLLS):
+        for poll in range(_MAX_DETAIL_READY_POLLS):
             self._raise_if_authentication_blocked(page)
             modern_titles = visible_locators(page, JD_MODERN_DETAIL_TITLES)
             legacy_titles = visible_locators(page, JD_DETAIL_TITLES)
@@ -591,10 +642,9 @@ class JDAdapter:
                     JD_MODERN_DETAIL_SELLER_MARKERS,
                 )
                 if sellers:
-                    if (
-                        len(sellers) != 1
-                        or sellers[0].inner_text().strip()
-                        != self.spec.store_name
+                    if len(sellers) != 1 or not _modern_seller_matches(
+                        sellers[0].inner_text(),
+                        self.spec.store_name,
                     ):
                         raise LayoutRecognitionError(
                             "JD modern product detail seller does not match "
@@ -614,7 +664,7 @@ class JDAdapter:
                             "approved store"
                         )
                     return False
-            if poll + 1 == _MAX_STORE_READY_POLLS:
+            if poll + 1 == _MAX_DETAIL_READY_POLLS:
                 raise LayoutRecognitionError(
                     "JD product detail title or approved seller is missing"
                 )
@@ -623,9 +673,9 @@ class JDAdapter:
 
     def _require_approved_detail_seller(self, page: Any) -> None:
         sellers = visible_locators(page, JD_DETAIL_SELLER_MARKERS)
-        if (
-            len(sellers) != 1
-            or sellers[0].inner_text().strip() != self.spec.store_name
+        if len(sellers) != 1 or not _modern_seller_matches(
+            sellers[0].inner_text(),
+            self.spec.store_name,
         ):
             raise LayoutRecognitionError(
                 "JD product detail seller does not match the approved store"
@@ -640,9 +690,9 @@ class JDAdapter:
         """Handle JD's current React product page without changing legacy flow."""
 
         sellers = visible_locators(page, JD_MODERN_DETAIL_SELLER_MARKERS)
-        if (
-            len(sellers) != 1
-            or sellers[0].inner_text().strip() != self.spec.store_name
+        if len(sellers) != 1 or not _modern_seller_matches(
+            sellers[0].inner_text(),
+            self.spec.store_name,
         ):
             raise LayoutRecognitionError(
                 "JD modern product detail seller does not match the approved store"
@@ -654,6 +704,7 @@ class JDAdapter:
         )
         if not _modern_result_card_matches(task.model_name, title.inner_text()):
             raise LayoutRecognitionError("JD modern product detail model does not match")
+        self._wait_for_modern_sku_options(page, task)
         capacity = self._exact_option(
             page,
             JD_MODERN_SKU_OPTIONS,
@@ -687,7 +738,10 @@ class JDAdapter:
         color = self._exact_option(
             page,
             JD_MODERN_SKU_OPTIONS,
-            lambda label: color_matches(task.color, _modern_option_label(label)),
+            lambda label: _jd_color_matches(
+                task.color,
+                _modern_option_label(label),
+            ),
             semantic_name="modern color",
         )
         if _is_modern_unavailable(color):
@@ -698,18 +752,21 @@ class JDAdapter:
                 (_css_rect(color, "color"),),
             )
         def color_matcher(label: str) -> bool:
-            return color_matches(task.color, _modern_option_label(label))
+            return _jd_color_matches(task.color, _modern_option_label(label))
         self._prepare_exact_option(color)
         color = self._wait_for_modern_selected(page, color_matcher, "color")
         self._raise_if_authentication_blocked(page)
-        self._position_specification_for_capture(page, capacity)
         selected_labels = {
             _modern_option_label(option.inner_text())
             for option in visible_locators(page, JD_MODERN_SKU_OPTIONS)
             if _is_modern_selected(option)
         }
         expected_capacity = _modern_option_label(f"{task.ram}+{task.storage}")
-        if expected_capacity not in selected_labels or task.color not in selected_labels:
+        has_selected_colour = any(
+            _jd_color_matches(task.color, selected_label)
+            for selected_label in selected_labels
+        )
+        if expected_capacity not in selected_labels or not has_selected_colour:
             raise LayoutRecognitionError(
                 "JD modern selected options do not match the requested configuration"
             )
@@ -742,6 +799,43 @@ class JDAdapter:
             semantic_state=semantic_state,
         )
 
+    def _wait_for_modern_sku_options(
+        self,
+        page: Any,
+        task: WebsiteTask,
+    ) -> None:
+        """Keep one JD detail page active while its SKU controls render below fold."""
+
+        for step in range(_MAX_MODERN_SKU_SCAN_STEPS):
+            self._raise_if_authentication_blocked(page)
+            options = visible_locators(page, JD_MODERN_SKU_OPTIONS)
+            has_capacity = any(
+                capacity_matches(
+                    _modern_option_label(option.inner_text()),
+                    task.ram,
+                    task.storage,
+                )
+                for option in options
+            )
+            has_color = any(
+                _jd_color_matches(
+                    task.color,
+                    _modern_option_label(option.inner_text()),
+                )
+                for option in options
+            )
+            if has_capacity and has_color:
+                return
+            if step + 1 == _MAX_MODERN_SKU_SCAN_STEPS:
+                break
+            page.evaluate(
+                f"() => window.scrollBy(0, {_MODERN_SKU_SCAN_PIXELS})"
+            )
+            page.wait_for_timeout(_MODERN_SKU_SCAN_INTERVAL_MS)
+        raise LayoutRecognitionError(
+            "JD modern detail did not reveal the requested SKU options"
+        )
+
     def verified_state_reader(
         self,
         task: WebsiteTask,
@@ -767,11 +861,15 @@ class JDAdapter:
                 self._raise_if_authentication_blocked(browser_page)
                 try:
                     if expected.outcome is not BusinessOutcome.PRICE_FOUND:
-                        current = self._read_legal_no_state(
+                        self._read_legal_no_state(
                             task,
                             browser_page,
                             expected,
                         )
+                        # Result-card positioning may scroll the view after
+                        # validation.  That must not turn a still-valid
+                        # no-model business state into a capture failure.
+                        return expected
                     elif expected.css_rectangles:
                         raise LayoutRecognitionError(
                             "JD price state has unexpected evidence rectangles"
@@ -788,7 +886,15 @@ class JDAdapter:
                             browser_page,
                             expected.canonical_url,
                         )
-                    if current == expected:
+                    if expected.outcome is BusinessOutcome.PRICE_FOUND:
+                        if _same_quote_price_state(current, expected):
+                            # Delivery wording and stock labels are live retail
+                            # UI, not quotation fields.  Preserve the first
+                            # fully verified offer so their harmless refreshes
+                            # cannot invalidate a selected SKU and price just
+                            # before macOS captures the screen.
+                            return expected
+                    elif current == expected:
                         return current
                 except LayoutRecognitionError:
                     pass
@@ -799,6 +905,176 @@ class JDAdapter:
             )
 
         return read
+
+    def capture_rectangles_for_capture(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> tuple[CssRect, ...]:
+        """Read the evidence targets again after final JD positioning."""
+
+        self._validate_task(task)
+        browser_page = _playwright_page(page)
+        self._raise_if_authentication_blocked(browser_page)
+        if expected.outcome is not BusinessOutcome.NO_MODEL:
+            return expected.css_rectangles
+        self._read_legal_no_state(task, browser_page, expected)
+        result_region = unique_visible_locator(
+            browser_page,
+            JD_RESULT_REGIONS,
+            semantic_name="result region",
+        )
+        result_search_input = self._validated_result_search_input(
+            browser_page,
+            task.model_name,
+        )
+        if result_search_input is None:
+            return (_css_rect(result_region, "result_region"),)
+        return (
+            _css_rect(result_search_input, "search_keyword"),
+            _css_rect(result_region, "result_region"),
+        )
+
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        """Apply JD-only 90% framing for the pending formal screenshot."""
+
+        self._validate_task(task)
+        browser_page = _playwright_page(page)
+        apply_capture_scale(browser_page, scale=0.9)
+        try:
+            self._prepare_capture_view_at_scale(task, browser_page, expected)
+        except BaseException:
+            try:
+                restore_capture_scale(browser_page)
+            except Exception:
+                pass
+            raise
+
+    def _prepare_capture_view_at_scale(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        """Verify the selected offer, then position its final screenshot view."""
+
+        self._validate_task(task)
+        browser_page = _playwright_page(page)
+        self._raise_if_authentication_blocked(browser_page)
+        if expected.outcome is BusinessOutcome.NO_MODEL:
+            self._read_legal_no_state(task, browser_page, expected)
+            result_region = unique_visible_locator(
+                browser_page,
+                JD_RESULT_REGIONS,
+                semantic_name="result region",
+            )
+            result_search_input = self._validated_result_search_input(
+                browser_page,
+                task.model_name,
+            )
+            if result_search_input is None:
+                raise LayoutRecognitionError(
+                    "JD no-model search keyword is not visible for capture"
+                )
+            product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
+            product_name = _first_visible_product_title(
+                result_region,
+                JD_PRODUCT_CARDS,
+                JD_PRODUCT_TITLES,
+            )
+            position_result_cards_for_capture(
+                browser_page,
+                search_input=result_search_input,
+                product_name=product_name,
+                product_card=product_cards[0] if product_cards else None,
+                site_name="JD",
+            )
+            return
+        if expected.outcome is not BusinessOutcome.PRICE_FOUND:
+            return
+        if visible_locators(browser_page, JD_MODERN_DETAIL_TITLES):
+            current = self._read_modern_price_state(
+                task,
+                browser_page,
+                expected.canonical_url,
+            )
+            title = unique_visible_locator(
+                browser_page,
+                JD_MODERN_DETAIL_TITLES,
+                semantic_name="modern product detail title",
+            )
+            options = visible_locators(browser_page, JD_MODERN_SKU_OPTIONS)
+            capacity = self._selected_modern_option(
+                options,
+                lambda label: capacity_matches(
+                    _modern_option_label(label), task.ram, task.storage
+                ),
+                semantic_name="modern capacity",
+            )
+            color = self._selected_modern_option(
+                options,
+                lambda label: _jd_color_matches(task.color, _modern_option_label(label)),
+                semantic_name="modern color",
+            )
+            prices = visible_locators(
+                browser_page,
+                JD_MODERN_CURRENT_SKU_SELLING_PRICES,
+            )
+        else:
+            current = self._read_legacy_price_state(
+                task,
+                browser_page,
+                expected.canonical_url,
+            )
+            title = unique_visible_locator(
+                browser_page,
+                JD_DETAIL_TITLES,
+                semantic_name="product detail title",
+            )
+            capacity = self._exact_option(
+                browser_page,
+                JD_CAPACITY_OPTIONS,
+                lambda label: capacity_matches(label, task.ram, task.storage),
+                semantic_name="capacity",
+            )
+            color = self._exact_option(
+                browser_page,
+                JD_COLOR_OPTIONS,
+                lambda label: _jd_color_matches(task.color, label),
+                semantic_name="color",
+            )
+            prices = visible_locators(browser_page, JD_CURRENT_SKU_SELLING_PRICES)
+        if not _same_quote_price_state(current, expected):
+            raise LayoutRecognitionError("JD verified offer changed before formal capture")
+        position_detail_for_capture(
+            browser_page,
+            title=title,
+            prices=prices,
+            capacity=capacity,
+            color=color,
+            site_name="JD",
+        )
+
+    def restore_capture_view(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        """Restore the page scale after the runner consumes JD evidence."""
+
+        self._validate_task(task)
+        if not isinstance(expected, VerifiedSemanticState):
+            raise LayoutRecognitionError(
+                "JD capture state is unavailable for restoration"
+            )
+        restore_capture_scale(_playwright_page(page))
 
     def _read_legal_no_state(
         self,
@@ -870,9 +1146,9 @@ class JDAdapter:
         expected: VerifiedSemanticState,
     ) -> VerifiedSemanticState:
         sellers = visible_locators(page, JD_MODERN_DETAIL_SELLER_MARKERS)
-        if (
-            len(sellers) != 1
-            or sellers[0].inner_text().strip() != self.spec.store_name
+        if len(sellers) != 1 or not _modern_seller_matches(
+            sellers[0].inner_text(),
+            self.spec.store_name,
         ):
             raise LayoutRecognitionError(
                 "JD modern seller changed before legal-no capture"
@@ -917,7 +1193,7 @@ class JDAdapter:
         color = self._exact_option(
             page,
             JD_MODERN_SKU_OPTIONS,
-            lambda label: color_matches(
+            lambda label: _jd_color_matches(
                 task.color,
                 _modern_option_label(label),
             ),
@@ -981,7 +1257,7 @@ class JDAdapter:
         color = self._exact_option(
             page,
             JD_COLOR_OPTIONS,
-            lambda label: color_matches(task.color, label),
+            lambda label: _jd_color_matches(task.color, label),
             semantic_name="color",
         )
         if expected.outcome is BusinessOutcome.COLOR_UNAVAILABLE:
@@ -1037,9 +1313,9 @@ class JDAdapter:
                 "JD modern product detail URL changed before capture"
             )
         sellers = visible_locators(page, JD_MODERN_DETAIL_SELLER_MARKERS)
-        if (
-            len(sellers) != 1
-            or sellers[0].inner_text().strip() != self.spec.store_name
+        if len(sellers) != 1 or not _modern_seller_matches(
+            sellers[0].inner_text(),
+            self.spec.store_name,
         ):
             raise LayoutRecognitionError(
                 "JD modern product detail seller changed before capture"
@@ -1066,7 +1342,10 @@ class JDAdapter:
         )
         if (
             expected_capacity not in selected_labels
-            or task.color not in selected_labels
+            or not any(
+                _jd_color_matches(task.color, selected_label)
+                for selected_label in selected_labels
+            )
         ):
             raise LayoutRecognitionError(
                 "JD modern selected configuration changed before capture"
@@ -1129,7 +1408,7 @@ class JDAdapter:
         color = self._exact_option(
             page,
             JD_COLOR_OPTIONS,
-            lambda label: color_matches(task.color, label),
+            lambda label: _jd_color_matches(task.color, label),
             semantic_name="color",
         )
         if not _is_approved_selected(capacity) or not _is_approved_selected(
@@ -1144,10 +1423,6 @@ class JDAdapter:
             color,
         )
         stock, _stock_locator = self._stock_snapshot(page, current_sku)
-        if stock.unavailable:
-            raise LayoutRecognitionError(
-                "JD stock state changed before capture"
-            )
         price, final_stock = self._stable_selected_price(
             page,
             current_sku,
@@ -1176,12 +1451,17 @@ class JDAdapter:
             if "jItem" in card_classes:
                 matches = _modern_result_card_matches(model_name, card.inner_text())
             else:
-                title = unique_visible_locator(
-                    card,
-                    JD_PRODUCT_TITLES,
-                    semantic_name="product card title",
-                )
-                matches = model_matches(model_name, title.inner_text())
+                titles = visible_locators(card, JD_PRODUCT_TITLES)
+                if titles:
+                    title = unique_visible_locator(
+                        card,
+                        JD_PRODUCT_TITLES,
+                        semantic_name="product card title",
+                    )
+                    card_text = title.inner_text()
+                else:
+                    card_text = card.inner_text()
+                matches = model_matches(model_name, card_text)
             if matches:
                 exact.append(card)
         return tuple(exact)
@@ -1192,9 +1472,12 @@ class JDAdapter:
         *,
         base_url: str,
     ) -> str:
+        available_cards = tuple(
+            card for card in cards if not _result_card_is_unavailable(card)
+        )
         detail_urls = {
             self._card_detail_url(card, base_url=base_url)
-            for card in cards
+            for card in (available_cards or cards)
         }
         if not detail_urls:
             raise LayoutRecognitionError("JD exact product link is missing")
@@ -1247,17 +1530,27 @@ class JDAdapter:
         result_search_input: Any | None,
     ) -> AdapterObservation:
         if result_search_input is None:
-            raise LayoutRecognitionError(
-                "JD no-model result lacks a visible verified search keyword"
+            product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
+            if not product_cards and visible_locators(page, JD_SEARCH_INPUTS):
+                raise LayoutRecognitionError(
+                    "JD no-model result lacks a visible verified search keyword"
+                )
+            # JD can render a complete searched product grid before restoring
+            # the result-page input value.  The approved URL proves the query;
+            # when none of those visible cards matches the requested model,
+            # the grid itself is the required no-quotation evidence.
+            _validate_store_search_url(page.url, expected_model=task.model_name)
+            rectangles = (_css_rect(result_region, "result_region"),)
+        else:
+            rectangles = (
+                _css_rect(result_search_input, "search_keyword"),
+                _css_rect(result_region, "result_region"),
             )
         return self._legal_no(
             task,
             BusinessOutcome.NO_MODEL,
             page,
-            (
-                _css_rect(result_search_input, "search_keyword"),
-                _css_rect(result_region, "result_region"),
-            ),
+            rectangles,
         )
 
     def _exact_option(
@@ -1281,18 +1574,28 @@ class JDAdapter:
         return exact[0]
 
     @staticmethod
+    def _selected_modern_option(
+        options: tuple[Any, ...],
+        matches: Any,
+        *,
+        semantic_name: str,
+    ) -> Any:
+        selected = tuple(
+            option
+            for option in options
+            if _is_modern_selected(option)
+            and matches(option.inner_text())
+        )
+        if len(selected) != 1:
+            raise LayoutRecognitionError(
+                f"JD selected {semantic_name} option is missing or ambiguous"
+            )
+        return selected[0]
+
+    @staticmethod
     def _prepare_exact_option(option: Any) -> None:
         option.scroll_into_view_if_needed()
         option.click()
-
-    @staticmethod
-    def _position_specification_for_capture(page: Any, capacity: Any) -> None:
-        capacity.evaluate(
-            "(element) => element.scrollIntoView({block: 'start', "
-            "inline: 'nearest'})"
-        )
-        page.evaluate("() => window.scrollBy(0, -120)")
-        page.wait_for_timeout(500)
 
     def _wait_for_modern_selected(
         self,
@@ -1547,7 +1850,7 @@ class JDAdapter:
                 page,
                 current_sku,
             )
-            if stock != expected_stock or stock.unavailable:
+            if stock != expected_stock:
                 raise LayoutRecognitionError(
                     "JD stock state changed during final price sampling"
                 )
@@ -1628,6 +1931,33 @@ def _normalized_region(value: str) -> str:
     return normalize_product_text(value).replace(" > ", ">")
 
 
+def _jd_visible_risk_text(page: Any) -> bool:
+    bodies = visible_locators(page, ("body", "main"))
+    return any(
+        marker in body.inner_text()
+        for body in bodies
+        for marker in _JD_RISK_CONTROL_TEXTS
+    )
+
+
+def _same_quote_price_state(
+    current: VerifiedSemanticState,
+    expected: VerifiedSemanticState,
+) -> bool:
+    """Compare the price-bearing fields that must remain true for a quote."""
+
+    return (
+        current.canonical_url == expected.canonical_url
+        and current.brand == expected.brand
+        and current.model_name == expected.model_name
+        and current.capacity == expected.capacity
+        and current.color == expected.color
+        and current.current_sku == expected.current_sku
+        and current.price == expected.price
+        and current.outcome is expected.outcome
+    )
+
+
 def _playwright_page(page: BrowserPage) -> Any:
     required = (
         "goto",
@@ -1666,6 +1996,29 @@ def _is_modern_selected(locator: Any) -> bool:
 
 def _modern_option_label(value: str) -> str:
     return normalize_product_text(value).replace("无货", " ").strip()
+
+
+def _jd_color_matches(target: str, candidate: str) -> bool:
+    """Match an exact colour or one unique marketing name for a base colour.
+
+    The base table can provide a generic colour such as ``黑色`` while an
+    approved JD SKU exposes HONOR's marketing colour ``幻夜黑``.  The caller
+    still requires exactly one visible matching option, so this does not turn
+    an ambiguous page into a selection.
+    """
+
+    if color_matches(target, candidate):
+        return True
+    normalized_target = normalize_product_text(target)
+    normalized_candidate = normalize_product_text(candidate)
+    if normalized_target not in _GENERIC_COLOR_NAMES:
+        return False
+    base_colour = normalized_target.removesuffix("色")
+    return bool(
+        base_colour
+        and normalized_candidate.endswith(base_colour)
+        and "/" not in normalized_candidate
+    )
 
 
 def _is_approved_selected(locator: Any) -> bool:
@@ -1761,6 +2114,26 @@ def _modern_result_card_matches(model_name: str, card_text: str) -> bool:
     return not any(
         meaningful_suffix.startswith(variant) for variant in _JD_RESULT_MODEL_VARIANTS
     )
+
+
+def _modern_seller_matches(actual_name: str, expected_name: str) -> bool:
+    """Accept only the known UI labels that JD appends to its shop identity."""
+
+    actual = normalize_product_text(actual_name)
+    expected = normalize_product_text(expected_name)
+    if not actual or not expected or not actual.startswith(expected):
+        return False
+    remainder = actual.removeprefix(expected).strip()
+    return not remainder or any(
+        remainder.startswith(prefix) for prefix in _JD_MODERN_SELLER_UI_SUFFIXES
+    )
+
+
+def _result_card_is_unavailable(card: Any) -> bool:
+    """Treat visible result-card stock text as a tie-breaker, never a model match."""
+
+    card_text = normalize_product_text(card.inner_text())
+    return any(marker in card_text for marker in _UNAVAILABLE_STOCK_MARKERS)
 
 
 def _is_attached_ascii(character: str) -> bool:
@@ -1867,6 +2240,20 @@ def _required_numeric_sku(raw_sku: object, *, semantic_name: str) -> str:
             f"JD {semantic_name} SKU binding is missing or invalid"
         )
     return raw_sku.strip()
+
+
+def _first_visible_product_title(
+    result_region: Any,
+    card_selectors: tuple[str, ...],
+    title_selectors: tuple[str, ...],
+) -> Any | None:
+    """Return the first readable title in a visible related-product card."""
+
+    for card in visible_locators(result_region, card_selectors):
+        titles = visible_locators(card, title_selectors)
+        if titles:
+            return titles[0]
+    return None
 
 
 def _css_rect(locator: Any, role: str) -> CssRect:

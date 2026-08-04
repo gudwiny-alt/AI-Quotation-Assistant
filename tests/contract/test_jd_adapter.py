@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from quote_app.sites.catalog import SUPPORTED_BRANDS, SiteSpec, load_site_catalog
-from quote_app.sites.jd import JDAdapter
+from quote_app.sites.jd import JDAdapter, _jd_color_matches
 from quote_app.sites.protocol import SiteObservationAdapter
 from quote_app.sites.registry import AdapterRegistry, RegisteredSiteAdapter
 from quote_app.tasks.models import (
@@ -190,13 +190,19 @@ class _Locator:
             "height": _pixels(style.get("height"), 30),
         }
 
-    def evaluate(self, script: str) -> dict[str, object] | str:
+    def evaluate(self, script: str) -> dict[str, object] | str | bool:
         node = self.nodes[0]
         if "scrollIntoView" in script:
             option_kind = self.page.option_kind(node)
             if option_kind is not None:
                 self.page.capture_view_positions.append(option_kind)
+            elif "gl-item" in node.attrs.get("class", "").split():
+                self.page.capture_view_positions.append("result-card")
             return ""
+        if "getBoundingClientRect" in script:
+            if node.attrs.get("id") == "key01":
+                self.page.search_input_visibility_checks += 1
+            return True
         if "parentElement?.innerText" in script:
             return node.parent.text if node.parent is not None else node.text
         color = "rgb(0, 0, 0)"
@@ -235,6 +241,7 @@ class _FixturePage:
         result_region_ready_after: int | None = None,
         detail_ready_after: int | None = None,
         detail_seller_ready_after: int | None = None,
+        modern_sku_ready_after_scroll: int | None = None,
     ) -> None:
         parser = _DocumentParser()
         parser.feed(html if html is not None else (FIXTURES / fixture).read_text("utf-8"))
@@ -249,6 +256,9 @@ class _FixturePage:
         self.option_scrolls: list[str] = []
         self.option_events: list[str] = []
         self.capture_view_positions: list[str] = []
+        self.capture_scales: list[float] = []
+        self.scale_restored = False
+        self.search_input_visibility_checks = 0
         self.window_scroll_offsets: list[int] = []
         self.wait_timeout_milliseconds: list[float] = []
         self.selection_mode = selection_mode
@@ -262,12 +272,18 @@ class _FixturePage:
         self.result_region_ready_after = result_region_ready_after
         self.detail_ready_after = detail_ready_after
         self.detail_seller_ready_after = detail_seller_ready_after
+        self.modern_sku_ready_after_scroll = modern_sku_ready_after_scroll
+        self.detail_scan_scrolls: list[int] = []
         self.pending_capacity_context: int | None = None
         self.color_access_before_capacity_context = False
         if capacity_context_mode in {"async", "never"}:
             for node in self.root.descendants():
                 if "data-current-sku" in node.attrs:
                     node.attrs["data-current-sku"] = "999999999999"
+        if modern_sku_ready_after_scroll is not None:
+            for node in self.root.descendants():
+                if "specification-item-sku" in node.attrs.get("class", "").split():
+                    node.attrs["hidden"] = ""
 
     @property
     def url(self) -> str:
@@ -391,9 +407,31 @@ class _FixturePage:
                 self.detail_seller_ready_after = None
         return None
 
-    def evaluate(self, script: str) -> None:
+    def evaluate(
+        self,
+        script: str,
+        value: float | None = None,
+    ) -> bool | None:
+        if "quotation-capture-scale" in script:
+            if "root.removeAttribute" in script:
+                self.scale_restored = True
+                return True
+            assert value is not None
+            self.capture_scales.append(value)
+            return True
         if script == "() => window.scrollBy(0, -120)":
             self.window_scroll_offsets.append(-120)
+        if script == "() => window.scrollBy(0, 520)":
+            self.detail_scan_scrolls.append(520)
+            if (
+                self.modern_sku_ready_after_scroll is not None
+                and len(self.detail_scan_scrolls)
+                >= self.modern_sku_ready_after_scroll
+            ):
+                for node in self.root.descendants():
+                    if "specification-item-sku" in node.attrs.get("class", "").split():
+                        node.attrs.pop("hidden", None)
+                self.modern_sku_ready_after_scroll = None
 
     @staticmethod
     def option_kind(node: _Node) -> str | None:
@@ -638,6 +676,51 @@ def test_visible_risk_control_page_requires_manual_verification() -> None:
         _observe(html=html)
 
 
+def test_visible_jd_frequency_control_text_requires_manual_verification() -> None:
+    html = (FIXTURES / "no_model.html").read_text("utf-8").replace(
+        '<section id="J_goodsList"',
+        '<div>访问过于频繁，请完成安全验证后重试</div>'
+        '<section id="J_goodsList"',
+    )
+
+    with pytest.raises(SecurityVerificationRequired):
+        _observe(html=html)
+
+
+def test_visible_jd_loading_status_does_not_pause_a_verified_result_page() -> None:
+    """A stale loading label must not turn a normal store result into a manual gate."""
+
+    html = (FIXTURES / "no_model.html").read_text("utf-8").replace(
+        '<section id="J_goodsList"',
+        '<div>努力加载中，请稍后...</div><section id="J_goodsList"',
+    )
+
+    page = _FixturePage(html=html)
+    page.goto(page.after_search_url)
+    observation = JDAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+
+
+def test_jd_no_model_uses_verified_search_url_when_search_input_is_transiently_hidden() -> None:
+    """A ready search URL plus an inspected result region is sufficient evidence."""
+
+    html = (FIXTURES / "no_model.html").read_text("utf-8").replace(
+        '<input id="key01" value="小米 15"',
+        '<input hidden id="key01" value="小米 15"',
+        1,
+    )
+
+    page = _FixturePage(html=html)
+    page.goto(page.after_search_url)
+    observation = JDAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rectangle.role for rectangle in observation.css_rectangles) == (
+        "result_region",
+    )
+
+
 def test_jd_entry_layout_failure_is_labeled_as_store_page() -> None:
     html = "<title>小米京东自营旗舰店</title>"
 
@@ -689,6 +772,52 @@ def test_jd_waits_for_the_result_region_after_search_url_is_stable() -> None:
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
+def test_jd_keeps_waiting_for_a_slow_live_store_result_container() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'id="J_goodsList" style=',
+        'id="J_goodsList" data-delayed-result-region hidden style=',
+        1,
+    )
+
+    observation = _observe(html=html, result_region_ready_after=11)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_jd_accepts_the_live_store_result_list_container() -> None:
+    """The HONOR JD store currently renders results in ``#comProlist``."""
+
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'section id="J_goodsList"',
+        'section id="comProlist"',
+        1,
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_jd_accepts_the_unique_marketing_colour_for_a_generic_base_colour() -> None:
+    """The base table may say 黑色 while the approved HONOR SKU says 幻夜黑."""
+
+    assert _jd_color_matches("黑色", "幻夜黑")
+    assert not _jd_color_matches("黑色", "雪原白")
+
+
+def test_jd_modern_final_selection_accepts_the_selected_marketing_colour() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace("黑色", "幻夜黑")
+
+    observation = _observe(
+        "modern_detail_capacity_unavailable.html",
+        html=html,
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
 def test_jd_uses_verified_search_url_when_modern_result_search_box_is_blank() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         '<input id="key01" value="小米 15"',
@@ -731,6 +860,40 @@ def test_jd_deduplicates_matching_cards_that_share_one_approved_item_url() -> No
     assert observation.url == "https://item.jd.com/100012345678.html"
 
 
+def test_jd_sold_out_selected_sku_with_bound_price_is_quoted() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'data-sku="100012345678">现货</div>',
+        'data-sku="100012345678">暂时缺货</div>',
+        1,
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
+    assert observation.semantic_state.stock_state == "暂时缺货"
+
+
+def test_jd_prefers_available_exact_model_card_over_sold_out_duplicate() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        '''        <article class="gl-item">
+          <div class="p-name"><a href="//item.jd.com/100012345678.html" target="_blank"><em>新品 小米15 12GB+256GB 手机</em></a></div>
+        </article>''',
+        '''        <article class="gl-item">
+          <div class="p-name"><a href="//item.jd.com/100012345679.html"><em>新品 小米15 12GB+256GB 手机</em></a></div>
+          <span class="stock-state">暂时缺货</span>
+        </article>
+        <article class="gl-item">
+          <div class="p-name"><a href="//item.jd.com/100012345678.html" target="_blank"><em>新品 小米15 12GB+256GB 手机</em></a></div>
+        </article>''',
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == "https://item.jd.com/100012345678.html"
+
+
 def test_jd_live_style_result_card_enters_base_model_detail_without_tracking_query() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8")
     html = html.replace('id="J_goodsList"', 'class="jSearchListArea"')
@@ -739,6 +902,21 @@ def test_jd_live_style_result_card_enters_base_model_detail_without_tracking_que
         '//item.jd.com/100012345678.html" target="_blank"><em>新品 小米15 12GB+256GB 手机',
         '//item.jd.com/100012345678.html?pcdk=fixture"><em>'
         '新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机',
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == "https://item.jd.com/100012345678.html"
+
+
+def test_jd_result_card_uses_its_verified_visible_text_when_title_wrapper_changes() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        '<div class="p-name"><a href="//item.jd.com/100012345678.html" '
+        'target="_blank"><em>新品 小米15 12GB+256GB 手机</em></a></div>',
+        '<div class="listing-title"><a href="//item.jd.com/100012345678.html" '
+        'target="_blank"><em>新品 小米15 12GB+256GB 手机</em></a></div>',
+        1,
     )
 
     observation = _observe(html=html)
@@ -794,6 +972,26 @@ def test_jd_waits_for_modern_detail_seller_after_title_is_visible() -> None:
     assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
 
 
+def test_jd_allows_a_slow_modern_detail_seller_to_finish_loading() -> None:
+    """A live JD product must not be abandoned after the short store-page wait."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace(
+        'class="shop-plugin"',
+        'class="shop-plugin" data-delayed-detail-seller hidden',
+        1,
+    )
+
+    observation = _observe(
+        html=html,
+        task=_task(ram="16GB", storage="512GB"),
+        detail_seller_ready_after=10,
+    )
+
+    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+
+
 def test_jd_modern_detail_rejects_unapproved_seller_name_suffix() -> None:
     """Break caught: a third-party suffix must not pass an approved-name prefix check."""
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
@@ -809,6 +1007,42 @@ def test_jd_modern_detail_rejects_unapproved_seller_name_suffix() -> None:
             html=html,
             task=_task(ram="16GB", storage="512GB"),
         )
+
+
+def test_jd_modern_detail_allows_only_known_store_ui_decorations() -> None:
+    """The live shop header may append its own non-identity UI labels."""
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace(
+        "小米京东自营旗舰店</div>",
+        "小米京东自营旗舰店 自营 关注店铺 进店逛逛</div>",
+        1,
+    )
+
+    observation = _observe(
+        html=html,
+        task=_task(ram="16GB", storage="512GB"),
+    )
+
+    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+
+
+def test_jd_modern_detail_allows_the_observed_shop_widget_copy() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace(
+        "小米京东自营旗舰店</div>",
+        "小米京东自营旗舰店 进店逛逛，享更多优惠 精选镇店好物，快来逛逛 "
+        "关注店铺 联系客服</div>",
+        1,
+    )
+
+    observation = _observe(
+        html=html,
+        task=_task(ram="16GB", storage="512GB"),
+    )
+
+    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
 
 
 def test_jd_waits_for_legacy_detail_seller_after_title_is_visible() -> None:
@@ -880,7 +1114,7 @@ def test_modern_detail_selects_available_configuration_and_reads_valid_price() -
     assert observation.url == "https://item.jd.com/100012345678.html"
 
 
-def test_jd_modern_scrolls_options_before_clicking_and_positions_capacity_for_capture() -> None:
+def test_jd_modern_positions_the_selected_detail_only_when_formal_capture_is_prepared() -> None:
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
     ).replace(
@@ -892,11 +1126,11 @@ def test_jd_modern_scrolls_options_before_clicking_and_positions_capacity_for_ca
         1,
     )
     page = _FixturePage(html=html)
+    task = _task(ram="16GB", storage="512GB")
+    adapter = JDAdapter(_xiaomi_spec())
 
-    observation = JDAdapter(_xiaomi_spec()).observe(
-        _task(ram="16GB", storage="512GB"),
-        cast(Any, page),
-    )
+    observation = adapter.observe(task, cast(Any, page))
+    goto_count = len(page.goto_calls)
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.option_events == [
@@ -906,9 +1140,41 @@ def test_jd_modern_scrolls_options_before_clicking_and_positions_capacity_for_ca
         "click:modern-color",
     ]
     assert page.option_scrolls == ["modern-capacity", "modern-color"]
+    assert page.capture_view_positions == []
+    assert page.window_scroll_offsets == []
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert page.capture_scales == [0.9]
     assert page.capture_view_positions == ["modern-capacity"]
-    assert page.window_scroll_offsets == [-120]
-    assert 500 in page.wait_timeout_milliseconds
+    assert len(page.goto_calls) == goto_count
+    assert 300 in page.wait_timeout_milliseconds
+
+
+def test_jd_modern_detail_scans_down_before_abandoning_late_sku_options() -> None:
+    """JD may render the valid SKU controls below the first viewport."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace(
+        'specification-item-sku specification-item-sku--lack" '
+        'style="left:20px;top:120px;width:150px;height:28px">'
+        "16GB+512GB 无货",
+        'specification-item-sku" '
+        'style="left:20px;top:120px;width:150px;height:28px">16GB+512GB',
+        1,
+    )
+    page = _FixturePage(html=html, modern_sku_ready_after_scroll=1)
+
+    observation = JDAdapter(_xiaomi_spec()).observe(
+        _task(ram="16GB", storage="512GB"),
+        cast(Any, page),
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.detail_scan_scrolls == [520]
+    assert len(page.goto_calls) == 2
+    assert page.goto_calls[-1] == "https://item.jd.com/100012345678.html"
 
 
 def test_jd_resume_goes_directly_to_saved_detail_without_store_search() -> None:
@@ -950,10 +1216,27 @@ def test_jd_resume_revalidates_saved_no_model_search_without_search_submit() -> 
     assert resumed_page.goto_calls == [checkpoint.url]
 
 
-def test_jd_legacy_scrolls_options_before_clicking_and_positions_capacity_for_capture() -> None:
+def test_jd_reuses_the_current_matching_search_results_after_manual_pause() -> None:
+    """A resolved manual pause must continue from the visible JD result page."""
+
     page = _FixturePage()
+    page.goto(page.after_search_url)
 
     observation = JDAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.goto_calls == [
+        page.after_search_url,
+        "https://item.jd.com/100012345678.html",
+    ]
+
+
+def test_jd_legacy_positions_the_selected_detail_only_when_formal_capture_is_prepared() -> None:
+    page = _FixturePage()
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.option_events == [
@@ -963,9 +1246,13 @@ def test_jd_legacy_scrolls_options_before_clicking_and_positions_capacity_for_ca
         "click:legacy-color",
     ]
     assert page.option_scrolls == ["legacy-capacity", "legacy-color"]
+    assert page.capture_view_positions == []
+    assert page.window_scroll_offsets == []
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
     assert page.capture_view_positions == ["legacy-capacity"]
-    assert page.window_scroll_offsets == [-120]
-    assert 500 in page.wait_timeout_milliseconds
+    assert 300 in page.wait_timeout_milliseconds
 
 
 def test_honor_magic8_modern_result_enters_exact_item_and_reads_offer() -> None:
@@ -1131,6 +1418,35 @@ def test_modern_price_found_exposes_a_live_formal_capture_reader() -> None:
     assert reader() == observation.semantic_state
 
 
+def test_modern_formal_reader_accepts_marketing_colour_for_generic_base_colour() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace(
+        'specification-item-sku specification-item-sku--lack" '
+        'style="left:20px;top:120px;width:150px;height:28px">'
+        '16GB+512GB 无货',
+        'specification-item-sku" '
+        'style="left:20px;top:120px;width:150px;height:28px">16GB+512GB',
+        1,
+    ).replace(
+        ">黑色</div>",
+        ">幻夜黑</div>",
+        1,
+    )
+    task = _task(ram="16GB", storage="512GB", color="黑色")
+    page = _FixturePage(html=html)
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    reader = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert reader() == observation.semantic_state
+
+
 def test_jd_verified_state_reader_retries_transient_layout_errors_until_exact_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1164,7 +1480,7 @@ def test_jd_verified_state_reader_retries_transient_layout_errors_until_exact_st
     assert page.wait_timeout_milliseconds == [250, 250]
 
 
-def test_jd_verified_state_reader_exhausts_ten_mismatches_before_capture(
+def test_jd_verified_state_reader_tolerates_non_quote_delivery_region_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task = _task()
@@ -1189,6 +1505,32 @@ def test_jd_verified_state_reader_exhausts_ten_mismatches_before_capture(
 
     reader = adapter.verified_state_reader(task, cast(Any, page), expected)
 
+    assert reader() == expected
+
+    assert reads == 1
+    assert authentication_checks == ["checked"]
+    assert page.wait_timeout_milliseconds == []
+
+
+def test_jd_verified_state_reader_rejects_a_material_price_change_before_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = _task()
+    page = _FixturePage()
+    adapter = JDAdapter(_xiaomi_spec())
+    expected = adapter.observe(task, cast(Any, page)).semantic_state
+    page.wait_timeout_milliseconds.clear()
+    reads = 0
+
+    def read_legacy(*_args: object) -> object:
+        nonlocal reads
+        reads += 1
+        return replace(expected, price=Decimal("9999"))
+
+    monkeypatch.setattr(adapter, "_read_legacy_price_state", read_legacy)
+
+    reader = adapter.verified_state_reader(task, cast(Any, page), expected)
+
     with pytest.raises(
         LayoutRecognitionError,
         match="JD verified offer did not stabilize before capture",
@@ -1196,7 +1538,6 @@ def test_jd_verified_state_reader_exhausts_ten_mismatches_before_capture(
         reader()
 
     assert reads == 10
-    assert authentication_checks == ["checked"] * 10
     assert page.wait_timeout_milliseconds == [250] * 9
 
 
@@ -1468,7 +1809,6 @@ def test_explicit_visible_empty_result_state_is_legal_no_model() -> None:
     [
         ("capacity_disabled.html", BusinessOutcome.CAPACITY_UNAVAILABLE, "capacity"),
         ("color_disabled.html", BusinessOutcome.COLOR_UNAVAILABLE, "color"),
-        ("sold_out.html", BusinessOutcome.SOLD_OUT, "stock_status"),
     ],
 )
 def test_legal_no_variant_states_use_the_exact_target_rectangle(
@@ -1489,7 +1829,6 @@ def test_legal_no_variant_states_use_the_exact_target_rectangle(
         "no_model.html",
         "capacity_disabled.html",
         "color_disabled.html",
-        "sold_out.html",
     ),
 )
 def test_legal_no_exposes_a_live_formal_capture_reader(
@@ -1758,8 +2097,73 @@ def test_price_found_requires_exact_result_page_search_keyword() -> None:
         _observe(html=html)
 
 
-@pytest.mark.parametrize("result_value", ["", "小米 14"])
-def test_no_model_requires_exact_result_page_search_keyword(
+def test_no_model_with_visible_result_cards_accepts_approved_query_when_input_is_blank(
+) -> None:
+    """JD sometimes renders the searched cards before restoring input.value."""
+
+    html = (FIXTURES / "no_model.html").read_text("utf-8")
+    target = (
+        '<input id="key01" value="小米 15" '
+        'style="left:20px;top:20px;width:260px;height:32px">'
+    )
+    position = html.rfind(target)
+    assert position >= 0
+    html = html[:position] + html[position:].replace(
+        target,
+        '<input id="key01" value="" '
+        'style="left:20px;top:20px;width:260px;height:32px">',
+        1,
+    )
+
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rect.role for rect in observation.css_rectangles) == (
+        "result_region",
+    )
+
+
+def test_jd_no_model_prepares_a_result_view_with_readable_card_names() -> None:
+    page = _FixturePage("no_model.html")
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert page.capture_scales == [0.9]
+    assert page.capture_view_positions == ["result-card"]
+    assert page.search_input_visibility_checks == 1
+    assert 300 in page.wait_timeout_milliseconds
+
+
+def test_jd_no_model_rereads_capture_rectangles_after_result_positioning() -> None:
+    page = _FixturePage("no_model.html")
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    assert adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )() == observation.semantic_state
+
+
+@pytest.mark.parametrize("result_value", ["小米 14"])
+def test_no_model_rejects_conflicting_result_page_search_keyword(
     result_value: str,
 ) -> None:
     html = (FIXTURES / "no_model.html").read_text("utf-8")

@@ -62,10 +62,10 @@ def test_beta_notice_describes_login_as_runtime_optional() -> None:
     assert "继续当前任务" in BETA_NOTICE
 
 
-def test_app_build_label_identifies_honor_candidate_navigation_scope() -> None:
+def test_app_build_label_identifies_honor_three_site_test_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
-    assert APP_BUILD_LABEL == "Excel高清截图版（仅官网、全部荣耀行）2026.08.02.18"
+    assert APP_BUILD_LABEL == "京东90%定格截图版（全部荣耀行）2026.08.04.40"
     assert "当前受控页" in BETA_NOTICE
 
 

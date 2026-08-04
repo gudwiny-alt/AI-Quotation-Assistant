@@ -759,7 +759,14 @@ def test_service_darwin_beta_uses_manual_window_session_defaults(
     )
 
     assert summary.succeeded == 0
-    assert browser_options == [{"launch_args": ()}]
+    assert browser_options == [
+        {
+            "launch_args": (
+                "--window-position=24,49",
+                "--window-size=1464,893",
+            )
+        }
+    ]
 
 
 def test_service_preserves_partial_results_login_and_authoritative_failure_codes(

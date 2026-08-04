@@ -38,6 +38,7 @@ from quote_app.evidence.platform import (
     EvidenceCaptureError,
     NonRetryableEvidenceCaptureError,
     RetryableEvidenceCaptureError,
+    make_macos_full_display_geometry_snapshot,
     make_capture_error,
 )
 from quote_app.evidence.semantic_state import VerifiedSemanticState
@@ -45,7 +46,10 @@ from quote_app.evidence.models import EvidenceState, MacCapturePolicy
 from quote_app.sites.catalog import SiteSpec, load_site_catalog
 from quote_app.sites.official import OfficialSiteAdapter
 from quote_app.tasks.models import BusinessOutcome, WebsiteChannel, WebsiteTask
-from quote_app.tasks.retry import LayoutRecognitionError
+from quote_app.tasks.retry import (
+    LayoutRecognitionError,
+    SecurityVerificationRequired,
+)
 
 _NOW = 100.0
 _DISPLAY = DisplayBounds(0, 0, 3024, 1964)
@@ -83,7 +87,10 @@ def test_darwin_beta_manual_layout_skips_startup_window_contract(
         policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
     )
 
-    assert runtime.browser_launch_args() == ()
+    assert runtime.browser_launch_args() == (
+        "--window-position=24,49",
+        "--window-size=1464,893",
+    )
     assert runtime.browser_startup_preflight() is None
     context = runtime.capture_context_provider(_task(), object(), _state())
 
@@ -101,6 +108,29 @@ def test_darwin_beta_manual_layout_preserves_current_chromium_window(
     )
 
     assert runtime._sampler._window_mode is ChromiumWindowMode.PRESERVE
+
+
+def test_full_display_beta_geometry_does_not_require_css_window_bounds_to_match(
+) -> None:
+    """Whole-display review cannot use browser CSS bounds for annotations."""
+
+    bound = BoundMacWindow(
+        identity=_IDENTITY,
+        chromium=replace(
+            _chromium(sample_id="chromium-after-repaint"),
+            bounds_dip=DisplayBounds(0, 25, 1508, 937),
+        ),
+        native=_native(sample_id="native-current"),
+    )
+
+    snapshot = make_macos_full_display_geometry_snapshot(
+        bound,
+        _DISPLAY,
+        now_monotonic=_NOW,
+    )
+
+    assert snapshot.expected_window == _IDENTITY
+    assert snapshot.browser_physical_bounds == bound.native.bounds_px
 
 
 def test_darwin_beta_evidence_capture_exposes_its_selected_policy(
@@ -2400,6 +2430,69 @@ class _VerifiedAdapter:
         return lambda: expected
 
 
+class _CapturePreparedAdapter(_VerifiedAdapter):
+    def __init__(self, spec: SiteSpec) -> None:
+        super().__init__(spec)
+        self.prepare_calls: list[
+            tuple[WebsiteTask, object, VerifiedSemanticState]
+        ] = []
+        self.restore_calls: list[
+            tuple[WebsiteTask, object, VerifiedSemanticState]
+        ] = []
+
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        self.prepare_calls.append((task, page, expected))
+
+    def restore_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        self.restore_calls.append((task, page, expected))
+
+
+class _CaptureGeometryAdapter(_CapturePreparedAdapter):
+    def capture_rectangles_for_capture(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> tuple[CssRect, ...]:
+        del task, page, expected
+        return (
+            CssRect(30, 40, 120, 32, "search_keyword"),
+            CssRect(30, 120, 720, 340, "result_region"),
+        )
+
+
+class _FailingCaptureGeometryAdapter(_CapturePreparedAdapter):
+    def capture_rectangles_for_capture(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> tuple[CssRect, ...]:
+        del task, page, expected
+        raise LayoutRecognitionError("fixture final geometry failed")
+
+
+class _SecurityBlockedCaptureAdapter(_VerifiedAdapter):
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        del task, page, expected
+        raise SecurityVerificationRequired("jd", "京东需要人工完成安全验证")
+
+
 def _site_spec(channel: WebsiteChannel) -> SiteSpec:
     return next(
         candidate
@@ -2469,6 +2562,145 @@ def test_default_honor_reader_supports_each_quotation_channel(
     assert registry.calls == [("HONOR", channel)]
     assert adapter.calls == [(task, page, state)]
     assert isinstance(context.stability_probe.semantic_hash(), str)
+
+
+@pytest.mark.parametrize("channel", (WebsiteChannel.JD, WebsiteChannel.TMALL))
+def test_capture_context_prepares_marketplace_view_once_before_formal_reader(
+    channel: WebsiteChannel,
+) -> None:
+    calls: list[str] = []
+    adapter = _CapturePreparedAdapter(_site_spec(channel))
+    registry = _CustomAdapterRegistry(adapter)
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler(calls),
+        bridge=_Bridge(calls),
+        binder=_Binder(calls),
+        adapter_registry=registry,
+        monotonic_clock=lambda: _NOW,
+    )
+    task = _task(channel=channel)
+    page = object()
+    state = _state(canonical_url=f"https://example.test/{channel.value}/item-1")
+
+    context = runtime.capture_context_provider(task, page, state)
+
+    assert adapter.prepare_calls == [(task, page, state)]
+    assert adapter.calls == [(task, page, state)]
+    assert isinstance(context.stability_probe.semantic_hash(), str)
+
+
+def test_runtime_restores_prepared_view_once_after_successful_capture() -> None:
+    calls: list[str] = []
+    adapter = _CapturePreparedAdapter(_site_spec(WebsiteChannel.JD))
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler(calls),
+        bridge=_Bridge(calls),
+        binder=_Binder(calls),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    task = _task(channel=WebsiteChannel.JD)
+    page = object()
+    state = _state(canonical_url="https://example.test/jd/item-1")
+    context = runtime.capture_context_provider(task, page, state)
+    runtime.evidence_capture()._pipeline = _RawCapturePipeline(
+        result=object()
+    )  # type: ignore[assignment]
+
+    runtime.evidence_capture().capture(_capture_request(context))
+
+    assert adapter.restore_calls == [(task, page, state)]
+
+
+def test_runtime_restores_view_when_capture_fails() -> None:
+    calls: list[str] = []
+    adapter = _CapturePreparedAdapter(_site_spec(WebsiteChannel.JD))
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler(calls),
+        bridge=_Bridge(calls),
+        binder=_Binder(calls),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    task = _task(channel=WebsiteChannel.JD)
+    page = object()
+    state = _state(canonical_url="https://example.test/jd/item-1")
+    context = runtime.capture_context_provider(task, page, state)
+    runtime.evidence_capture()._pipeline = _RawCapturePipeline(
+        error=OSError("capture failed")
+    )  # type: ignore[assignment]
+
+    with pytest.raises(OSError, match="capture failed"):
+        runtime.evidence_capture().capture(_capture_request(context))
+
+    assert adapter.restore_calls == [(task, page, state)]
+
+
+def test_runtime_restores_view_when_context_build_fails_after_prepare() -> None:
+    calls: list[str] = []
+    adapter = _FailingCaptureGeometryAdapter(_site_spec(WebsiteChannel.JD))
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler(calls),
+        bridge=_Bridge(calls),
+        binder=_Binder(calls),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    task = _task(channel=WebsiteChannel.JD)
+    page = object()
+    state = _state(canonical_url="https://example.test/jd/item-1")
+
+    assert (
+        _capture_error_code(
+            lambda: runtime.capture_context_provider(task, page, state)
+        )
+        == "CAPTURE_ENVIRONMENT"
+    )
+    assert adapter.restore_calls == [(task, page, state)]
+
+
+def test_capture_context_uses_final_marketplace_rectangles_after_view_preparation() -> None:
+    calls: list[str] = []
+    adapter = _CaptureGeometryAdapter(_site_spec(WebsiteChannel.TMALL))
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler(calls),
+        bridge=_Bridge(calls),
+        binder=_Binder(calls),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    task = _task(channel=WebsiteChannel.TMALL)
+    state = _state(canonical_url="https://example.test/tmall/search")
+
+    context = runtime.capture_context_provider(task, object(), state)
+
+    assert context.css_rectangles == (
+        CssRect(30, 40, 120, 32, "search_keyword"),
+        CssRect(30, 120, 720, 340, "result_region"),
+    )
+
+
+def test_capture_context_preserves_jd_security_pause_from_final_view_preparation() -> None:
+    """A JD challenge appearing immediately before capture must pause, not fail."""
+
+    calls: list[str] = []
+    adapter = _SecurityBlockedCaptureAdapter(_site_spec(WebsiteChannel.JD))
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler(calls),
+        bridge=_Bridge(calls),
+        binder=_Binder(calls),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    with pytest.raises(SecurityVerificationRequired) as caught:
+        runtime.capture_context_provider(
+            _task(channel=WebsiteChannel.JD),
+            object(),
+            _state(canonical_url="https://example.test/jd/item-1"),
+        )
+
+    assert caught.value.site == "jd"
 
 
 def test_honor_reader_rejects_mismatched_injected_adapter_config() -> None:

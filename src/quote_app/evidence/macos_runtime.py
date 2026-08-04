@@ -16,7 +16,7 @@ from quote_app.evidence.chromium import (
     ChromiumWindowMode,
     ChromiumWindowSample,
 )
-from quote_app.evidence.geometry import DisplayBounds
+from quote_app.evidence.geometry import CssRect, DisplayBounds
 from quote_app.evidence.macos import (
     MacOSCaptureEnvironment,
     MacOSEvidenceCapture,
@@ -58,6 +58,7 @@ from quote_app.evidence.semantic_state import (
     VerifiedSemanticState,
 )
 from quote_app.tasks.models import WebsiteChannel, WebsiteTask
+from quote_app.tasks.retry import LoginRequired
 
 ReaderFactory = Callable[
     [WebsiteTask, Any, VerifiedSemanticState],
@@ -70,6 +71,10 @@ _LAYOUT_CONVERGENCE_MAX_SAMPLES = 3
 _LAYOUT_CONVERGENCE_INTERVAL_SECONDS = 0.1
 _LAYOUT_CONVERGENCE_TIMEOUT_SECONDS = 0.2
 _LAYOUT_CONVERGENCE_CLOCK_EPSILON = 1e-9
+_MAC_VISUAL_REVIEW_WINDOW_ARGS = (
+    "--window-position=24,49",
+    "--window-size=1464,893",
+)
 
 
 class _Sampler(Protocol):
@@ -139,6 +144,7 @@ class _CurrentState:
     page: Any
     generation: object
     probe: VerifiedPageStateProbe | None
+    restore_capture_view: Callable[[], None] | None = None
 
 
 class _LeaseBoundMacOSEvidenceCapture(MacOSEvidenceCapture):
@@ -212,6 +218,7 @@ class MacFormalCaptureRuntime:
             )
         else:
             self._reader_factories = dict(reader_factories)
+        self._prepared_adapters: dict[_ReaderKey, object] = {}
         self._lock = threading.RLock()
         self._current: _CurrentState | None = None
         environment_options: dict[str, Any] = {
@@ -242,15 +249,15 @@ class MacFormalCaptureRuntime:
             return self._build_capture_context(task, page, state)
 
     def browser_launch_args(self) -> tuple[str, ...] | None:
-        """Mac manual-layout beta must not inherit Chrome's maximize default."""
+        """Start the Mac pilot in one stable, tall normal window."""
         if self._uses_darwin_beta_visual_review():
-            return ()
+            return _MAC_VISUAL_REVIEW_WINDOW_ARGS
         return None
 
     def browser_startup_preflight(
         self,
     ) -> Callable[[Any], None] | None:
-        """Manual-layout beta has no startup window contract."""
+        """Fixed launch arguments establish the Mac pilot window contract."""
         return None
 
     def _build_capture_context(
@@ -260,6 +267,8 @@ class MacFormalCaptureRuntime:
         state: VerifiedSemanticState,
     ) -> CaptureContext:
         self._current = None
+        restore_capture_view: Callable[[], None] | None = None
+        context_built = False
         try:
             if not isinstance(task, WebsiteTask):
                 raise make_capture_error(
@@ -321,6 +330,29 @@ class MacFormalCaptureRuntime:
                 "受控页面状态读取器无法创建",
                 lambda: reader_factory(task, page, state),
             )
+            restore_capture_view = self._prepared_capture_view_restorer(
+                task,
+                page,
+                state,
+            )
+            current = self._require_current()
+            self._current = _CurrentState(
+                permissions=current.permissions,
+                bound=current.bound,
+                page=current.page,
+                generation=current.generation,
+                probe=current.probe,
+                restore_capture_view=restore_capture_view,
+            )
+            capture_rectangles = self._stage(
+                "CAPTURE_ENVIRONMENT",
+                "正式截图证据区域无法读取",
+                lambda: self._capture_rectangles_for_current_view(
+                    task,
+                    page,
+                    state,
+                ),
+            )
 
             probe: VerifiedPageStateProbe | None = None
 
@@ -365,13 +397,23 @@ class MacFormalCaptureRuntime:
                 page=page,
                 generation=generation,
                 probe=probe,
+                restore_capture_view=restore_capture_view,
             )
             context = CaptureContext(
                 expected_window=current_bound.identity,
                 stability_probe=probe,
+                css_rectangles=capture_rectangles,
             )
+            context_built = True
             return context
         except (KeyboardInterrupt, SystemExit):
+            self._current = None
+            raise
+        except LoginRequired:
+            # A marketplace can display a login or risk-control page after its
+            # offer was observed but just before evidence capture.  Preserve
+            # that control signal so the scheduler can park the task for the
+            # user instead of misreporting it as a capture-environment fault.
             self._current = None
             raise
         except EvidenceCaptureError as error:
@@ -387,6 +429,13 @@ class MacFormalCaptureRuntime:
                 "CAPTURE_ENVIRONMENT",
                 "macOS 正式截图运行时组合失败",
             ) from None
+        finally:
+            if not context_built and restore_capture_view is not None:
+                self._current = None
+                try:
+                    restore_capture_view()
+                except Exception:
+                    pass
 
     def evidence_capture(self) -> MacOSEvidenceCapture:
         return self._capture
@@ -397,12 +446,15 @@ class MacFormalCaptureRuntime:
         request: CaptureRequest,
     ) -> EvidenceRecord:
         with self._lock:
+            capture_error: BaseException | None = None
+            restore_capture_view: Callable[[], None] | None = None
             try:
                 if not isinstance(request, CaptureRequest):
                     raise ValueError(
                         "request must be a CaptureRequest"
                     )
                 current = self._require_current()
+                restore_capture_view = current.restore_capture_view
                 if (
                     current.probe is None
                     or request.stability_probe is not current.probe
@@ -424,8 +476,17 @@ class MacFormalCaptureRuntime:
                         fallback_code="CAPTURE_ENVIRONMENT",
                         safe_message="macOS 正式截图失败",
                     ) from None
+            except BaseException as error:
+                capture_error = error
+                raise
             finally:
                 self._current = None
+                if restore_capture_view is not None:
+                    try:
+                        restore_capture_view()
+                    except Exception:
+                        if capture_error is None:
+                            raise
 
     def _permissions(self) -> MacPermissionState:
         permissions = self._stage(
@@ -582,6 +643,7 @@ class MacFormalCaptureRuntime:
             page=current.page,
             generation=current.generation,
             probe=current.probe,
+            restore_capture_view=current.restore_capture_view,
         )
         return bound
 
@@ -644,6 +706,9 @@ class MacFormalCaptureRuntime:
         try:
             return self._bridge.web_area(identity)
         except (KeyboardInterrupt, SystemExit):
+            self._current = None
+            raise
+        except LoginRequired:
             self._current = None
             raise
         except EvidenceCaptureError as error:
@@ -778,6 +843,7 @@ class MacFormalCaptureRuntime:
             page=current.page,
             generation=current.generation,
             probe=current.probe,
+            restore_capture_view=current.restore_capture_view,
         )
         self._foreground_window()
         safe_snapshot = self._environment.geometry_snapshot(identity)
@@ -905,6 +971,7 @@ class MacFormalCaptureRuntime:
                 "HONOR verified-state reader registry is required"
             )
         adapter = registry.adapter_for(task.brand, task.channel)
+        self._prepared_adapters[(task.brand, task.channel)] = adapter
         spec = getattr(adapter, "spec", None)
         if (
             getattr(spec, "brand", None) != task.brand
@@ -914,12 +981,67 @@ class MacFormalCaptureRuntime:
             raise ValueError(
                 "HONOR verified-state reader adapter does not match task"
             )
-        reader_builder = getattr(adapter, "verified_state_reader", None)
-        if not callable(reader_builder):
+        capture_view_preparer = getattr(adapter, "prepare_capture_view", None)
+        prepared = False
+        try:
+            if callable(capture_view_preparer):
+                capture_view_preparer(task, page, state)
+                prepared = True
+            reader_builder = getattr(adapter, "verified_state_reader", None)
+            if not callable(reader_builder):
+                raise ValueError(
+                    "HONOR verified-state reader is unavailable for channel"
+                )
+            return reader_builder(task, page, state)
+        except BaseException:
+            self._prepared_adapters.pop((task.brand, task.channel), None)
+            restorer = getattr(adapter, "restore_capture_view", None)
+            if prepared and callable(restorer):
+                try:
+                    restorer(task, page, state)
+                except Exception:
+                    pass
+            raise
+
+    def _prepared_capture_view_restorer(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        state: VerifiedSemanticState,
+    ) -> Callable[[], None] | None:
+        adapter = self._prepared_adapters.get((task.brand, task.channel))
+        restorer = getattr(adapter, "restore_capture_view", None)
+        if not callable(restorer):
+            return None
+        return lambda: restorer(task, page, state)
+
+    def _capture_rectangles_for_current_view(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        state: VerifiedSemanticState,
+    ) -> tuple[CssRect, ...] | None:
+        registry = self._adapter_registry
+        if registry is None:
+            return None
+        adapter = self._prepared_adapters.pop(
+            (task.brand, task.channel),
+            None,
+        )
+        if adapter is None:
+            adapter = registry.adapter_for(task.brand, task.channel)
+        reader = getattr(adapter, "capture_rectangles_for_capture", None)
+        if not callable(reader):
+            return None
+        rectangles = reader(task, page, state)
+        if not isinstance(rectangles, tuple | list) or not all(
+            isinstance(rectangle, CssRect)
+            for rectangle in rectangles
+        ):
             raise ValueError(
-                "HONOR verified-state reader is unavailable for channel"
+                "capture rectangles reader must return CssRect values"
             )
-        return reader_builder(task, page, state)
+        return tuple(rectangles)
 
     def _stage(
         self,
@@ -930,6 +1052,9 @@ class MacFormalCaptureRuntime:
         try:
             return operation()
         except (KeyboardInterrupt, SystemExit):
+            self._current = None
+            raise
+        except LoginRequired:
             self._current = None
             raise
         except EvidenceCaptureError as error:
