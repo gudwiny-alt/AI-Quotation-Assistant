@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import pytest
+
+from quote_app.sites.detail_capture_view import (
+    apply_capture_scale,
+    position_detail_for_capture,
+    position_result_cards_for_capture,
+    restore_capture_scale,
+)
+from quote_app.tasks.retry import LayoutRecognitionError
+
+
+class _Page:
+    def __init__(
+        self,
+        *,
+        can_position: bool = True,
+        succeeds_at_scale: float = 1.0,
+    ) -> None:
+        self.in_viewport = {
+            "title": False,
+            "price": False,
+            "capacity": False,
+            "color": False,
+            "card": False,
+            "search": False,
+        }
+        self.centered: list[str] = []
+        self.position_scripts: list[str] = []
+        self.waits: list[int] = []
+        self.can_position = can_position
+        self.succeeds_at_scale = succeeds_at_scale
+        self.current_scale = 1.0
+        self.capture_scales: list[float] = []
+        self.scale_restored = False
+
+    def evaluate(self, script: str, value: float | None = None) -> bool:
+        if "quotation-capture-scale" not in script:
+            raise AssertionError(f"unexpected page script: {script}")
+        if "root.removeAttribute" in script:
+            self.scale_restored = True
+            self.current_scale = 1.0
+            return True
+        assert value is not None
+        self.current_scale = value
+        self.capture_scales.append(value)
+        return True
+
+    def center(self, name: str) -> None:
+        self.centered.append(name)
+        if name == "capacity" and self.can_position and (
+            self.current_scale <= self.succeeds_at_scale
+        ):
+            self.in_viewport = {key: True for key in self.in_viewport}
+        elif name == "card" and self.can_position and (
+            self.current_scale <= self.succeeds_at_scale
+        ):
+            self.in_viewport["card"] = True
+            self.in_viewport["title"] = True
+            self.in_viewport["price"] = True
+        elif self.can_position:
+            self.in_viewport[name] = True
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        self.waits.append(milliseconds)
+
+
+class _Locator:
+    def __init__(self, page: _Page, name: str) -> None:
+        self.page = page
+        self.name = name
+
+    def evaluate(self, script: str) -> bool | None:
+        if "scrollIntoView" in script:
+            self.page.position_scripts.append(script)
+            self.page.center(self.name)
+            return None
+        if "getBoundingClientRect" in script:
+            return self.page.in_viewport[self.name]
+        raise AssertionError(f"unexpected locator script: {script}")
+
+
+def test_positions_nearest_detail_scroll_area_until_title_price_and_skus_share_viewport() -> None:
+    page = _Page()
+
+    position_detail_for_capture(
+        page,
+        title=_Locator(page, "title"),
+        prices=(_Locator(page, "price"),),
+        capacity=_Locator(page, "capacity"),
+        color=_Locator(page, "color"),
+        site_name="JD",
+    )
+
+    assert page.centered == ["capacity"]
+    assert page.waits == [300]
+    assert page.capture_scales == []
+
+
+def test_applies_one_fixed_capture_scale_and_waits_for_layout() -> None:
+    page = _Page()
+
+    apply_capture_scale(page, scale=0.9)
+
+    assert page.capture_scales == [0.9]
+    assert page.waits == [300]
+
+
+def test_restores_the_original_capture_scale() -> None:
+    page = _Page()
+    apply_capture_scale(page, scale=0.9)
+
+    restore_capture_scale(page)
+
+    assert page.scale_restored is True
+
+
+def test_rejects_capture_when_title_cannot_share_the_viewport_with_price_and_skus() -> None:
+    page = _Page(can_position=False)
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="title, price, capacity and color",
+    ):
+        position_detail_for_capture(
+            page,
+            title=_Locator(page, "title"),
+            prices=(_Locator(page, "price"),),
+            capacity=_Locator(page, "capacity"),
+            color=_Locator(page, "color"),
+            site_name="Tmall",
+        )
+
+    assert page.centered == ["capacity"]
+    assert page.waits == [300]
+
+
+def test_positions_a_no_model_result_by_its_card_so_the_name_is_brought_onscreen() -> None:
+    page = _Page()
+    product_name = _Locator(page, "title")
+    product_card = _Locator(page, "card")
+
+    position_result_cards_for_capture(
+        page,
+        product_name=product_name,
+        product_card=product_card,
+        site_name="JD",
+    )
+
+    assert page.centered == ["card"]
+    assert "block: 'end'" in page.position_scripts[0]
+    assert page.waits == [300]
+    assert page.capture_scales == []
+
+
+def test_no_model_result_requires_search_input_and_card_name_in_viewport() -> None:
+    page = _Page()
+
+    with pytest.raises(LayoutRecognitionError, match="search input"):
+        position_result_cards_for_capture(
+            page,
+            search_input=_Locator(page, "search"),
+            product_name=_Locator(page, "title"),
+            product_card=_Locator(page, "card"),
+            site_name="JD",
+        )
+
+
+def test_no_model_result_accepts_search_input_and_card_name_together() -> None:
+    page = _Page()
+    page.in_viewport["search"] = True
+
+    position_result_cards_for_capture(
+        page,
+        search_input=_Locator(page, "search"),
+        product_name=_Locator(page, "title"),
+        product_card=_Locator(page, "card"),
+        site_name="JD",
+    )
+
+    assert page.centered == ["card"]
