@@ -925,15 +925,16 @@ def test_jd_result_card_uses_its_verified_visible_text_when_title_wrapper_change
     assert observation.url == "https://item.jd.com/100012345678.html"
 
 
-def test_modern_detail_marks_an_unavailable_requested_capacity_as_legal_no() -> None:
-    observation = _observe(
-        "modern_detail_capacity_unavailable.html",
-        task=_task(ram="16GB", storage="512GB"),
+def test_modern_detail_selects_a_shortage_marked_requested_capacity() -> None:
+    page = _FixturePage("modern_detail_capacity_unavailable.html")
+    observation = JDAdapter(_xiaomi_spec()).observe(
+        _task(ram="16GB", storage="512GB"),
+        cast(Any, page),
     )
 
-    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
-    assert observation.price is None
-    assert tuple(rect.role for rect in observation.css_rectangles) == ("capacity",)
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert "click:modern-capacity" in page.option_events
 
 
 def test_jd_waits_for_the_modern_detail_title_before_selecting_layout() -> None:
@@ -951,7 +952,7 @@ def test_jd_waits_for_the_modern_detail_title_before_selecting_layout() -> None:
         detail_ready_after=1,
     )
 
-    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_jd_waits_for_modern_detail_seller_after_title_is_visible() -> None:
@@ -969,7 +970,7 @@ def test_jd_waits_for_modern_detail_seller_after_title_is_visible() -> None:
         detail_seller_ready_after=2,
     )
 
-    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_jd_allows_a_slow_modern_detail_seller_to_finish_loading() -> None:
@@ -989,7 +990,7 @@ def test_jd_allows_a_slow_modern_detail_seller_to_finish_loading() -> None:
         detail_seller_ready_after=10,
     )
 
-    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_jd_modern_detail_rejects_unapproved_seller_name_suffix() -> None:
@@ -1024,7 +1025,7 @@ def test_jd_modern_detail_allows_only_known_store_ui_decorations() -> None:
         task=_task(ram="16GB", storage="512GB"),
     )
 
-    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_jd_modern_detail_allows_the_observed_shop_widget_copy() -> None:
@@ -1042,7 +1043,7 @@ def test_jd_modern_detail_allows_the_observed_shop_widget_copy() -> None:
         task=_task(ram="16GB", storage="512GB"),
     )
 
-    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_jd_waits_for_legacy_detail_seller_after_title_is_visible() -> None:
@@ -1393,8 +1394,8 @@ def test_modern_detail_prefers_the_verified_struck_through_price_over_subsidy_pr
     assert observation.price == Decimal("4499")
 
 
-def test_modern_selected_exact_capacity_is_quoted_when_page_is_sold_out() -> None:
-    """A shortage marker must not invalidate an exact option that is selected."""
+def _honor_power2_modern_html() -> str:
+    """Build the Honor Power2 modern-detail fixture with its exact option selected."""
 
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
@@ -1403,10 +1404,9 @@ def test_modern_selected_exact_capacity_is_quoted_when_page_is_sold_out() -> Non
     html = html.replace("小米 15", "荣耀Power2")
     html = html.replace("小米15", "荣耀Power2")
     html = html.replace(
-        'specification-item-sku specification-item-sku--selected">'
+        'class="specification-item-sku specification-item-sku--selected">'
         "12GB+256GB",
-        'specification-item-sku specification-item-sku--selected '
-        'specification-item-sku--lack">12GB+256GB',
+        "class='specification-item-sku specification-item-sku--selected'>12GB+256GB",
         1,
     )
     html = html.replace(
@@ -1418,11 +1418,26 @@ def test_modern_selected_exact_capacity_is_quoted_when_page_is_sold_out() -> Non
         '<div class="product-price-panel">'
         '<span class="product-price--main">¥4,299</span></div>',
         '<div class="product-price-panel">'
-        '<span class="product-price--main">¥2,166.65</span>国补领后价'
+        '<span class="product-price--main">¥2,466.65</span>国补领后价'
         '<span class="product-price--gray-line-through" '
-        'style="text-decoration:line-through">¥2,699</span>'
+        'style="text-decoration:line-through">¥2,999</span>'
         "</div>",
         1,
+    )
+    return html
+
+
+def test_modern_exact_shortage_capacity_is_clicked_before_price_decision() -> None:
+    html = _honor_power2_modern_html()
+    html = html.replace(
+        "specification-item-sku specification-item-sku--selected'>12GB+256GB",
+        "specification-item-sku specification-item-sku--lack'>12GB+256GB 无货",
+        1,
+    )
+    page = _FixturePage(html=html)
+    page.after_search_url = (
+        "https://mall.jd.com/view_search-1000000904-99-1-24-1.html"
+        "?keyword=%E8%8D%A3%E8%80%80Power2"
     )
     task = _task(
         brand="HONOR",
@@ -1431,20 +1446,12 @@ def test_modern_selected_exact_capacity_is_quoted_when_page_is_sold_out() -> Non
         storage="256GB",
         color="幻夜黑",
     )
-    page = _FixturePage(
-        html=html,
-        after_search_url=(
-            "https://mall.jd.com/view_search-1000000904-99-1-24-1.html"
-            "?keyword=%E8%8D%A3%E8%80%80Power2"
-        ),
-    )
 
     observation = JDAdapter(_honor_spec()).observe(task, cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert observation.price == Decimal("2699")
-    assert observation.semantic_state.capacity == "12GB+256GB"
-    assert observation.semantic_state.color == "幻夜黑"
+    assert observation.price == Decimal("2999")
+    assert "click:modern-capacity" in page.option_events
 
 
 def test_modern_price_found_exposes_a_live_formal_capture_reader() -> None:

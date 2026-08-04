@@ -715,15 +715,6 @@ class JDAdapter:
             ),
             semantic_name="modern capacity",
         )
-        if _is_modern_unavailable(capacity) and not _is_modern_selected(
-            capacity
-        ):
-            return self._legal_no(
-                task,
-                BusinessOutcome.CAPACITY_UNAVAILABLE,
-                page,
-                (_css_rect(capacity, "capacity"),),
-            )
         def capacity_matcher(label: str) -> bool:
             return capacity_matches(
                 _modern_option_label(label),
@@ -746,13 +737,6 @@ class JDAdapter:
             ),
             semantic_name="modern color",
         )
-        if _is_modern_unavailable(color) and not _is_modern_selected(color):
-            return self._legal_no(
-                task,
-                BusinessOutcome.COLOR_UNAVAILABLE,
-                page,
-                (_css_rect(color, "color"),),
-            )
         def color_matcher(label: str) -> bool:
             return _jd_color_matches(task.color, _modern_option_label(label))
         self._prepare_exact_option(color)
