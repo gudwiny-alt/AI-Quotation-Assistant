@@ -1651,14 +1651,20 @@ class JDAdapter:
         selected_capacities = tuple(
             label
             for label, selected in snapshot
-            if selected and capacity_matches(label, task.ram, task.storage)
+            if selected and _is_modern_capacity_label(label)
         )
         selected_colours = tuple(
             label
             for label, selected in snapshot
             if selected and _jd_color_matches(task.color, label)
         )
-        if len(selected_capacities) != 1 or len(selected_colours) != 1:
+        if (
+            len(selected_capacities) != 1
+            or not capacity_matches(
+                selected_capacities[0], task.ram, task.storage
+            )
+            or len(selected_colours) != 1
+        ):
             raise LayoutRecognitionError(
                 "JD modern selected target configuration is missing or ambiguous"
             )

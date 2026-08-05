@@ -1601,6 +1601,42 @@ def test_modern_power2_rejects_duplicate_selected_matching_capacity() -> None:
         )
 
 
+def test_modern_power2_rejects_selected_target_and_other_real_capacity() -> None:
+    task = _task(
+        ram="12GB",
+        storage="256GB",
+        color="幻夜黑",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="configuration"):
+        JDAdapter._require_exact_modern_configuration(
+            task,
+            (
+                ("12GB+256GB", True),
+                ("16GB+512GB", True),
+                ("幻夜黑", True),
+            ),
+        )
+
+
+def test_modern_power2_ignores_selected_package_and_service_labels() -> None:
+    task = _task(
+        ram="12GB",
+        storage="256GB",
+        color="幻夜黑",
+    )
+
+    JDAdapter._require_exact_modern_configuration(
+        task,
+        (
+            ("12GB+256GB", True),
+            ("幻夜黑", True),
+            ("官方标配", True),
+            ("2年碎屏服务", True),
+        ),
+    )
+
+
 def test_modern_power2_rejects_duplicate_selected_matching_colour() -> None:
     task = _task(
         ram="12GB",
