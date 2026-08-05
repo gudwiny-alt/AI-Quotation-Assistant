@@ -137,6 +137,8 @@ class _Locator:
         matches: list[_Node] = []
         for node in self.nodes:
             matches.extend(_select(node.descendants(), selector))
+        if selector == '[class^="highlightPrice--"]':
+            self.page.apply_price_snapshot(matches)
         return _Locator(self.page, matches)
 
     def is_visible(self) -> bool:
@@ -369,35 +371,40 @@ class _FixturePage:
             == '#tbpcDetail_SkuPanelRightWrap [class^="highlightPrice--"]'
             and (self.price_snapshots or self.price_sku_snapshots)
         ):
-            snapshot_index = min(
-                self.price_snapshot_reads,
-                max(
-                    len(self.price_snapshots or ()),
-                    len(self.price_sku_snapshots or ()),
-                )
-                - 1,
-            )
-            self.price_snapshot_reads += 1
-            if self.price_snapshots:
-                text_index = min(snapshot_index, len(self.price_snapshots) - 1)
-                for node, text in zip(
-                    nodes,
-                    self.price_snapshots[text_index],
-                    strict=False,
-                ):
-                    node.text_parts = [text]
-            if self.price_sku_snapshots:
-                sku_index = min(snapshot_index, len(self.price_sku_snapshots) - 1)
-                for node, sku in zip(
-                    nodes,
-                    self.price_sku_snapshots[sku_index],
-                    strict=False,
-                ):
-                    if sku is None:
-                        node.attrs.pop("data-sku", None)
-                    else:
-                        node.attrs["data-sku"] = sku
+            self.apply_price_snapshot(nodes)
         return _Locator(self, nodes)
+
+    def apply_price_snapshot(self, nodes: list[_Node]) -> None:
+        if not nodes or not (self.price_snapshots or self.price_sku_snapshots):
+            return
+        snapshot_index = min(
+            self.price_snapshot_reads,
+            max(
+                len(self.price_snapshots or ()),
+                len(self.price_sku_snapshots or ()),
+            )
+            - 1,
+        )
+        self.price_snapshot_reads += 1
+        if self.price_snapshots:
+            text_index = min(snapshot_index, len(self.price_snapshots) - 1)
+            for node, text in zip(
+                nodes,
+                self.price_snapshots[text_index],
+                strict=False,
+            ):
+                node.text_parts = [text]
+        if self.price_sku_snapshots:
+            sku_index = min(snapshot_index, len(self.price_sku_snapshots) - 1)
+            for node, sku in zip(
+                nodes,
+                self.price_sku_snapshots[sku_index],
+                strict=False,
+            ):
+                if sku is None:
+                    node.attrs.pop("data-sku", None)
+                else:
+                    node.attrs["data-sku"] = sku
 
     def wait_for_load_state(self, *_args: object, **_kwargs: object) -> None:
         return None
@@ -434,7 +441,17 @@ class _FixturePage:
         if self.poll_waits == 0 and self.poll_identity_mode in {
             "visible_capacity_changed",
             "visible_color_ambiguous",
+            "title_changed",
         }:
+            if self.poll_identity_mode == "title_changed":
+                title = next(
+                    node
+                    for node in self.root.descendants()
+                    if "ItemTitle--fixture" in node.attrs.get("class", "").split()
+                )
+                title.text_parts = ["小米 15 官方旗舰新品"]
+                self.poll_waits += 1
+                return
             options = [
                 node
                 for node in self.root.descendants()
@@ -815,6 +832,15 @@ def _without_hidden_sku_bindings(html: str) -> str:
     )
 
 
+def _with_ambiguous_selected_capacity(html: str) -> str:
+    return html.replace(
+        '<div class="tmall-capacity-options">',
+        '<div class="tmall-capacity-options">'
+        '<div class="tmall-option" aria-selected="true">8GB + 256GB</div>',
+        1,
+    )
+
+
 def test_live_observed_store_search_results_and_product_selectors_drive_path() -> None:
     html = _live_observed_html().replace(
         "item.htm?id=123456789018",
@@ -886,7 +912,10 @@ def test_honor_power2_uses_stable_visible_configuration_without_hidden_sku_attri
     observation = adapter.observe(task, cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert observation.price is not None
+    assert observation.price == Decimal("4399")
+    assert observation.semantic_state.current_sku == "visible:12GB + 256GB|黑色"
+    assert observation.semantic_state.region == "福建>福州>台江"
+    assert observation.semantic_state.stock_state == "现货"
 
 
 def test_honor_power2_variant_detail_title_does_not_match_power2_task() -> None:
@@ -1975,6 +2004,49 @@ def test_color_unavailable_ignores_hidden_capacity_context(
     assert _observe(html=html).outcome is BusinessOutcome.COLOR_UNAVAILABLE
 
 
+def test_color_unavailable_rejects_ambiguous_visible_capacity_context() -> None:
+    html = _with_ambiguous_selected_capacity(
+        (FIXTURES / "color_disabled.html").read_text("utf-8")
+    )
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="final selected capacity is missing, ambiguous, or changed",
+    ):
+        _observe(html=html)
+
+
+def test_color_unavailable_capture_reader_rejects_ambiguous_visible_capacity() -> None:
+    task = _task()
+    page = _FixturePage("color_disabled.html")
+    adapter = TmallAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    reader = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    target = next(
+        node
+        for node in page.root.descendants()
+        if node.text == "12GB + 256GB"
+    )
+    assert target.parent is not None
+    other = _Node(
+        "div",
+        {"class": "valueItem--fixture", "aria-selected": "true"},
+        target.parent,
+    )
+    other.text_parts = ["8GB + 256GB"]
+    target.parent.children.insert(0, other)
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="final selected capacity is missing, ambiguous, or changed",
+    ):
+        reader()
+
+
 @pytest.mark.parametrize(
     "capacity_transition_url",
     [
@@ -2126,13 +2198,27 @@ def test_hidden_current_sku_marker_change_does_not_override_visible_configuratio
 
 
 def test_visible_capacity_change_between_price_samples_fails_closed() -> None:
-    with pytest.raises(LayoutRecognitionError):
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="final selected capacity is missing, ambiguous, or changed",
+    ):
         _observe(poll_identity_mode="visible_capacity_changed")
 
 
 def test_ambiguous_visible_color_during_price_sampling_fails_closed() -> None:
-    with pytest.raises(LayoutRecognitionError):
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="final selected color is missing, ambiguous, or changed",
+    ):
         _observe(poll_identity_mode="visible_color_ambiguous")
+
+
+def test_matching_detail_title_change_during_price_sampling_fails_closed() -> None:
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="matching detail title changed during result polling",
+    ):
+        _observe(poll_identity_mode="title_changed")
 
 
 def test_click_without_approved_selected_state_fails_closed() -> None:
@@ -2140,7 +2226,7 @@ def test_click_without_approved_selected_state_fails_closed() -> None:
         _observe(selection_mode="never")
 
 
-def test_visible_price_stability_ignores_hidden_price_sku_bindings() -> None:
+def test_old_old_new_new_visible_price_waits_for_post_transition_stability() -> None:
     observation = _observe(
         price_snapshots=(
             ("¥4,099", "¥4,199", "¥9,999"),
@@ -2155,7 +2241,24 @@ def test_visible_price_stability_ignores_hidden_price_sku_bindings() -> None:
             ("123456789018",) * 3,
         ),
     )
-    assert str(observation.price) == "4199"
+    assert str(observation.price) == "4399"
+
+
+def test_multiple_visible_current_price_containers_fail_closed() -> None:
+    html = _live_observed_html()
+    container = re.search(
+        r'<section id="tbpcDetail_SkuPanelRightWrap">.*?</section>',
+        html,
+        flags=re.DOTALL,
+    )
+    assert container is not None
+    html = html.replace(container.group(), container.group() * 2, 1)
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="current selling price container structural element is missing or ambiguous",
+    ):
+        _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
 
 
 def test_stable_visible_price_ignores_permanently_old_hidden_binding() -> None:
@@ -2285,6 +2388,49 @@ def test_visible_sold_out_state_cannot_return_price_without_hidden_bindings() ->
 def test_visible_stock_state_must_stabilize_with_the_price_candidates() -> None:
     with pytest.raises(LayoutRecognitionError):
         _observe(stock_snapshots=("现货", "已售罄", "现货", "已售罄", "现货"))
+
+
+@pytest.mark.parametrize(
+    ("stock_text", "message"),
+    [
+        ("现货 已售罄", "Tmall stock state is conflicting"),
+        ("预计明日更新", "Tmall stock state is unrecognized"),
+        ("", "Tmall stock state is blank"),
+    ],
+)
+def test_visible_stock_text_requires_one_recognized_semantic_family(
+    stock_text: str,
+    message: str,
+) -> None:
+    with pytest.raises(LayoutRecognitionError, match=message) as caught:
+        _observe(stock_snapshots=(stock_text,))
+
+    assert caught.value.stage == "天猫商品详情页"
+
+
+def test_blank_visible_delivery_region_fails_closed() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        '<div class="tmall-delivery-region">福建 &gt; 福州 &gt; 台江</div>',
+        '<div class="tmall-delivery-region"> </div>',
+    )
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="Tmall delivery region is blank",
+    ) as caught:
+        _observe(html=html)
+
+    assert caught.value.stage == "天猫商品详情页"
+
+
+@pytest.mark.parametrize("stock_text", ["现货", "已售罄"])
+def test_recognized_available_and_sold_out_stock_continue_quotation(
+    stock_text: str,
+) -> None:
+    observation = _observe(stock_snapshots=(stock_text,))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.semantic_state.stock_state == stock_text
 
 
 def test_conflicting_available_and_sold_out_stock_states_are_technical() -> None:

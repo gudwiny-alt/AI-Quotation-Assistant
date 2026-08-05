@@ -19,7 +19,6 @@ from quote_app.sites.detail_capture_view import (
     restore_capture_scale,
 )
 from quote_app.sites.locators import (
-    TMALL_CURRENT_SKU_SELLING_PRICES,
     TMALL_DETAIL_SELLER_MARKERS,
     TMALL_DETAIL_TITLES,
     TMALL_DELIVERY_REGIONS,
@@ -78,6 +77,11 @@ _UNAVAILABLE_STOCK_MARKERS = (
     "售罄",
     "已抢光",
     "不可购买",
+)
+_AVAILABLE_STOCK_MARKERS = (
+    "现货",
+    "有货",
+    "库存充足",
 )
 _DISABLED_CLASSES = frozenset(
     {
@@ -186,6 +190,12 @@ _MAX_SELECTION_POLLS = 5
 _MAX_PRICE_POLLS = 5
 _MAX_STORE_READY_POLLS = 10
 _MAX_PRICE_CONTEXT_LENGTH = 1000
+_TMALL_CURRENT_SELLING_PRICE_CONTAINERS = (
+    "#tbpcDetail_SkuPanelRightWrap",
+)
+_TMALL_CURRENT_SELLING_PRICE_VALUES = (
+    '[class^="highlightPrice--"]',
+)
 _POLL_INTERVAL_MS = 100
 _STORE_READY_INTERVAL_MS = 500
 _OBSERVED_SUBSIDY_PRICE_MARKER = "平台加补后"
@@ -220,6 +230,14 @@ _PRICE_STYLE_SCRIPT = """
 class TmallStockSample:
     region: str
     state: str
+
+
+@dataclass(frozen=True, slots=True)
+class TmallVisibleConfigurationEvidence:
+    title: str
+    configuration: tuple[str, str]
+    stock: TmallStockSample
+    price_candidates: tuple[PriceCandidate, ...]
 
 
 class TmallAdapter:
@@ -378,6 +396,12 @@ class TmallAdapter:
             semantic_name="color",
         )
         if _is_explicitly_disabled(color):
+            self._unique_selected_option(
+                capacity_group,
+                TMALL_SKU_VALUES,
+                lambda label: capacity_matches(label, task.ram, task.storage),
+                semantic_name="capacity",
+            )
             self._require_exact_detail_url(browser_page, detail_url)
             return self._legal_no(
                 task,
@@ -524,10 +548,7 @@ class TmallAdapter:
         position_detail_for_capture(
             browser_page,
             title=title,
-            prices=visible_locators(
-                browser_page,
-                TMALL_CURRENT_SKU_SELLING_PRICES,
-            ),
+            prices=self._visible_current_price_locators(browser_page),
             capacity=capacity,
             color=color,
             site_name="Tmall",
@@ -749,8 +770,9 @@ class TmallAdapter:
         )
         self._require_approved_detail_seller(page)
         self._matching_detail_titles(page, task)
+        capacity_group = self._sku_option_group(page, "存储容量")
         capacity = self._exact_option(
-            self._sku_option_group(page, "存储容量"),
+            capacity_group,
             TMALL_SKU_VALUES,
             lambda label: capacity_matches(
                 label,
@@ -777,6 +799,12 @@ class TmallAdapter:
             raise LayoutRecognitionError(
                 "Tmall capacity changed before legal-no capture"
             )
+        self._unique_selected_option(
+            capacity_group,
+            TMALL_SKU_VALUES,
+            lambda label: capacity_matches(label, task.ram, task.storage),
+            semantic_name="capacity",
+        )
         color = self._exact_option(
             self._sku_option_group(page, "机身颜色"),
             TMALL_SKU_VALUES,
@@ -1162,6 +1190,21 @@ class TmallAdapter:
             normalize_product_text(color.inner_text()),
         )
 
+    def _matching_detail_title_snapshot(
+        self,
+        page: Any,
+        task: WebsiteTask,
+    ) -> str:
+        titles = {
+            normalize_product_text(title.inner_text())
+            for title in self._matching_detail_titles(page, task)
+        }
+        if len(titles) != 1:
+            raise LayoutRecognitionError(
+                "Tmall matching detail title is missing or ambiguous"
+            )
+        return next(iter(titles))
+
     def _unique_selected_option(
         self,
         page: Any,
@@ -1187,9 +1230,33 @@ class TmallAdapter:
         region = _unique_visible_locator(
             page, TMALL_DELIVERY_REGIONS, semantic_name="delivery region"
         )
-        return TmallStockSample(
-            region=_normalized_region(region.inner_text()),
-            state=normalize_product_text(state.inner_text()),
+        state_text = normalize_product_text(state.inner_text())
+        if not state_text:
+            raise LayoutRecognitionError("Tmall stock state is blank")
+        is_available = any(
+            marker in state_text for marker in _AVAILABLE_STOCK_MARKERS
+        )
+        is_unavailable = any(
+            marker in state_text for marker in _UNAVAILABLE_STOCK_MARKERS
+        )
+        if is_available and is_unavailable:
+            raise LayoutRecognitionError("Tmall stock state is conflicting")
+        if not is_available and not is_unavailable:
+            raise LayoutRecognitionError("Tmall stock state is unrecognized")
+        region_text = _normalized_region(region.inner_text())
+        if not region_text:
+            raise LayoutRecognitionError("Tmall delivery region is blank")
+        return TmallStockSample(region=region_text, state=state_text)
+
+    def _visible_current_price_locators(self, page: Any) -> tuple[Any, ...]:
+        container = _unique_visible_locator(
+            page,
+            _TMALL_CURRENT_SELLING_PRICE_CONTAINERS,
+            semantic_name="current selling price container",
+        )
+        return visible_locators(
+            container,
+            _TMALL_CURRENT_SELLING_PRICE_VALUES,
         )
 
     def _price_candidates(
@@ -1197,10 +1264,7 @@ class TmallAdapter:
         page: Any,
     ) -> tuple[PriceCandidate, ...]:
         candidates: list[PriceCandidate] = []
-        price_locators = visible_locators(
-            page,
-            TMALL_CURRENT_SKU_SELLING_PRICES,
-        )
+        price_locators = self._visible_current_price_locators(page)
         for locator in price_locators:
             style = locator.evaluate(_PRICE_STYLE_SCRIPT)
             if not isinstance(style, dict):
@@ -1240,33 +1304,54 @@ class TmallAdapter:
             )
         return tuple(candidates)
 
+    def _visible_configuration_evidence(
+        self,
+        page: Any,
+        task: WebsiteTask,
+    ) -> TmallVisibleConfigurationEvidence:
+        return TmallVisibleConfigurationEvidence(
+            title=self._matching_detail_title_snapshot(page, task),
+            configuration=self._selected_configuration_snapshot(page, task),
+            stock=self._visible_stock_sample(page),
+            price_candidates=self._price_candidates(page),
+        )
+
     def _stable_visible_price(
         self,
         page: Any,
         task: WebsiteTask,
         configuration: tuple[str, str],
     ) -> tuple[Decimal, TmallStockSample]:
-        previous: (
-            tuple[
-                tuple[str, str],
-                TmallStockSample,
-                tuple[PriceCandidate, ...],
-            ]
-            | None
-        ) = None
-        for _ in range(_MAX_PRICE_POLLS):
-            snapshot = (
-                self._selected_configuration_snapshot(page, task),
-                self._visible_stock_sample(page),
-                self._price_candidates(page),
+        title = self._matching_detail_title_snapshot(page, task)
+        transition_sample = self._visible_configuration_evidence(page, task)
+        if transition_sample.configuration != configuration:
+            raise LayoutRecognitionError(
+                "Tmall selected visible configuration changed during result polling"
             )
-            if snapshot[0] != configuration:
+        if transition_sample.title != title:
+            raise LayoutRecognitionError(
+                "Tmall matching detail title changed during result polling"
+            )
+        page.wait_for_timeout(_POLL_INTERVAL_MS)
+        self._raise_if_blocked_or_error(page)
+
+        previous: TmallVisibleConfigurationEvidence | None = None
+        for _ in range(_MAX_PRICE_POLLS - 1):
+            snapshot = self._visible_configuration_evidence(page, task)
+            if snapshot.configuration != configuration:
                 raise LayoutRecognitionError(
                     "Tmall selected visible configuration changed during result polling"
                 )
-            selected = choose_price(snapshot[2], self.spec.price_policy)
+            if snapshot.title != title:
+                raise LayoutRecognitionError(
+                    "Tmall matching detail title changed during result polling"
+                )
+            selected = choose_price(
+                snapshot.price_candidates,
+                self.spec.price_policy,
+            )
             if selected is not None and snapshot == previous:
-                return selected, snapshot[1]
+                return selected, snapshot.stock
             previous = snapshot
             page.wait_for_timeout(_POLL_INTERVAL_MS)
             self._raise_if_blocked_or_error(page)
