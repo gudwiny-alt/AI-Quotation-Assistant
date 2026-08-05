@@ -431,6 +431,29 @@ class _FixturePage:
                 if "data-current-sku" in node.attrs
             )
             marker.attrs["data-current-sku"] = "999999999999"
+        if self.poll_waits == 0 and self.poll_identity_mode in {
+            "visible_capacity_changed",
+            "visible_color_ambiguous",
+        }:
+            options = [
+                node
+                for node in self.root.descendants()
+                if any(
+                    class_name.startswith(("tmall-option", "valueItem--"))
+                    for class_name in node.attrs.get("class", "").split()
+                )
+            ]
+            if self.poll_identity_mode == "visible_capacity_changed":
+                next(node for node in options if node.text == "12GB + 256GB").attrs[
+                    "aria-selected"
+                ] = "false"
+                next(node for node in options if node.text == "8GB + 256GB").attrs[
+                    "aria-selected"
+                ] = "true"
+            else:
+                next(node for node in options if node.text == "白色").attrs[
+                    "aria-selected"
+                ] = "true"
         self.poll_waits += 1
 
     def evaluate(
@@ -784,6 +807,14 @@ def _honor_power2_result_url() -> str:
     )
 
 
+def _without_hidden_sku_bindings(html: str) -> str:
+    return re.sub(
+        r'\sdata-(?:sku|context-sku|current-sku)="[^"]*"',
+        "",
+        html,
+    )
+
+
 def test_live_observed_store_search_results_and_product_selectors_drive_path() -> None:
     html = _live_observed_html().replace(
         "item.htm?id=123456789018",
@@ -832,6 +863,30 @@ def test_honor_power2_marketing_detail_title_reaches_price_and_capture_stage() -
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.capture_scales == [0.8]
+
+
+def test_honor_power2_uses_stable_visible_configuration_without_hidden_sku_attributes(
+) -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    html = html.replace(
+        '<h1 class="ItemTitle--fixture">荣耀Power2</h1>',
+        '<h1 class="ItemTitle--fixture">'
+        '【政府补贴15%】HONOR/荣耀Power2智能手机10080mAh官方旗舰店'
+        "</h1>",
+    )
+    html = _without_hidden_sku_bindings(html)
+    task = _task(brand="HONOR", model_name="荣耀Power2")
+    page = _FixturePage(html=html, after_search_url=_honor_power2_result_url())
+    adapter = TmallAdapter(_honor_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price is not None
 
 
 def test_honor_power2_variant_detail_title_does_not_match_power2_task() -> None:
@@ -1882,41 +1937,34 @@ def test_unavailable_class_or_attribute_is_required_for_legal_disabled_state() -
 
 
 @pytest.mark.parametrize(
-    ("fixture", "binding", "replacement"),
+    ("fixture", "outcome"),
     [
         (
             "capacity_disabled.html",
-            'data-sku="123456789018" style=',
-            "style=",
+            BusinessOutcome.CAPACITY_UNAVAILABLE,
         ),
         (
             "color_disabled.html",
-            'data-sku="123456789018" data-context-sku="123456789018" style=',
-            'data-context-sku="123456789018" style=',
+            BusinessOutcome.COLOR_UNAVAILABLE,
         ),
     ],
 )
-def test_unavailable_variant_requires_exact_target_sku_binding(
+def test_unavailable_variant_uses_visible_disabled_option_without_hidden_binding(
     fixture: str,
-    binding: str,
-    replacement: str,
+    outcome: BusinessOutcome,
 ) -> None:
-    html = (FIXTURES / fixture).read_text("utf-8").replace(
-        binding,
-        replacement,
-        1,
+    html = _without_hidden_sku_bindings(
+        (FIXTURES / fixture).read_text("utf-8")
     )
-    assert html != (FIXTURES / fixture).read_text("utf-8")
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html)
+    assert _observe(html=html).outcome is outcome
 
 
 @pytest.mark.parametrize(
     "replacement",
     ['data-context-sku="999999999999"', ""],
 )
-def test_color_unavailable_requires_confirmed_capacity_context(
+def test_color_unavailable_ignores_hidden_capacity_context(
     replacement: str,
 ) -> None:
     html = (FIXTURES / "color_disabled.html").read_text("utf-8").replace(
@@ -1924,8 +1972,7 @@ def test_color_unavailable_requires_confirmed_capacity_context(
         f"{replacement} style=",
         1,
     )
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html)
+    assert _observe(html=html).outcome is BusinessOutcome.COLOR_UNAVAILABLE
 
 
 @pytest.mark.parametrize(
@@ -1955,7 +2002,7 @@ def test_normal_selects_exact_variant_and_highest_bound_selling_price() -> None:
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert str(observation.price) == "4399"
     assert observation.css_rectangles == ()
-    assert observation.semantic_state.current_sku == "123456789018"
+    assert observation.semantic_state.current_sku == "visible:12GB + 256GB|黑色"
     assert observation.semantic_state.region == "福建>福州>台江"
     assert observation.semantic_state.stock_state == "现货"
 
@@ -2039,20 +2086,15 @@ def test_async_selected_state_is_confirmed() -> None:
     assert _observe(selection_mode="async").outcome is BusinessOutcome.PRICE_FOUND
 
 
-def test_capacity_context_can_update_asynchronously_before_color_is_read() -> None:
-    page = _FixturePage(capacity_context_mode="async")
+@pytest.mark.parametrize("capacity_context_mode", ["async", "never"])
+def test_hidden_capacity_context_does_not_gate_visible_color_selection(
+    capacity_context_mode: str,
+) -> None:
+    page = _FixturePage(capacity_context_mode=capacity_context_mode)
 
     observation = TmallAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert not page.color_access_before_capacity_context
-
-
-def test_capacity_context_that_never_updates_fails_before_color_is_read() -> None:
-    page = _FixturePage(capacity_context_mode="never")
-    with pytest.raises(LayoutRecognitionError):
-        TmallAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
-    assert not page.color_access_before_capacity_context
 
 
 def test_rerendered_exact_selected_options_replace_stale_locators() -> None:
@@ -2068,19 +2110,29 @@ def test_rerendered_exact_selected_options_replace_stale_locators() -> None:
         "capacity_deselected",
         "multiple_capacity_selected",
         "capacity_text_changed",
-        "color_context_changed",
     ],
 )
-def test_final_selected_dom_must_remain_unique_exact_and_context_bound(
+def test_final_selected_dom_must_remain_unique_and_exact(
     final_selection_mode: str,
 ) -> None:
     with pytest.raises(LayoutRecognitionError):
         _observe(final_selection_mode=final_selection_mode)
 
 
-def test_each_stock_price_snapshot_revalidates_current_selected_sku_chain() -> None:
+def test_hidden_current_sku_marker_change_does_not_override_visible_configuration() -> None:
+    observation = _observe(poll_identity_mode="current_sku_changed")
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_visible_capacity_change_between_price_samples_fails_closed() -> None:
     with pytest.raises(LayoutRecognitionError):
-        _observe(poll_identity_mode="current_sku_changed")
+        _observe(poll_identity_mode="visible_capacity_changed")
+
+
+def test_ambiguous_visible_color_during_price_sampling_fails_closed() -> None:
+    with pytest.raises(LayoutRecognitionError):
+        _observe(poll_identity_mode="visible_color_ambiguous")
 
 
 def test_click_without_approved_selected_state_fails_closed() -> None:
@@ -2088,7 +2140,7 @@ def test_click_without_approved_selected_state_fails_closed() -> None:
         _observe(selection_mode="never")
 
 
-def test_old_old_new_new_price_binding_waits_for_current_sku() -> None:
+def test_visible_price_stability_ignores_hidden_price_sku_bindings() -> None:
     observation = _observe(
         price_snapshots=(
             ("¥4,099", "¥4,199", "¥9,999"),
@@ -2103,27 +2155,30 @@ def test_old_old_new_new_price_binding_waits_for_current_sku() -> None:
             ("123456789018",) * 3,
         ),
     )
+    assert str(observation.price) == "4199"
+
+
+def test_stable_visible_price_ignores_permanently_old_hidden_binding() -> None:
+    observation = _observe(price_sku_snapshots=(("999999999999",) * 3,) * 5)
+
     assert str(observation.price) == "4399"
 
 
-def test_permanently_old_price_binding_fails_closed() -> None:
-    with pytest.raises(LayoutRecognitionError):
-        _observe(price_sku_snapshots=(("999999999999",) * 3,) * 5)
+@pytest.mark.parametrize(
+    "bindings",
+    [
+        ("123456789018", None, "123456789018"),
+        ("123456789018", "999999999999", "123456789018"),
+    ],
+)
+def test_missing_or_mixed_hidden_price_bindings_do_not_override_visible_price(
+    bindings: tuple[str | None, ...],
+) -> None:
+    observation = _observe(
+        price_sku_snapshots=(bindings,),
+    )
 
-
-def test_missing_or_mixed_price_sku_bindings_fail_closed() -> None:
-    with pytest.raises(LayoutRecognitionError):
-        _observe(
-            price_sku_snapshots=(
-                ("123456789018", None, "123456789018"),
-            )
-        )
-    with pytest.raises(LayoutRecognitionError):
-        _observe(
-            price_sku_snapshots=(
-                ("123456789018", "999999999999", "123456789018"),
-            )
-        )
+    assert str(observation.price) == "4399"
 
 
 def test_price_snapshot_must_stabilize_after_sku_identity() -> None:
@@ -2193,7 +2248,7 @@ def test_missing_or_unbounded_price_context_is_technical(
         _observe(price_context_mode=price_context_mode)
 
 
-def test_no_valid_current_sku_selling_price_is_technical() -> None:
+def test_no_valid_visible_selling_price_is_technical() -> None:
     html = re.sub(
         r'<section class="tmall-current-selling">.*?</section>',
         '<section class="tmall-current-selling">'
@@ -2206,29 +2261,30 @@ def test_no_valid_current_sku_selling_price_is_technical() -> None:
         _observe(html=html)
 
 
-def test_live_product_without_observed_numeric_sku_binding_fails_closed() -> None:
+def test_live_product_without_observed_numeric_sku_binding_uses_visible_state() -> None:
     html = re.sub(
         r' data-(?:current-)?sku="[^"]*"',
         "",
         _live_observed_html(),
     )
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+    observation = _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert str(observation.price) == "4399"
 
 
-def test_sold_out_requires_full_selected_sku_chain() -> None:
-    html = (FIXTURES / "sold_out.html").read_text("utf-8").replace(
-        'data-sku="123456789018" data-context-sku="123456789018">黑色',
-        'data-sku="999999999999" data-context-sku="123456789018">黑色',
+def test_visible_sold_out_state_cannot_return_price_without_hidden_bindings() -> None:
+    html = _without_hidden_sku_bindings(
+        (FIXTURES / "sold_out.html").read_text("utf-8")
     )
     with pytest.raises(LayoutRecognitionError):
         _observe(html=html)
 
 
-def test_late_coarse_sold_out_text_during_price_stability_is_technical() -> None:
+def test_visible_stock_state_must_stabilize_with_the_price_candidates() -> None:
     with pytest.raises(LayoutRecognitionError):
-        _observe(stock_snapshots=("现货", "已售罄"))
+        _observe(stock_snapshots=("现货", "已售罄", "现货", "已售罄", "现货"))
 
 
 def test_conflicting_available_and_sold_out_stock_states_are_technical() -> None:
@@ -2242,8 +2298,8 @@ def test_conflicting_available_and_sold_out_stock_states_are_technical() -> None
         _observe(html=html)
 
 
-@pytest.mark.parametrize("stock_mutation", ["missing", "duplicate", "wrong_sku"])
-def test_current_sku_requires_one_unambiguous_bound_stock_state(
+@pytest.mark.parametrize("stock_mutation", ["missing", "duplicate"])
+def test_visible_stock_state_must_be_unique(
     stock_mutation: str,
 ) -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8")
@@ -2252,11 +2308,18 @@ def test_current_sku_requires_one_unambiguous_bound_stock_state(
         html = html.replace(stock, "")
     elif stock_mutation == "duplicate":
         html = html.replace(stock, stock + stock)
-    else:
-        html = html.replace('data-sku="123456789018">现货</div>', 'data-sku="9">现货</div>')
 
     with pytest.raises(LayoutRecognitionError):
         _observe(html=html)
+
+
+def test_hidden_stock_sku_does_not_override_unique_visible_stock_state() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'data-sku="123456789018">现货</div>',
+        'data-sku="9">现货</div>',
+    )
+
+    assert _observe(html=html).outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_invalid_rectangle_prevents_legal_no() -> None:

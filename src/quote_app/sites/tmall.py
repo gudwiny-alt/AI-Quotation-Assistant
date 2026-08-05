@@ -19,7 +19,6 @@ from quote_app.sites.detail_capture_view import (
     restore_capture_scale,
 )
 from quote_app.sites.locators import (
-    TMALL_CURRENT_SKU_MARKERS,
     TMALL_CURRENT_SKU_SELLING_PRICES,
     TMALL_DETAIL_SELLER_MARKERS,
     TMALL_DETAIL_TITLES,
@@ -79,11 +78,6 @@ _UNAVAILABLE_STOCK_MARKERS = (
     "售罄",
     "已抢光",
     "不可购买",
-)
-_AVAILABLE_STOCK_MARKERS = (
-    "现货",
-    "有货",
-    "库存充足",
 )
 _DISABLED_CLASSES = frozenset(
     {
@@ -361,23 +355,6 @@ class TmallAdapter:
             semantic_name="capacity",
         )
         if _is_explicitly_disabled(capacity):
-            capacity_sku = _required_numeric_sku(
-                capacity.get_attribute("data-sku"),
-                semantic_name="unavailable capacity",
-            )
-            marker = _unique_visible_locator(
-                browser_page,
-                TMALL_CURRENT_SKU_MARKERS,
-                semantic_name="current SKU marker",
-            )
-            current_sku = _required_numeric_sku(
-                marker.get_attribute("data-current-sku"),
-                semantic_name="current SKU marker",
-            )
-            if capacity_sku != current_sku:
-                raise LayoutRecognitionError(
-                    "Tmall unavailable capacity does not bind to the current SKU"
-                )
             self._require_exact_detail_url(browser_page, detail_url)
             return self._legal_no(
                 task,
@@ -388,11 +365,6 @@ class TmallAdapter:
         self._prepare_exact_option(capacity)
         self._wait_for_selected(browser_page, capacity, "capacity")
         self._raise_if_blocked_or_error(browser_page)
-        self._require_exact_detail_url(browser_page, detail_url)
-        capacity_context_sku = self._wait_for_capacity_context(
-            browser_page,
-            capacity,
-        )
         self._require_exact_detail_url(browser_page, detail_url)
 
         color_group = self._sku_option_group(
@@ -405,23 +377,7 @@ class TmallAdapter:
             lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
-        color_context_sku = _required_numeric_sku(
-            color.get_attribute("data-context-sku"),
-            semantic_name="color capacity context",
-        )
-        if color_context_sku != capacity_context_sku:
-            raise LayoutRecognitionError(
-                "Tmall exact color does not bind to the confirmed capacity context"
-        )
         if _is_explicitly_disabled(color):
-            color_sku = _required_numeric_sku(
-                color.get_attribute("data-sku"),
-                semantic_name="unavailable color",
-            )
-            if color_sku != capacity_context_sku:
-                raise LayoutRecognitionError(
-                    "Tmall unavailable color does not bind to the current SKU"
-                )
             self._require_exact_detail_url(browser_page, detail_url)
             return self._legal_no(
                 task,
@@ -434,22 +390,23 @@ class TmallAdapter:
         self._raise_if_blocked_or_error(browser_page)
         self._require_exact_detail_url(browser_page, detail_url)
 
-        current_sku = self._selected_sku_identity(
+        configuration = self._selected_configuration_snapshot(
             browser_page,
             task,
         )
         self._require_exact_detail_url(browser_page, detail_url)
 
-        selected_price, final_stock = self._stable_selected_price(
+        selected_price, final_stock = self._stable_visible_price(
             browser_page,
             task,
-            current_sku,
+            configuration,
         )
-        if self._selected_sku_identity(browser_page, task) != current_sku:
+        if self._selected_configuration_snapshot(browser_page, task) != configuration:
             raise LayoutRecognitionError(
-                "Tmall selected SKU identity changed before the final result"
+                "Tmall selected visible configuration changed before the final result"
             )
         self._require_exact_detail_url(browser_page, detail_url)
+        current_sku = f"visible:{configuration[0]}|{configuration[1]}"
         semantic_state = self._semantic_state(
             task,
             browser_page,
@@ -543,8 +500,13 @@ class TmallAdapter:
             raise LayoutRecognitionError(
                 "Tmall selected configuration changed before formal capture"
             )
-        current_sku = self._selected_sku_identity(browser_page, task)
-        price, stock = self._stable_selected_price(browser_page, task, current_sku)
+        configuration = self._selected_configuration_snapshot(browser_page, task)
+        price, stock = self._stable_visible_price(
+            browser_page,
+            task,
+            configuration,
+        )
+        current_sku = f"visible:{configuration[0]}|{configuration[1]}"
         current = self._semantic_state(
             task,
             browser_page,
@@ -683,19 +645,20 @@ class TmallAdapter:
             )
             self._require_approved_detail_seller(browser_page)
             self._matching_detail_titles(browser_page, task)
-            current_sku = self._selected_sku_identity(
+            configuration = self._selected_configuration_snapshot(
                 browser_page,
                 task,
             )
-            price, stock = self._stable_selected_price(
+            price, stock = self._stable_visible_price(
                 browser_page,
                 task,
-                current_sku,
+                configuration,
             )
             self._require_exact_detail_url(
                 browser_page,
                 expected.canonical_url,
             )
+            current_sku = f"visible:{configuration[0]}|{configuration[1]}"
             current = self._semantic_state(
                 task,
                 browser_page,
@@ -796,24 +759,8 @@ class TmallAdapter:
             ),
             semantic_name="capacity",
         )
-        marker = _unique_visible_locator(
-            page,
-            TMALL_CURRENT_SKU_MARKERS,
-            semantic_name="current SKU marker",
-        )
-        current_sku = _required_numeric_sku(
-            marker.get_attribute("data-current-sku"),
-            semantic_name="current SKU marker",
-        )
-        capacity_sku = _required_numeric_sku(
-            capacity.get_attribute("data-sku"),
-            semantic_name="capacity",
-        )
         if expected.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE:
-            if (
-                not _is_explicitly_disabled(capacity)
-                or capacity_sku != current_sku
-            ):
+            if not _is_explicitly_disabled(capacity):
                 raise LayoutRecognitionError(
                     "Tmall unavailable capacity changed before capture"
                 )
@@ -826,7 +773,6 @@ class TmallAdapter:
         if (
             expected.outcome is not BusinessOutcome.COLOR_UNAVAILABLE
             or not _is_approved_selected(capacity)
-            or capacity_sku != current_sku
         ):
             raise LayoutRecognitionError(
                 "Tmall capacity changed before legal-no capture"
@@ -837,19 +783,7 @@ class TmallAdapter:
             lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
-        color_sku = _required_numeric_sku(
-            color.get_attribute("data-sku"),
-            semantic_name="color",
-        )
-        color_context_sku = _required_numeric_sku(
-            color.get_attribute("data-context-sku"),
-            semantic_name="color capacity context",
-        )
-        if (
-            not _is_explicitly_disabled(color)
-            or color_sku != current_sku
-            or color_context_sku != current_sku
-        ):
+        if not _is_explicitly_disabled(color):
             raise LayoutRecognitionError(
                 "Tmall unavailable color changed before capture"
             )
@@ -1206,38 +1140,11 @@ class TmallAdapter:
             f"Tmall exact {semantic_name} option did not reach a selected state"
         )
 
-    def _wait_for_capacity_context(
-        self,
-        page: Any,
-        capacity: Any,
-    ) -> str:
-        capacity_sku = _required_numeric_sku(
-            capacity.get_attribute("data-sku"),
-            semantic_name="selected capacity",
-        )
-        for _ in range(_MAX_SELECTION_POLLS):
-            marker = _unique_visible_locator(
-                page,
-                TMALL_CURRENT_SKU_MARKERS,
-                semantic_name="current SKU marker",
-            )
-            current_sku = _required_numeric_sku(
-                marker.get_attribute("data-current-sku"),
-                semantic_name="current SKU marker",
-            )
-            if current_sku == capacity_sku:
-                return current_sku
-            page.wait_for_timeout(_POLL_INTERVAL_MS)
-            self._raise_if_blocked_or_error(page)
-        raise LayoutRecognitionError(
-            "Tmall capacity selection did not update the current SKU context"
-        )
-
-    def _selected_sku_identity(
+    def _selected_configuration_snapshot(
         self,
         page: Any,
         task: WebsiteTask,
-    ) -> str:
+    ) -> tuple[str, str]:
         capacity = self._unique_selected_option(
             self._sku_option_group(page, "存储容量"),
             TMALL_SKU_VALUES,
@@ -1250,40 +1157,10 @@ class TmallAdapter:
             lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
-        marker = _unique_visible_locator(
-            page,
-            TMALL_CURRENT_SKU_MARKERS,
-            semantic_name="current SKU marker",
+        return (
+            normalize_product_text(capacity.inner_text()),
+            normalize_product_text(color.inner_text()),
         )
-        current_sku = _required_numeric_sku(
-            marker.get_attribute("data-current-sku"),
-            semantic_name="current SKU marker",
-        )
-        capacity_sku = _required_numeric_sku(
-            capacity.get_attribute("data-sku"),
-            semantic_name="selected capacity",
-        )
-        color_sku = _required_numeric_sku(
-            color.get_attribute("data-sku"),
-            semantic_name="selected color",
-        )
-        color_context_sku = _required_numeric_sku(
-            color.get_attribute("data-context-sku"),
-            semantic_name="selected color capacity context",
-        )
-        if (
-            capacity_sku,
-            color_sku,
-            color_context_sku,
-        ) != (
-            current_sku,
-            current_sku,
-            current_sku,
-        ):
-            raise LayoutRecognitionError(
-                "Tmall selected options do not bind to the current SKU"
-            )
-        return current_sku
 
     def _unique_selected_option(
         self,
@@ -1303,70 +1180,27 @@ class TmallAdapter:
             )
         return selected[0]
 
-    def _require_current_stock_sample(
-        self,
-        page: Any,
-        current_sku: str,
-    ) -> TmallStockSample:
-        states = visible_locators(page, TMALL_STOCK_STATES)
-        if len(states) != 1:
-            raise LayoutRecognitionError(
-                "Tmall current SKU stock state is missing or ambiguous"
-            )
-        state = states[0]
-        stock_sku = _required_numeric_sku(
-            state.get_attribute("data-sku"),
-            semantic_name="stock status",
+    def _visible_stock_sample(self, page: Any) -> TmallStockSample:
+        state = _unique_visible_locator(
+            page, TMALL_STOCK_STATES, semantic_name="stock state"
         )
-        if stock_sku != current_sku:
-            raise LayoutRecognitionError(
-                "Tmall stock state does not bind to the selected SKU"
-            )
-        stock_text = normalize_product_text(state.inner_text())
-        is_available = any(
-            marker in stock_text for marker in _AVAILABLE_STOCK_MARKERS
+        region = _unique_visible_locator(
+            page, TMALL_DELIVERY_REGIONS, semantic_name="delivery region"
         )
-        is_unavailable = any(
-            marker in stock_text for marker in _UNAVAILABLE_STOCK_MARKERS
+        return TmallStockSample(
+            region=_normalized_region(region.inner_text()),
+            state=normalize_product_text(state.inner_text()),
         )
-        if is_available == is_unavailable:
-            raise LayoutRecognitionError(
-                "Tmall current SKU stock state is unrecognized or conflicting"
-            )
-        regions = visible_locators(page, TMALL_DELIVERY_REGIONS)
-        if len(regions) != 1:
-            raise LayoutRecognitionError(
-                "Tmall delivery region is missing or ambiguous"
-            )
-        region_text = _normalized_region(regions[0].inner_text())
-        if not region_text:
-            raise LayoutRecognitionError("Tmall delivery region is blank")
-        return TmallStockSample(region=region_text, state=stock_text)
 
     def _price_candidates(
         self,
         page: Any,
-        current_sku: str,
-    ) -> tuple[PriceCandidate, ...] | None:
+    ) -> tuple[PriceCandidate, ...]:
         candidates: list[PriceCandidate] = []
         price_locators = visible_locators(
             page,
             TMALL_CURRENT_SKU_SELLING_PRICES,
         )
-        price_skus = tuple(
-            _required_numeric_sku(
-                locator.get_attribute("data-sku"),
-                semantic_name="current selling price",
-            )
-            for locator in price_locators
-        )
-        distinct_skus = set(price_skus)
-        if len(distinct_skus) > 1:
-            raise LayoutRecognitionError(
-                "Tmall selling price nodes have conflicting SKU bindings"
-            )
-        if distinct_skus and distinct_skus != {current_sku}:
-            return None
         for locator in price_locators:
             style = locator.evaluate(_PRICE_STYLE_SCRIPT)
             if not isinstance(style, dict):
@@ -1406,42 +1240,34 @@ class TmallAdapter:
             )
         return tuple(candidates)
 
-    def _stable_selected_price(
+    def _stable_visible_price(
         self,
         page: Any,
         task: WebsiteTask,
-        current_sku: str,
+        configuration: tuple[str, str],
     ) -> tuple[Decimal, TmallStockSample]:
-        previous: tuple[PriceCandidate, ...] | None = None
-        previous_stock: TmallStockSample | None = None
+        previous: (
+            tuple[
+                tuple[str, str],
+                TmallStockSample,
+                tuple[PriceCandidate, ...],
+            ]
+            | None
+        ) = None
         for _ in range(_MAX_PRICE_POLLS):
-            if self._selected_sku_identity(page, task) != current_sku:
-                raise LayoutRecognitionError(
-                    "Tmall selected SKU identity changed during result polling"
-                )
-            stock = self._require_current_stock_sample(
-                page,
-                current_sku,
+            snapshot = (
+                self._selected_configuration_snapshot(page, task),
+                self._visible_stock_sample(page),
+                self._price_candidates(page),
             )
-            if previous_stock is not None and stock != previous_stock:
+            if snapshot[0] != configuration:
                 raise LayoutRecognitionError(
-                    "Tmall stock state changed during final price sampling"
+                    "Tmall selected visible configuration changed during result polling"
                 )
-            candidates = self._price_candidates(page, current_sku)
-            if candidates is None:
-                previous = None
-                page.wait_for_timeout(_POLL_INTERVAL_MS)
-                self._raise_if_blocked_or_error(page)
-                continue
-            selected = choose_price(candidates, self.spec.price_policy)
-            if selected is not None and candidates == previous:
-                if self._selected_sku_identity(page, task) != current_sku:
-                    raise LayoutRecognitionError(
-                        "Tmall selected SKU identity changed before price result"
-                    )
-                return selected, stock
-            previous = candidates
-            previous_stock = stock
+            selected = choose_price(snapshot[2], self.spec.price_policy)
+            if selected is not None and snapshot == previous:
+                return selected, snapshot[1]
+            previous = snapshot
             page.wait_for_timeout(_POLL_INTERVAL_MS)
             self._raise_if_blocked_or_error(page)
         raise LayoutRecognitionError(
@@ -1891,17 +1717,6 @@ def _required_entry_host(entry_url: str) -> str:
     if hostname is None:
         raise LayoutRecognitionError("Tmall approved store hostname is missing")
     return hostname.lower()
-
-
-def _required_numeric_sku(raw_sku: object, *, semantic_name: str) -> str:
-    if (
-        not isinstance(raw_sku, str)
-        or _NUMERIC_SKU.fullmatch(raw_sku.strip()) is None
-    ):
-        raise LayoutRecognitionError(
-            f"Tmall {semantic_name} SKU binding is missing or invalid"
-        )
-    return raw_sku.strip()
 
 
 def _first_visible_product_title(
