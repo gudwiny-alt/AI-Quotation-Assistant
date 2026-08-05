@@ -44,6 +44,7 @@ from quote_app.evidence.platform import (
 from quote_app.evidence.semantic_state import VerifiedSemanticState
 from quote_app.evidence.models import EvidenceState, MacCapturePolicy
 from quote_app.sites.catalog import SiteSpec, load_site_catalog
+from quote_app.sites.detail_capture_view import CaptureViewGeometryError
 from quote_app.sites.official import OfficialSiteAdapter
 from quote_app.tasks.models import BusinessOutcome, WebsiteChannel, WebsiteTask
 from quote_app.tasks.retry import (
@@ -2543,7 +2544,23 @@ class _FailingCaptureGeometryAdapter(_CapturePreparedAdapter):
         expected: VerifiedSemanticState,
     ) -> tuple[CssRect, ...]:
         del task, page, expected
-        raise LayoutRecognitionError("fixture final geometry failed")
+        raise CaptureViewGeometryError(
+            "fixture final geometry failed",
+            safe_stage="结果区域定位",
+        )
+
+
+class _FailingSemanticCaptureRectangleAdapter(_CapturePreparedAdapter):
+    def capture_rectangles_for_capture(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> tuple[CssRect, ...]:
+        del task, page, expected
+        raise LayoutRecognitionError(
+            "JD exact product appeared before no-model capture"
+        )
 
 
 class _SecurityBlockedCaptureAdapter(_VerifiedAdapter):
@@ -2803,7 +2820,10 @@ def test_capture_preparation_layout_failure_preserves_retryable_safe_stage(
 ) -> None:
     adapter = _FailingCapturePreparationAdapter(
         _site_spec(WebsiteChannel.JD),
-        LayoutRecognitionError(layout_message),
+        CaptureViewGeometryError(
+            layout_message,
+            safe_stage=safe_stage,
+        ),
     )
     runtime = MacFormalCaptureRuntime(
         sampler=_Sampler([]),
@@ -2845,6 +2865,70 @@ def test_capture_rectangle_layout_failure_preserves_result_region_stage() -> Non
 
     assert captured.value.code == "CAPTURE_GEOMETRY"
     assert "结果区域定位" in captured.value.message
+
+
+@pytest.mark.parametrize(
+    ("layout_message", "safe_stage"),
+    [
+        ("JD no-model search URL changed before capture", "URL复核"),
+        ("JD approved store identity is missing", "店铺复核"),
+        (
+            "JD exact product appeared before no-model capture",
+            "商品结果复核",
+        ),
+        ("fixture semantic layout failed", "页面语义复核"),
+    ],
+)
+def test_semantic_capture_preparation_failure_remains_precise_environment_error(
+    layout_message: str,
+    safe_stage: str,
+) -> None:
+    adapter = _FailingCapturePreparationAdapter(
+        _site_spec(WebsiteChannel.JD),
+        LayoutRecognitionError(layout_message),
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    with pytest.raises(NonRetryableEvidenceCaptureError) as captured:
+        runtime.capture_context_provider(
+            _task(channel=WebsiteChannel.JD),
+            object(),
+            _state(canonical_url="https://example.test/jd/item-1"),
+        )
+
+    assert captured.value.code == "CAPTURE_ENVIRONMENT"
+    assert safe_stage in captured.value.message
+    assert "结果区域定位" not in captured.value.message
+
+
+def test_semantic_capture_rectangle_failure_remains_product_review_environment_error() -> None:
+    adapter = _FailingSemanticCaptureRectangleAdapter(
+        _site_spec(WebsiteChannel.JD)
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    with pytest.raises(NonRetryableEvidenceCaptureError) as captured:
+        runtime.capture_context_provider(
+            _task(channel=WebsiteChannel.JD),
+            object(),
+            _state(canonical_url="https://example.test/jd/item-1"),
+        )
+
+    assert captured.value.code == "CAPTURE_ENVIRONMENT"
+    assert "商品结果复核" in captured.value.message
+    assert "结果区域定位" not in captured.value.message
 
 
 @pytest.mark.parametrize(

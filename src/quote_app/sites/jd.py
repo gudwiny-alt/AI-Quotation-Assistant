@@ -13,6 +13,7 @@ from quote_app.evidence.platform import PlatformEvidenceCapture
 from quote_app.evidence.semantic_state import VerifiedSemanticState
 from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.detail_capture_view import (
+    CaptureViewGeometryError,
     apply_capture_scale,
     position_detail_for_capture,
     position_result_cards_for_capture,
@@ -909,20 +910,26 @@ class JDAdapter:
         if expected.outcome is not BusinessOutcome.NO_MODEL:
             return expected.css_rectangles
         self._read_legal_no_state(task, browser_page, expected)
-        result_region = unique_visible_locator(
-            browser_page,
-            JD_RESULT_REGIONS,
-            semantic_name="result region",
-        )
+        try:
+            result_region = unique_visible_locator(
+                browser_page,
+                JD_RESULT_REGIONS,
+                semantic_name="result region",
+            )
+        except LayoutRecognitionError as error:
+            raise CaptureViewGeometryError(
+                "JD result region is unavailable for capture",
+                safe_stage="结果区域定位",
+            ) from error
         result_search_input = self._validated_result_search_input(
             browser_page,
             task.model_name,
         )
         if result_search_input is None:
-            return (_css_rect(result_region, "result_region"),)
+            return (_capture_css_rect(result_region, "result_region"),)
         return (
-            _css_rect(result_search_input, "search_keyword"),
-            _css_rect(result_region, "result_region"),
+            _capture_css_rect(result_search_input, "search_keyword"),
+            _capture_css_rect(result_region, "result_region"),
         )
 
     def prepare_capture_view(
@@ -935,8 +942,8 @@ class JDAdapter:
 
         self._validate_task(task)
         browser_page = _playwright_page(page)
-        apply_capture_scale(browser_page, scale=0.8)
         try:
+            apply_capture_scale(browser_page, scale=0.8)
             for attempt in range(2):
                 try:
                     self._prepare_capture_view_at_scale(
@@ -945,7 +952,7 @@ class JDAdapter:
                         expected,
                     )
                     return
-                except LayoutRecognitionError:
+                except CaptureViewGeometryError:
                     if attempt == 1:
                         raise
                     restore_capture_scale(browser_page)
@@ -983,8 +990,9 @@ class JDAdapter:
                 task.model_name,
             )
             if result_search_input is None:
-                raise LayoutRecognitionError(
-                    "JD no-model search keyword is not visible for capture"
+                raise CaptureViewGeometryError(
+                    "JD no-model search keyword is not visible for capture",
+                    safe_stage="搜索框定位",
                 )
             product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
             empty_states = visible_locators(result_region, JD_EMPTY_RESULTS)
@@ -1114,7 +1122,7 @@ class JDAdapter:
                 JD_RESULT_REGIONS,
                 semantic_name="result region",
             )
-            result_search_input = self._validated_result_search_input(
+            self._validated_result_search_input(
                 page,
                 task.model_name,
             )
@@ -1141,12 +1149,7 @@ class JDAdapter:
                 raise LayoutRecognitionError(
                     "JD no-model result became conflicting before capture"
                 )
-            return self._no_model_observation(
-                task,
-                page,
-                result_region,
-                result_search_input,
-            ).semantic_state
+            return expected
 
         canonical_url = _approved_item_url(
             page.url,
@@ -2395,3 +2398,15 @@ def _css_rect(locator: Any, role: str) -> CssRect:
         )
     except ValueError as error:
         raise LayoutRecognitionError("JD evidence rectangle is invalid") from error
+
+
+def _capture_css_rect(locator: Any, role: str) -> CssRect:
+    try:
+        return _css_rect(locator, role)
+    except LayoutRecognitionError as error:
+        raise CaptureViewGeometryError(
+            str(error),
+            safe_stage=(
+                "搜索框定位" if role == "search_keyword" else "结果区域定位"
+            ),
+        ) from error

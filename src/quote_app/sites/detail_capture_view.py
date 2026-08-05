@@ -29,6 +29,9 @@ _IN_VIEWPORT = """
 _POSITION_WAIT_MS = 300
 _CAPTURE_SCALE_WAIT_MS = 300
 _CAPTURE_SCALE_ATTRIBUTE = "data-quotation-capture-scale-original"
+_CAPTURE_VIEW_SAFE_STAGES = frozenset(
+    {"缩放验证", "搜索框定位", "结果区域定位"}
+)
 _APPLY_CAPTURE_SCALE = f"""
 (scale) => {{
   const root = document.documentElement;
@@ -76,6 +79,16 @@ class CaptureScaleProof:
     sample_count: int
 
 
+class CaptureViewGeometryError(LayoutRecognitionError):
+    """A proven capture-only scale or viewport geometry failure."""
+
+    def __init__(self, message: str, *, safe_stage: str) -> None:
+        if safe_stage not in _CAPTURE_VIEW_SAFE_STAGES:
+            raise ValueError("capture view safe stage is not approved")
+        self.safe_stage = safe_stage
+        super().__init__(message)
+
+
 def apply_capture_scale(page: Any, *, scale: float) -> CaptureScaleProof:
     """Apply one reversible visual scale for the pending formal capture."""
 
@@ -89,8 +102,9 @@ def apply_capture_scale(page: Any, *, scale: float) -> CaptureScaleProof:
         inline_zoom == scale and computed_zoom == scale
         for inline_zoom, computed_zoom in samples
     ):
-        raise LayoutRecognitionError(
-            f"capture scale {scale} did not become visually stable"
+        raise CaptureViewGeometryError(
+            f"capture scale {scale} did not become visually stable",
+            safe_stage="缩放验证",
         )
     inline_zoom, computed_zoom = samples[-1]
     return CaptureScaleProof(
@@ -105,7 +119,10 @@ def restore_capture_scale(page: Any) -> None:
 
     restored = page.evaluate(_RESTORE_CAPTURE_SCALE)
     if restored is not True:
-        raise LayoutRecognitionError("capture scale could not be restored")
+        raise CaptureViewGeometryError(
+            "capture scale could not be restored",
+            safe_stage="缩放验证",
+        )
     page.wait_for_timeout(_CAPTURE_SCALE_WAIT_MS)
 
 
@@ -127,8 +144,9 @@ def position_detail_for_capture(
     """
 
     if not prices:
-        raise LayoutRecognitionError(
-            f"{site_name} product detail has no visible selling price for capture"
+        raise CaptureViewGeometryError(
+            f"{site_name} product detail has no visible selling price for capture",
+            safe_stage="结果区域定位",
         )
 
     # Capacity is the lowest required SKU field on the current marketplace
@@ -138,16 +156,20 @@ def position_detail_for_capture(
     capacity.evaluate(_CENTER_IN_NEAREST_SCROLL_AREA)
     page.wait_for_timeout(_POSITION_WAIT_MS)
     if (
-        _in_viewport(title)
-        and any(_in_viewport(price) for price in prices)
-        and _in_viewport(capacity)
-        and _in_viewport(color)
+        _in_viewport(title, safe_stage="结果区域定位")
+        and any(
+            _in_viewport(price, safe_stage="结果区域定位")
+            for price in prices
+        )
+        and _in_viewport(capacity, safe_stage="结果区域定位")
+        and _in_viewport(color, safe_stage="结果区域定位")
     ):
         return
 
-    raise LayoutRecognitionError(
+    raise CaptureViewGeometryError(
         f"{site_name} detail capture requires title, price, capacity and color "
-        "in the same viewport"
+        "in the same viewport",
+        safe_stage="结果区域定位",
     )
 
 
@@ -175,15 +197,21 @@ def position_result_cards_for_capture(
         if prefer_search_anchor and search_input is not None:
             search_input.evaluate(_ALIGN_SEARCH_TO_VIEWPORT_TOP)
             page.wait_for_timeout(_POSITION_WAIT_MS)
-        if search_input is not None and not _in_viewport(search_input):
-            raise LayoutRecognitionError(
-                f"{site_name} no-model search input is not visible for capture"
+        if search_input is not None and not _in_viewport(
+            search_input,
+            safe_stage="搜索框定位",
+        ):
+            raise CaptureViewGeometryError(
+                f"{site_name} no-model search input is not visible for capture",
+                safe_stage="搜索框定位",
             )
         if prefer_search_anchor and (
-            empty_state is None or not _in_viewport(empty_state)
+            empty_state is None
+            or not _in_viewport(empty_state, safe_stage="结果区域定位")
         ):
-            raise LayoutRecognitionError(
-                f"{site_name} no-model empty state is not visible for capture"
+            raise CaptureViewGeometryError(
+                f"{site_name} no-model empty state is not visible for capture",
+                safe_stage="结果区域定位",
             )
         return
     # JD's no-model screenshot must establish the searched keyword first while
@@ -194,23 +222,32 @@ def position_result_cards_for_capture(
         # The default result-card framing retains Tmall's existing behavior.
         product_card.evaluate(_ALIGN_RESULT_CARD_TO_VIEWPORT_BOTTOM)
     page.wait_for_timeout(_POSITION_WAIT_MS)
-    if search_input is not None and not _in_viewport(search_input):
-        raise LayoutRecognitionError(
-            f"{site_name} no-model search input is not visible for capture"
+    if search_input is not None and not _in_viewport(
+        search_input,
+        safe_stage="搜索框定位",
+    ):
+        raise CaptureViewGeometryError(
+            f"{site_name} no-model search input is not visible for capture",
+            safe_stage="搜索框定位",
         )
     if product_name_reader is not None:
         product_name = product_name_reader()
-    if product_name is None or not _in_viewport(product_name):
-        raise LayoutRecognitionError(
-            f"{site_name} no-model product card name is not visible for capture"
+    if product_name is None or not _in_viewport(
+        product_name,
+        safe_stage="结果区域定位",
+    ):
+        raise CaptureViewGeometryError(
+            f"{site_name} no-model product card name is not visible for capture",
+            safe_stage="结果区域定位",
         )
 
 
-def _in_viewport(locator: Any) -> bool:
+def _in_viewport(locator: Any, *, safe_stage: str) -> bool:
     value = locator.evaluate(_IN_VIEWPORT)
     if type(value) is not bool:
-        raise LayoutRecognitionError(
-            "detail capture viewport state is unavailable"
+        raise CaptureViewGeometryError(
+            "detail capture viewport state is unavailable",
+            safe_stage=safe_stage,
         )
     return value
 

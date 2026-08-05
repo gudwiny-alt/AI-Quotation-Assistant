@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from quote_app.sites.catalog import SUPPORTED_BRANDS, SiteSpec, load_site_catalog
+from quote_app.sites.detail_capture_view import CaptureViewGeometryError
 from quote_app.sites.jd import JDAdapter, _jd_color_matches
 from quote_app.sites.protocol import SiteObservationAdapter
 from quote_app.sites.registry import AdapterRegistry, RegisteredSiteAdapter
@@ -257,6 +258,7 @@ class _FixturePage:
         result_title_after_search_anchor: str | None = None,
         empty_state_in_viewport: bool = True,
         capture_position_failures: int = 0,
+        capture_scale_samples: tuple[tuple[float, float], ...] | None = None,
     ) -> None:
         parser = _DocumentParser()
         parser.feed(html if html is not None else (FIXTURES / fixture).read_text("utf-8"))
@@ -296,6 +298,8 @@ class _FixturePage:
         self.result_title_after_search_anchor = result_title_after_search_anchor
         self.empty_state_in_viewport = empty_state_in_viewport
         self.capture_position_failures = capture_position_failures
+        self.capture_scale_samples = capture_scale_samples
+        self.capture_scale_sample_index = 0
         self.detail_scan_scrolls: list[int] = []
         self.pending_capacity_context: int | None = None
         self.pending_modern_price_update: int | None = None
@@ -493,9 +497,19 @@ class _FixturePage:
                 self.modern_sku_ready_after_scroll = None
 
     def _capture_scale_sample(self) -> dict[str, str]:
+        if self.capture_scale_samples is None:
+            inline_zoom = computed_zoom = self.current_capture_scale
+        else:
+            inline_zoom, computed_zoom = self.capture_scale_samples[
+                min(
+                    self.capture_scale_sample_index,
+                    len(self.capture_scale_samples) - 1,
+                )
+            ]
+        self.capture_scale_sample_index += 1
         return {
-            "inlineZoom": str(self.current_capture_scale),
-            "computedZoom": str(self.current_capture_scale),
+            "inlineZoom": str(inline_zoom),
+            "computedZoom": str(computed_zoom),
         }
 
     @staticmethod
@@ -2448,6 +2462,31 @@ def test_jd_no_model_prepares_a_search_first_result_view_with_readable_card_name
     )
 
 
+def test_jd_restores_original_scale_when_initial_visual_proof_fails() -> None:
+    page = _FixturePage(
+        "no_model.html",
+        capture_scale_samples=((0.8, 1.0), (0.8, 1.0)),
+    )
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    with pytest.raises(
+        CaptureViewGeometryError,
+        match="capture scale 0.8 did not become visually stable",
+    ) as captured:
+        adapter.prepare_capture_view(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale_restore_count == 1
+    assert page.current_capture_scale == 1.0
+    assert captured.value.safe_stage == "缩放验证"
+
+
 def test_jd_no_model_retries_only_capture_preparation_after_positioning_failure() -> None:
     page = _FixturePage(
         "no_model.html",
@@ -2486,6 +2525,62 @@ def test_jd_no_model_retries_only_capture_preparation_after_positioning_failure(
     )
 
 
+@pytest.mark.parametrize(
+    ("failure_kind", "message"),
+    [
+        ("url", "search URL changed"),
+        ("store", "approved store identity is missing"),
+        ("exact-product", "exact product appeared before no-model capture"),
+        ("conflict", "result became conflicting before capture"),
+    ],
+)
+def test_jd_no_model_semantic_failure_does_not_retry_capture_positioning(
+    failure_kind: str,
+    message: str,
+) -> None:
+    html: str | None = None
+    if failure_kind == "conflict":
+        html = (FIXTURES / "no_model.html").read_text("utf-8").replace(
+            '<section id="J_goodsList" '
+            'style="left:10px;top:70px;width:780px;height:360px">',
+            '<section id="J_goodsList" '
+            'style="left:10px;top:70px;width:780px;height:360px">'
+            '<div class="search-empty" hidden>未找到相关商品</div>',
+        )
+    page = _FixturePage("no_model.html", html=html)
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    waits_before = len(page.wait_timeout_milliseconds)
+
+    if failure_kind == "url":
+        page._url = f"{page.url}&page=2"
+    elif failure_kind == "store":
+        titles = _select(page.root.descendants(), "title")
+        assert len(titles) == 1
+        titles[0].text_parts = ["其他店铺 - 京东"]
+    elif failure_kind == "exact-product":
+        result_titles = _select(page.root.descendants(), ".p-name em")
+        assert result_titles
+        result_titles[0].text_parts = ["小米 15 12GB+256GB 手机"]
+    else:
+        empty_states = _select(page.root.descendants(), ".search-empty")
+        assert len(empty_states) == 1
+        empty_states[0].attrs.pop("hidden")
+
+    with pytest.raises(LayoutRecognitionError, match=message):
+        adapter.prepare_capture_view(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+
+    capture_waits = page.wait_timeout_milliseconds[waits_before:]
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale_restore_count == 1
+    assert capture_waits == [300, 300]
+
+
 def test_jd_no_model_rereads_the_first_product_title_after_search_positioning() -> None:
     page = _FixturePage(
         "no_model.html",
@@ -2495,15 +2590,20 @@ def test_jd_no_model_rereads_the_first_product_title_after_search_positioning() 
     adapter = JDAdapter(_xiaomi_spec())
     observation = adapter.observe(task, cast(Any, page))
 
-    with pytest.raises(LayoutRecognitionError, match="before no-model capture"):
+    waits_before = len(page.wait_timeout_milliseconds)
+
+    with pytest.raises(LayoutRecognitionError, match="after no-model positioning"):
         adapter.prepare_capture_view(
             task,
             cast(Any, page),
             observation.semantic_state,
         )
 
-    assert page.capture_scales == [0.8, 0.8]
+    capture_waits = page.wait_timeout_milliseconds[waits_before:]
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale_restore_count == 1
     assert page.capture_view_positions == ["search"]
+    assert 500 not in capture_waits
 
 
 def test_jd_empty_no_model_capture_requires_the_empty_marker_in_viewport() -> None:
@@ -2554,6 +2654,47 @@ def test_jd_no_model_rereads_capture_rectangles_after_result_positioning() -> No
         cast(Any, page),
         observation.semantic_state,
     )() == observation.semantic_state
+
+
+@pytest.mark.parametrize(
+    ("role", "safe_stage"),
+    [
+        ("search_keyword", "搜索框定位"),
+        ("result_region", "结果区域定位"),
+    ],
+)
+def test_jd_no_model_capture_rectangle_failure_has_dedicated_geometry_stage(
+    role: str,
+    safe_stage: str,
+) -> None:
+    page = _FixturePage("no_model.html")
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    if role == "search_keyword":
+        targets = [
+            node
+            for node in page.root.descendants()
+            if node.attrs.get("id") == "key01" and node.visible
+        ]
+    else:
+        targets = _select(page.root.descendants(), "#J_goodsList")
+    assert len(targets) == 1
+    targets[0].attrs["data-invalid-box"] = "true"
+
+    with pytest.raises(CaptureViewGeometryError) as captured:
+        adapter.capture_rectangles_for_capture(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+
+    assert captured.value.safe_stage == safe_stage
 
 
 @pytest.mark.parametrize("result_value", ["小米 14"])
