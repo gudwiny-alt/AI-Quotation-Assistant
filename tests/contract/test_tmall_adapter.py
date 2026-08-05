@@ -265,6 +265,7 @@ class _FixturePage:
         result_region_ready_after: int | None = None,
         detail_ready_after: int | None = None,
         risk_control_ready_after: int | None = None,
+        capture_scale_samples: tuple[tuple[float, float], ...] | None = None,
     ) -> None:
         parser = _DocumentParser()
         source = (
@@ -304,6 +305,9 @@ class _FixturePage:
         self.capture_view_positions: list[str] = []
         self.capture_scales: list[float] = []
         self.capture_scale = 1.0
+        self.capture_scale_restore_count = 0
+        self.capture_scale_samples = capture_scale_samples
+        self.capture_scale_sample_index = 0
         self.scale_restored = False
         self.window_scroll_offsets: list[int] = []
         self.wait_timeout_milliseconds: list[float] = []
@@ -485,18 +489,32 @@ class _FixturePage:
         ):
             if "root.removeAttribute" in script:
                 self.capture_scale = 1.0
+                self.capture_scale_restore_count += 1
                 self.scale_restored = True
                 return True
             if value is not None:
                 self.capture_scale = value
                 self.capture_scales.append(value)
-            return {
-                "inlineZoom": self.capture_scale,
-                "computedZoom": self.capture_scale,
-            }
+            return self._capture_scale_sample()
         if script == "() => window.scrollBy(0, -120)":
             self.window_scroll_offsets.append(-120)
         return None
+
+    def _capture_scale_sample(self) -> dict[str, float]:
+        if self.capture_scale_samples is None:
+            inline_zoom = computed_zoom = self.capture_scale
+        else:
+            inline_zoom, computed_zoom = self.capture_scale_samples[
+                min(
+                    self.capture_scale_sample_index,
+                    len(self.capture_scale_samples) - 1,
+                )
+            ]
+        self.capture_scale_sample_index += 1
+        return {
+            "inlineZoom": inline_zoom,
+            "computedZoom": computed_zoom,
+        }
 
     def _reveal_delayed_nodes(self, attribute: str, counter: str) -> None:
         remaining = getattr(self, counter)
@@ -1564,6 +1582,49 @@ def test_tmall_no_model_prepares_a_result_view_with_readable_card_names() -> Non
     assert page.scale_restored is True
 
 
+def test_tmall_restores_original_scale_when_initial_visual_proof_fails() -> None:
+    page = _FixturePage(
+        "no_model.html",
+        capture_scale_samples=((0.8, 1.0), (0.8, 1.0)),
+    )
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="capture scale 0.8 did not become visually stable",
+    ):
+        adapter.prepare_capture_view(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale_restore_count == 1
+    assert page.capture_scale == 1.0
+
+
+def test_tmall_semantic_capture_failure_restores_scale_exactly_once() -> None:
+    page = _FixturePage()
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    page._url = "https://detail.tmall.com/item.htm?id=999999999999"
+
+    with pytest.raises(LayoutRecognitionError, match="detail URL changed"):
+        adapter.prepare_capture_view(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale_restore_count == 1
+    assert page.capture_scale == 1.0
+
+
 def test_tmall_no_model_rereads_capture_rectangles_after_result_positioning() -> None:
     page = _FixturePage("no_model.html")
     task = _task()
@@ -2109,9 +2170,12 @@ def test_tmall_positions_the_selected_detail_only_when_formal_capture_is_prepare
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
 
     assert page.capture_scales == [0.8]
+    assert page.capture_scale_restore_count == 0
+    assert page.capture_scale == 0.8
     assert page.capture_view_positions == ["capacity"]
     assert 300 in page.wait_timeout_milliseconds
     adapter.restore_capture_view(task, cast(Any, page), observation.semantic_state)
+    assert page.capture_scale_restore_count == 1
     assert page.scale_restored is True
 
 

@@ -459,8 +459,8 @@ class TmallAdapter:
 
         self._validate_task(task)
         browser_page = _playwright_page(page)
-        apply_capture_scale(browser_page, scale=0.8)
         try:
+            apply_capture_scale(browser_page, scale=0.8)
             self._prepare_capture_view_at_scale(task, browser_page, expected)
         except BaseException:
             try:
