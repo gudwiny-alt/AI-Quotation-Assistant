@@ -1498,6 +1498,14 @@ def _honor_power2_modern_html() -> str:
         1,
     )
     html = html.replace(
+        '      </section>\n'
+        '      <div class="product-price-panel">',
+        '        <div class="specification-item-sku '
+        'specification-item-sku--selected">官方标配</div>\n'
+        '      </section>\n'
+        '      <div class="product-price-panel">',
+    )
+    html = html.replace(
         '<div class="product-price-panel">'
         '<span class="product-price--main">¥4,299</span></div>',
         '<div class="product-price-panel">'
@@ -1508,6 +1516,73 @@ def _honor_power2_modern_html() -> str:
         1,
     )
     return html
+
+
+def test_modern_power2_ignores_selected_official_package_when_binding_visible_configuration() -> None:
+    html = _honor_power2_modern_html().replace(
+        "class='specification-item-sku specification-item-sku--selected'>12GB+256GB",
+        "class='specification-item-sku specification-item-sku--lack'>12GB+256GB",
+        1,
+    )
+    page = _FixturePage(
+        html=html,
+        modern_exclusive_selection=False,
+        modern_price_after_selection=("¥2,466.65", "¥2,999"),
+    )
+    page.after_search_url = (
+        "https://mall.jd.com/view_search-1000000904-99-1-24-1.html"
+        "?keyword=%E8%8D%A3%E8%80%80Power2"
+    )
+    task = _task(
+        brand="HONOR",
+        model_name="荣耀Power2",
+        ram="12GB",
+        storage="256GB",
+        color="幻夜黑",
+    )
+
+    observation = JDAdapter(_honor_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("2999")
+
+
+def test_modern_power2_rejects_duplicate_selected_matching_capacity() -> None:
+    task = _task(
+        ram="12GB",
+        storage="256GB",
+        color="幻夜黑",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="configuration"):
+        JDAdapter._require_exact_modern_configuration(
+            task,
+            (
+                ("12GB+256GB", True),
+                ("12GB+256GB", True),
+                ("幻夜黑", True),
+                ("官方标配", True),
+            ),
+        )
+
+
+def test_modern_power2_rejects_duplicate_selected_matching_colour() -> None:
+    task = _task(
+        ram="12GB",
+        storage="256GB",
+        color="幻夜黑",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="configuration"):
+        JDAdapter._require_exact_modern_configuration(
+            task,
+            (
+                ("12GB+256GB", True),
+                ("幻夜黑", True),
+                ("幻夜黑", True),
+                ("官方标配", True),
+            ),
+        )
 
 
 def test_modern_exact_shortage_capacity_is_clicked_before_price_decision() -> None:
@@ -1540,19 +1615,15 @@ def test_modern_exact_shortage_capacity_is_clicked_before_price_decision() -> No
     assert "click:modern-capacity" in page.option_events
 
 
-def test_modern_dual_selected_capacity_cannot_bind_a_stale_global_price() -> None:
+def test_modern_dual_selected_matching_capacity_cannot_bind_a_stale_global_price() -> None:
     html = _honor_power2_modern_html()
     html = html.replace(
-        "specification-item-sku specification-item-sku--selected'>12GB+256GB",
-        "specification-item-sku specification-item-sku--lack'>12GB+256GB 无货",
-        1,
-    ).replace(
         'specification-item-sku specification-item-sku--lack" '
         'style="left:20px;top:120px;width:150px;height:28px">'
         "16GB+512GB 无货",
         'specification-item-sku specification-item-sku--selected" '
         'style="left:20px;top:120px;width:150px;height:28px">'
-        "16GB+512GB",
+        "12GB+256GB",
         1,
     )
     page = _FixturePage(
@@ -1571,7 +1642,7 @@ def test_modern_dual_selected_capacity_cannot_bind_a_stale_global_price() -> Non
         color="幻夜黑",
     )
 
-    with pytest.raises(LayoutRecognitionError, match="configuration|selected"):
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
         JDAdapter(_honor_spec()).observe(task, cast(Any, page))
 
 
