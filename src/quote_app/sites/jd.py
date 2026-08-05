@@ -17,7 +17,6 @@ from quote_app.sites.detail_capture_view import (
     apply_capture_scale,
     position_detail_for_capture,
     position_result_cards_for_capture,
-    restore_capture_scale,
 )
 from quote_app.sites.locators import (
     JD_CAPACITY_OPTIONS,
@@ -143,7 +142,6 @@ _MAX_DETAIL_READY_POLLS = 30
 _MAX_MODERN_SKU_SCAN_STEPS = 8
 _MAX_SEARCH_URL_POLLS = 20
 _MAX_VERIFIED_STATE_POLLS = 10
-_CAPTURE_PREPARATION_RETRY_WAIT_MS = 500
 _POLL_INTERVAL_MS = 100
 _STORE_READY_INTERVAL_MS = 500
 _MODERN_SELECTION_INTERVAL_MS = 250
@@ -237,6 +235,8 @@ class JDAdapter:
     ) -> AdapterObservation:
         stage = ["京东店铺页"]
         try:
+            browser_page = _playwright_page(page)
+            self._ensure_fixed_scale(browser_page)
             return self._observe_with_stage(task, page, stage)
         except LayoutRecognitionError as error:
             if error.stage is not None:
@@ -275,6 +275,7 @@ class JDAdapter:
     ) -> AdapterObservation:
         browser_page.goto(search_url, wait_until="domcontentloaded")
         browser_page.wait_for_load_state("domcontentloaded")
+        self._ensure_fixed_scale(browser_page)
         self._raise_if_authentication_blocked(browser_page)
         self._wait_for_valid_store_search_url(
             browser_page,
@@ -318,6 +319,7 @@ class JDAdapter:
             detail_url = current_search_result
         else:
             browser_page.goto(self.spec.entry_url, wait_until="domcontentloaded")
+            self._ensure_fixed_scale(browser_page)
             self._raise_if_authentication_blocked(browser_page)
             self._require_approved_store(browser_page)
             detail_url = self._exact_entry_product_url(
@@ -335,6 +337,7 @@ class JDAdapter:
                 search_action,
                 semantic_name="京东店铺搜索",
             )
+            self._ensure_fixed_scale(browser_page)
             self._raise_if_authentication_blocked(browser_page)
             self._wait_for_valid_store_search_url(
                 browser_page,
@@ -409,6 +412,7 @@ class JDAdapter:
     ) -> AdapterObservation:
         browser_page.goto(detail_url, wait_until="domcontentloaded")
         browser_page.wait_for_load_state("domcontentloaded")
+        self._ensure_fixed_scale(browser_page)
         self._raise_if_authentication_blocked(browser_page)
         if _approved_item_url(browser_page.url, base_url=detail_url) != detail_url:
             raise LayoutRecognitionError(
@@ -942,30 +946,7 @@ class JDAdapter:
 
         self._validate_task(task)
         browser_page = _playwright_page(page)
-        try:
-            apply_capture_scale(browser_page, scale=0.8)
-            for attempt in range(2):
-                try:
-                    self._prepare_capture_view_at_scale(
-                        task,
-                        browser_page,
-                        expected,
-                    )
-                    return
-                except CaptureViewGeometryError:
-                    if attempt == 1:
-                        raise
-                    restore_capture_scale(browser_page)
-                    browser_page.wait_for_timeout(
-                        _CAPTURE_PREPARATION_RETRY_WAIT_MS
-                    )
-                    apply_capture_scale(browser_page, scale=0.8)
-        except BaseException:
-            try:
-                restore_capture_scale(browser_page)
-            except Exception:
-                pass
-            raise
+        self._prepare_capture_view_at_scale(task, browser_page, expected)
 
     def _prepare_capture_view_at_scale(
         self,
@@ -1096,14 +1077,20 @@ class JDAdapter:
         page: Any,
         expected: VerifiedSemanticState,
     ) -> None:
-        """Restore the page scale after the runner consumes JD evidence."""
+        """Keep JD at its fixed scale after the runner consumes evidence."""
 
         self._validate_task(task)
         if not isinstance(expected, VerifiedSemanticState):
             raise LayoutRecognitionError(
                 "JD capture state is unavailable for restoration"
             )
-        restore_capture_scale(_playwright_page(page))
+        _playwright_page(page)
+
+    @staticmethod
+    def _ensure_fixed_scale(page: Any) -> None:
+        """Keep the current JD document at the approved 80% scale."""
+
+        apply_capture_scale(page, scale=0.8)
 
     def _read_legal_no_state(
         self,

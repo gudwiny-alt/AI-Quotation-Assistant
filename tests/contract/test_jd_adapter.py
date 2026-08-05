@@ -1264,10 +1264,30 @@ def test_jd_modern_positions_the_selected_detail_only_when_formal_capture_is_pre
 
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
 
-    assert page.capture_scales == [0.8]
+    assert page.current_capture_scale == 0.8
     assert page.capture_view_positions == ["modern-capacity"]
     assert len(page.goto_calls) == goto_count
     assert 300 in page.wait_timeout_milliseconds
+
+
+def test_jd_fixed_scale_is_kept_during_repeated_capture_preparation() -> None:
+    """A screenshot retry must not restore and reapply JD's 80% page scale."""
+
+    page = _FixturePage("no_model.html")
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert page.current_capture_scale == 0.8
+    restores_before_capture = page.capture_scale_restore_count
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    adapter.restore_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert page.current_capture_scale == 0.8
+    assert page.capture_scale_restore_count == restores_before_capture == 0
 
 
 def test_jd_modern_detail_scans_down_before_abandoning_late_sku_options() -> None:
@@ -2483,7 +2503,7 @@ def test_jd_no_model_prepares_a_search_first_result_view_with_readable_card_name
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
 
     assert observation.outcome is BusinessOutcome.NO_MODEL
-    assert page.capture_scales == [0.8]
+    assert page.current_capture_scale == 0.8
     assert page.capture_view_positions == ["search"]
     assert page.search_input_visibility_checks == 1
     assert 300 in page.wait_timeout_milliseconds
@@ -2498,32 +2518,24 @@ def test_jd_no_model_prepares_a_search_first_result_view_with_readable_card_name
     )
 
 
-def test_jd_restores_original_scale_when_initial_visual_proof_fails() -> None:
+def test_jd_rejects_an_unstable_fixed_scale_without_restoring_to_100() -> None:
     page = _FixturePage(
         "no_model.html",
         capture_scale_samples=((0.8, 1.0), (0.8, 1.0)),
     )
     task = _task()
     adapter = JDAdapter(_xiaomi_spec())
-    observation = adapter.observe(task, cast(Any, page))
-
     with pytest.raises(
-        CaptureViewGeometryError,
+        LayoutRecognitionError,
         match="capture scale 0.8 did not become visually stable",
-    ) as captured:
-        adapter.prepare_capture_view(
-            task,
-            cast(Any, page),
-            observation.semantic_state,
-        )
+    ):
+        adapter.observe(task, cast(Any, page))
 
     assert page.capture_scales == [0.8]
-    assert page.capture_scale_restore_count == 1
-    assert page.current_capture_scale == 1.0
-    assert captured.value.safe_stage == "缩放验证"
+    assert page.capture_scale_restore_count == 0
 
 
-def test_jd_no_model_retries_only_capture_preparation_after_positioning_failure() -> None:
+def test_jd_no_model_capture_retry_keeps_the_fixed_scale() -> None:
     page = _FixturePage(
         "no_model.html",
         capture_position_failures=1,
@@ -2539,11 +2551,13 @@ def test_jd_no_model_retries_only_capture_preparation_after_positioning_failure(
 
     adapter.observe = cast(Any, observe_must_not_run)
 
-    adapter.prepare_capture_view(
-        task,
-        cast(Any, page),
-        observation.semantic_state,
-    )
+    with pytest.raises(CaptureViewGeometryError, match="search input"):
+        adapter.prepare_capture_view(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
     rectangles = adapter.capture_rectangles_for_capture(
         task,
         cast(Any, page),
@@ -2552,9 +2566,9 @@ def test_jd_no_model_retries_only_capture_preparation_after_positioning_failure(
 
     assert page.search_submit_count == 0
     assert len(page.goto_calls) == goto_count
-    assert page.capture_scales == [0.8, 0.8]
-    assert page.capture_scale_restore_count == 1
-    assert 500 in page.wait_timeout_milliseconds
+    assert page.current_capture_scale == 0.8
+    assert page.capture_scale_restore_count == 0
+    assert 500 not in page.wait_timeout_milliseconds
     assert tuple(rectangle.role for rectangle in rectangles) == (
         "search_keyword",
         "result_region",
@@ -2612,9 +2626,9 @@ def test_jd_no_model_semantic_failure_does_not_retry_capture_positioning(
         )
 
     capture_waits = page.wait_timeout_milliseconds[waits_before:]
-    assert page.capture_scales == [0.8]
-    assert page.capture_scale_restore_count == 1
-    assert capture_waits == [300, 300]
+    assert page.current_capture_scale == 0.8
+    assert page.capture_scale_restore_count == 0
+    assert capture_waits == []
 
 
 def test_jd_no_model_rereads_the_first_product_title_after_search_positioning() -> None:
@@ -2636,8 +2650,8 @@ def test_jd_no_model_rereads_the_first_product_title_after_search_positioning() 
         )
 
     capture_waits = page.wait_timeout_milliseconds[waits_before:]
-    assert page.capture_scales == [0.8]
-    assert page.capture_scale_restore_count == 1
+    assert page.current_capture_scale == 0.8
+    assert page.capture_scale_restore_count == 0
     assert page.capture_view_positions == ["search"]
     assert 500 not in capture_waits
 
@@ -2665,7 +2679,8 @@ def test_jd_empty_no_model_capture_requires_the_empty_marker_in_viewport() -> No
         )
 
     assert observation.outcome is BusinessOutcome.NO_MODEL
-    assert page.capture_scales == [0.8, 0.8]
+    assert page.current_capture_scale == 0.8
+    assert page.capture_scale_restore_count == 0
 
 
 def test_jd_no_model_rereads_capture_rectangles_after_result_positioning() -> None:
