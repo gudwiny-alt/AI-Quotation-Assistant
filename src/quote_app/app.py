@@ -41,7 +41,7 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "京东固定80%与天猫轻量校验版（全部荣耀行）2026.08.05.43"
+APP_BUILD_LABEL = "京东无报价截图与天猫必要字段校验版（全部荣耀行）2026.08.05.44"
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：荣耀官网首次使用无需预先登录；遇到登录或验证页面时，"
     "完成后点击“继续当前任务”。京东安全验证最多人工重试2次，仍未通过会跳过京东并继续天猫。"
