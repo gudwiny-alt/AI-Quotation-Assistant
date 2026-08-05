@@ -258,6 +258,8 @@ class _FixturePage:
         result_title_after_search_anchor: str | None = None,
         empty_state_in_viewport: bool = True,
         capture_position_failures: int = 0,
+        capture_search_value_ready_after: int | None = None,
+        capture_search_value: str | None = None,
         capture_scale_samples: tuple[tuple[float, float], ...] | None = None,
     ) -> None:
         parser = _DocumentParser()
@@ -298,6 +300,8 @@ class _FixturePage:
         self.result_title_after_search_anchor = result_title_after_search_anchor
         self.empty_state_in_viewport = empty_state_in_viewport
         self.capture_position_failures = capture_position_failures
+        self.capture_search_value_ready_after = capture_search_value_ready_after
+        self.capture_search_value = capture_search_value
         self.capture_scale_samples = capture_scale_samples
         self.capture_scale_sample_index = 0
         self.detail_scan_scrolls: list[int] = []
@@ -399,6 +403,19 @@ class _FixturePage:
 
     def wait_for_timeout(self, _milliseconds: float) -> None:
         self.wait_timeout_milliseconds.append(_milliseconds)
+        if (
+            self._active == "results"
+            and self.capture_search_value_ready_after is not None
+        ):
+            self.capture_search_value_ready_after -= 1
+            if self.capture_search_value_ready_after <= 0:
+                for node in self.root.descendants():
+                    if (
+                        node.attrs.get("id") == "key01"
+                        and node.visible
+                    ):
+                        node.attrs["value"] = self.capture_search_value or ""
+                self.capture_search_value_ready_after = None
         if (
             self._active == "results"
             and self.after_search_urls is not None
@@ -2492,6 +2509,121 @@ def test_no_model_with_visible_result_cards_accepts_approved_query_when_input_is
     assert tuple(rect.role for rect in observation.css_rectangles) == (
         "result_region",
     )
+
+
+def _no_model_html_with_blank_result_search_input() -> str:
+    html = (FIXTURES / "no_model.html").read_text("utf-8")
+    target = (
+        '<input id="key01" value="小米 15" '
+        'style="left:20px;top:20px;width:260px;height:32px">'
+    )
+    position = html.rfind(target)
+    assert position >= 0
+    return html[:position] + html[position:].replace(
+        target,
+        '<input id="key01" value="" '
+        'style="left:20px;top:20px;width:260px;height:32px">',
+        1,
+    )
+
+
+def test_jd_no_model_capture_waits_for_matching_search_input_to_stabilize() -> None:
+    """Capture waits only for JD's empty result input to receive the known query."""
+
+    page = _FixturePage(
+        html=_no_model_html_with_blank_result_search_input(),
+        capture_search_value_ready_after=2,
+        capture_search_value="小米 15",
+    )
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert page.capture_view_positions == ["search"]
+    assert page.wait_timeout_milliseconds.count(250) >= 1
+
+
+def test_jd_no_model_capture_rejects_an_empty_search_input_after_stabilization_timeout() -> None:
+    page = _FixturePage(html=_no_model_html_with_blank_result_search_input())
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    with pytest.raises(CaptureViewGeometryError) as captured:
+        adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert captured.value.safe_stage == "搜索框定位"
+
+
+def test_jd_no_model_capture_rejects_a_nonmatching_search_input_without_waiting() -> None:
+    page = _FixturePage(html=_no_model_html_with_blank_result_search_input())
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    for node in page.root.descendants():
+        if node.attrs.get("id") == "key01" and node.visible:
+            node.attrs["value"] = "小米 14"
+    waits_before = len(page.wait_timeout_milliseconds)
+
+    with pytest.raises(LayoutRecognitionError, match="does not match"):
+        adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert len(page.wait_timeout_milliseconds) == waits_before
+
+
+def test_jd_no_model_capture_rectangles_wait_for_a_late_matching_search_input() -> None:
+    page = _FixturePage(html=_no_model_html_with_blank_result_search_input())
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    for node in page.root.descendants():
+        if node.attrs.get("id") == "key01" and node.visible:
+            node.attrs["value"] = "小米 15"
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    for node in page.root.descendants():
+        if node.attrs.get("id") == "key01" and node.visible:
+            node.attrs["value"] = ""
+    page.capture_search_value_ready_after = 2
+    page.capture_search_value = "小米 15"
+    waits_before = page.wait_timeout_milliseconds.count(250)
+
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    assert page.wait_timeout_milliseconds.count(250) > waits_before
+
+
+def test_jd_no_model_capture_rectangles_reject_an_empty_search_input_after_stabilization_timeout() -> None:
+    page = _FixturePage(html=_no_model_html_with_blank_result_search_input())
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    for node in page.root.descendants():
+        if node.attrs.get("id") == "key01" and node.visible:
+            node.attrs["value"] = "小米 15"
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    for node in page.root.descendants():
+        if node.attrs.get("id") == "key01" and node.visible:
+            node.attrs["value"] = ""
+
+    with pytest.raises(CaptureViewGeometryError) as captured:
+        adapter.capture_rectangles_for_capture(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+
+    assert captured.value.safe_stage == "搜索框定位"
 
 
 def test_jd_no_model_prepares_a_search_first_result_view_with_readable_card_names() -> None:

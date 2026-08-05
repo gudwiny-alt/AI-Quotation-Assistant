@@ -925,12 +925,15 @@ class JDAdapter:
                 "JD result region is unavailable for capture",
                 safe_stage="结果区域定位",
             ) from error
-        result_search_input = self._validated_result_search_input(
+        result_search_input = self._wait_for_capture_search_input(
             browser_page,
             task.model_name,
         )
         if result_search_input is None:
-            return (_capture_css_rect(result_region, "result_region"),)
+            raise CaptureViewGeometryError(
+                "JD no-model search keyword is not visible for capture",
+                safe_stage="搜索框定位",
+            )
         return (
             _capture_css_rect(result_search_input, "search_keyword"),
             _capture_css_rect(result_region, "result_region"),
@@ -966,7 +969,7 @@ class JDAdapter:
                 JD_RESULT_REGIONS,
                 semantic_name="result region",
             )
-            result_search_input = self._validated_result_search_input(
+            result_search_input = self._wait_for_capture_search_input(
                 browser_page,
                 task.model_name,
             )
@@ -1520,6 +1523,19 @@ class JDAdapter:
             raise LayoutRecognitionError(
                 "JD result search keyword does not match the requested model"
             )
+        return None
+
+    def _wait_for_capture_search_input(
+        self,
+        page: Any,
+        model_name: str,
+    ) -> Any | None:
+        for attempt in range(_MAX_VERIFIED_STATE_POLLS):
+            search_input = self._validated_result_search_input(page, model_name)
+            if search_input is not None:
+                return search_input
+            if attempt + 1 < _MAX_VERIFIED_STATE_POLLS:
+                page.wait_for_timeout(_VERIFIED_STATE_INTERVAL_MS)
         return None
 
     def _no_model_observation(
