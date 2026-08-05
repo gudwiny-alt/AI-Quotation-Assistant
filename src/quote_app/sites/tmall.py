@@ -1195,15 +1195,14 @@ class TmallAdapter:
         page: Any,
         task: WebsiteTask,
     ) -> str:
-        titles = {
-            normalize_product_text(title.inner_text())
-            for title in self._matching_detail_titles(page, task)
-        }
-        if len(titles) != 1:
-            raise LayoutRecognitionError(
-                "Tmall matching detail title is missing or ambiguous"
-            )
-        return next(iter(titles))
+        # The result card and approved item URL already bind this detail page
+        # to the requested model.  Tmall may render both a short title and a
+        # longer promotional title for that same item, so their full wording
+        # is not a stable SKU signal.  Retain the fail-closed requirement that
+        # at least one bounded visible title proves the base model, then bind
+        # subsequent stability polls to that normalized model identity.
+        self._matching_detail_titles(page, task)
+        return normalize_product_text(task.model_name)
 
     def _unique_selected_option(
         self,

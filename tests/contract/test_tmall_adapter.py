@@ -1912,6 +1912,25 @@ def test_two_bounded_live_detail_titles_are_accepted_only_when_both_match() -> N
     )
 
 
+def test_multiple_matching_detail_title_wordings_share_one_model_identity() -> None:
+    """A short title and a marketing title may prove the same clicked model."""
+
+    title = '<h1 class="ItemTitle--fixture">小米 15</h1>'
+    html = _live_observed_html().replace(
+        title,
+        title
+        + '<div class="ItemTitle--fixture">'
+        '【政府补贴15%】小米15智能手机官方旗舰店'
+        "</div>",
+        1,
+    )
+
+    observation = _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
+
+
 def test_nonmatching_auxiliary_live_detail_title_does_not_replace_matching_product_title() -> None:
     title = '<h1 class="ItemTitle--fixture">小米 15</h1>'
     html = _live_observed_html().replace(
@@ -2286,12 +2305,11 @@ def test_ambiguous_visible_color_during_price_sampling_fails_closed() -> None:
         _observe(poll_identity_mode="visible_color_ambiguous")
 
 
-def test_matching_detail_title_change_during_price_sampling_fails_closed() -> None:
-    with pytest.raises(
-        LayoutRecognitionError,
-        match="matching detail title changed during result polling",
-    ):
-        _observe(poll_identity_mode="title_changed")
+def test_matching_detail_title_wording_change_keeps_the_verified_model_identity() -> None:
+    observation = _observe(poll_identity_mode="title_changed")
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
 
 
 def test_click_without_approved_selected_state_fails_closed() -> None:
