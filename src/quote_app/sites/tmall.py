@@ -21,7 +21,6 @@ from quote_app.sites.detail_capture_view import (
 from quote_app.sites.locators import (
     TMALL_DETAIL_SELLER_MARKERS,
     TMALL_DETAIL_TITLES,
-    TMALL_DELIVERY_REGIONS,
     TMALL_EMPTY_RESULTS,
     TMALL_LOGIN_MARKERS,
     TMALL_PRODUCT_CARDS,
@@ -35,7 +34,6 @@ from quote_app.sites.locators import (
     TMALL_SKU_GROUPS,
     TMALL_SKU_OPTION_ROOTS,
     TMALL_SKU_VALUES,
-    TMALL_STOCK_STATES,
     TMALL_STORE_MARKERS,
     TMALL_STORE_SEARCH_CONTAINERS,
     TMALL_STORE_SEARCH_FORMS,
@@ -77,11 +75,6 @@ _UNAVAILABLE_STOCK_MARKERS = (
     "售罄",
     "已抢光",
     "不可购买",
-)
-_AVAILABLE_STOCK_MARKERS = (
-    "现货",
-    "有货",
-    "库存充足",
 )
 _DISABLED_CLASSES = frozenset(
     {
@@ -200,6 +193,8 @@ _POLL_INTERVAL_MS = 100
 _STORE_READY_INTERVAL_MS = 500
 _OBSERVED_SUBSIDY_PRICE_MARKER = "平台加补后"
 _STORE_LOGIN_BENEFIT_GATE = "登录后可查看完整店铺优惠权益"
+_TMALL_QUOTATION_REGION = "not-required-for-quotation"
+_TMALL_QUOTATION_STOCK = "not-required-for-quotation"
 _PRICE_STYLE_SCRIPT = """
 (element) => {
   let current = element;
@@ -227,16 +222,9 @@ _PRICE_STYLE_SCRIPT = """
 
 
 @dataclass(frozen=True, slots=True)
-class TmallStockSample:
-    region: str
-    state: str
-
-
-@dataclass(frozen=True, slots=True)
 class TmallVisibleConfigurationEvidence:
     title: str
     configuration: tuple[str, str]
-    stock: TmallStockSample
     price_candidates: tuple[PriceCandidate, ...]
 
 
@@ -420,7 +408,7 @@ class TmallAdapter:
         )
         self._require_exact_detail_url(browser_page, detail_url)
 
-        selected_price, final_stock = self._stable_visible_price(
+        selected_price = self._stable_visible_price(
             browser_page,
             task,
             configuration,
@@ -438,8 +426,8 @@ class TmallAdapter:
             price=selected_price,
             rectangles=(),
             current_sku=current_sku,
-            region=final_stock.region,
-            stock_state=final_stock.state,
+            region=_TMALL_QUOTATION_REGION,
+            stock_state=_TMALL_QUOTATION_STOCK,
         )
         return AdapterObservation(
             outcome=BusinessOutcome.PRICE_FOUND,
@@ -525,7 +513,7 @@ class TmallAdapter:
                 "Tmall selected configuration changed before formal capture"
             )
         configuration = self._selected_configuration_snapshot(browser_page, task)
-        price, stock = self._stable_visible_price(
+        price = self._stable_visible_price(
             browser_page,
             task,
             configuration,
@@ -538,8 +526,8 @@ class TmallAdapter:
             price=price,
             rectangles=(),
             current_sku=current_sku,
-            region=stock.region,
-            stock_state=stock.state,
+            region=_TMALL_QUOTATION_REGION,
+            stock_state=_TMALL_QUOTATION_STOCK,
         )
         if current != expected:
             raise LayoutRecognitionError(
@@ -670,7 +658,7 @@ class TmallAdapter:
                 browser_page,
                 task,
             )
-            price, stock = self._stable_visible_price(
+            price = self._stable_visible_price(
                 browser_page,
                 task,
                 configuration,
@@ -687,8 +675,8 @@ class TmallAdapter:
                 price=price,
                 rectangles=(),
                 current_sku=current_sku,
-                region=stock.region,
-                stock_state=stock.state,
+                region=_TMALL_QUOTATION_REGION,
+                stock_state=_TMALL_QUOTATION_STOCK,
             )
             if current != expected:
                 raise LayoutRecognitionError(
@@ -1222,31 +1210,6 @@ class TmallAdapter:
             )
         return selected[0]
 
-    def _visible_stock_sample(self, page: Any) -> TmallStockSample:
-        state = _unique_visible_locator(
-            page, TMALL_STOCK_STATES, semantic_name="stock state"
-        )
-        region = _unique_visible_locator(
-            page, TMALL_DELIVERY_REGIONS, semantic_name="delivery region"
-        )
-        state_text = normalize_product_text(state.inner_text())
-        if not state_text:
-            raise LayoutRecognitionError("Tmall stock state is blank")
-        is_available = any(
-            marker in state_text for marker in _AVAILABLE_STOCK_MARKERS
-        )
-        is_unavailable = any(
-            marker in state_text for marker in _UNAVAILABLE_STOCK_MARKERS
-        )
-        if is_available and is_unavailable:
-            raise LayoutRecognitionError("Tmall stock state is conflicting")
-        if not is_available and not is_unavailable:
-            raise LayoutRecognitionError("Tmall stock state is unrecognized")
-        region_text = _normalized_region(region.inner_text())
-        if not region_text:
-            raise LayoutRecognitionError("Tmall delivery region is blank")
-        return TmallStockSample(region=region_text, state=state_text)
-
     def _visible_current_price_locators(self, page: Any) -> tuple[Any, ...]:
         container = _unique_visible_locator(
             page,
@@ -1311,7 +1274,6 @@ class TmallAdapter:
         return TmallVisibleConfigurationEvidence(
             title=self._matching_detail_title_snapshot(page, task),
             configuration=self._selected_configuration_snapshot(page, task),
-            stock=self._visible_stock_sample(page),
             price_candidates=self._price_candidates(page),
         )
 
@@ -1320,7 +1282,7 @@ class TmallAdapter:
         page: Any,
         task: WebsiteTask,
         configuration: tuple[str, str],
-    ) -> tuple[Decimal, TmallStockSample]:
+    ) -> Decimal:
         title = self._matching_detail_title_snapshot(page, task)
         transition_sample = self._visible_configuration_evidence(page, task)
         if transition_sample.configuration != configuration:
@@ -1350,7 +1312,7 @@ class TmallAdapter:
                 self.spec.price_policy,
             )
             if selected is not None and snapshot == previous:
-                return selected, snapshot.stock
+                return selected
             previous = snapshot
             page.wait_for_timeout(_POLL_INTERVAL_MS)
             self._raise_if_blocked_or_error(page)
@@ -1410,10 +1372,6 @@ class TmallAdapter:
             outcome=outcome,
             css_rectangles=rectangles,
         )
-
-
-def _normalized_region(value: str) -> str:
-    return normalize_product_text(value).replace(" > ", ">")
 
 
 def _playwright_page(page: BrowserPage) -> Any:

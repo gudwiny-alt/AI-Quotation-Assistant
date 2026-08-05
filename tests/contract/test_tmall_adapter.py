@@ -859,6 +859,16 @@ def _without_hidden_sku_bindings(html: str) -> str:
     )
 
 
+def _normal_html_without_stock_or_delivery_region() -> str:
+    return (FIXTURES / "normal.html").read_text("utf-8").replace(
+        '<div class="tmall-delivery-region">福建 &gt; 福州 &gt; 台江</div>',
+        "",
+    ).replace(
+        '<div class="tmall-stock-status" data-sku="123456789018">现货</div>',
+        "",
+    )
+
+
 def _with_ambiguous_selected_capacity(html: str) -> str:
     return html.replace(
         '<div class="tmall-capacity-options">',
@@ -941,8 +951,8 @@ def test_honor_power2_uses_stable_visible_configuration_without_hidden_sku_attri
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.price == Decimal("4399")
     assert observation.semantic_state.current_sku == "visible:12GB + 256GB|黑色"
-    assert observation.semantic_state.region == "福建>福州>台江"
-    assert observation.semantic_state.stock_state == "现货"
+    assert observation.semantic_state.region == "not-required-for-quotation"
+    assert observation.semantic_state.stock_state == "not-required-for-quotation"
 
 
 def test_honor_power2_variant_detail_title_does_not_match_power2_task() -> None:
@@ -1070,7 +1080,7 @@ def test_tmall_sold_out_selected_sku_with_bound_price_is_quoted() -> None:
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.price == Decimal("4399")
-    assert observation.semantic_state.stock_state == "已售罄"
+    assert observation.semantic_state.stock_state == "not-required-for-quotation"
 
 
 def test_price_found_exposes_a_live_formal_capture_reader() -> None:
@@ -2164,8 +2174,23 @@ def test_normal_selects_exact_variant_and_highest_bound_selling_price() -> None:
     assert str(observation.price) == "4399"
     assert observation.css_rectangles == ()
     assert observation.semantic_state.current_sku == "visible:12GB + 256GB|黑色"
-    assert observation.semantic_state.region == "福建>福州>台江"
-    assert observation.semantic_state.stock_state == "现货"
+    assert observation.semantic_state.region == "not-required-for-quotation"
+    assert observation.semantic_state.stock_state == "not-required-for-quotation"
+
+
+def test_tmall_price_and_capture_do_not_require_stock_or_delivery_region() -> None:
+    html = _normal_html_without_stock_or_delivery_region()
+    page = _FixturePage(html=html)
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
+    assert page.capture_scales == [0.8]
+    assert page.capture_view_positions == ["capacity"]
 
 
 def test_tmall_positions_the_selected_detail_only_when_formal_capture_is_prepared() -> None:
@@ -2476,42 +2501,35 @@ def test_visible_sold_out_state_cannot_return_price_without_hidden_bindings() ->
         _observe(html=html)
 
 
-def test_visible_stock_state_must_stabilize_with_the_price_candidates() -> None:
-    with pytest.raises(LayoutRecognitionError):
-        _observe(stock_snapshots=("现货", "已售罄", "现货", "已售罄", "现货"))
+def test_visible_stock_state_changes_do_not_change_the_price_result() -> None:
+    observation = _observe(
+        stock_snapshots=("现货", "已售罄", "现货", "已售罄", "现货")
+    )
+
+    assert observation.price == Decimal("4399")
 
 
 @pytest.mark.parametrize(
-    ("stock_text", "message"),
+    "stock_text",
     [
-        ("现货 已售罄", "Tmall stock state is conflicting"),
-        ("预计明日更新", "Tmall stock state is unrecognized"),
-        ("", "Tmall stock state is blank"),
+        "现货 已售罄",
+        "预计明日更新",
+        "",
     ],
 )
-def test_visible_stock_text_requires_one_recognized_semantic_family(
+def test_visible_stock_text_does_not_change_the_price_result(
     stock_text: str,
-    message: str,
 ) -> None:
-    with pytest.raises(LayoutRecognitionError, match=message) as caught:
-        _observe(stock_snapshots=(stock_text,))
-
-    assert caught.value.stage == "天猫商品详情页"
+    assert _observe(stock_snapshots=(stock_text,)).price == Decimal("4399")
 
 
-def test_blank_visible_delivery_region_fails_closed() -> None:
+def test_blank_visible_delivery_region_does_not_change_the_price_result() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         '<div class="tmall-delivery-region">福建 &gt; 福州 &gt; 台江</div>',
         '<div class="tmall-delivery-region"> </div>',
     )
 
-    with pytest.raises(
-        LayoutRecognitionError,
-        match="Tmall delivery region is blank",
-    ) as caught:
-        _observe(html=html)
-
-    assert caught.value.stage == "天猫商品详情页"
+    assert _observe(html=html).price == Decimal("4399")
 
 
 @pytest.mark.parametrize("stock_text", ["现货", "已售罄"])
@@ -2521,22 +2539,21 @@ def test_recognized_available_and_sold_out_stock_continue_quotation(
     observation = _observe(stock_snapshots=(stock_text,))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert observation.semantic_state.stock_state == stock_text
+    assert observation.semantic_state.stock_state == "not-required-for-quotation"
 
 
-def test_conflicting_available_and_sold_out_stock_states_are_technical() -> None:
+def test_conflicting_available_and_sold_out_stock_states_do_not_change_price() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         '<div class="tmall-stock-status" data-sku="123456789018">现货</div>',
         '<div class="tmall-stock-status" data-sku="123456789018">现货</div>'
         '<div class="tmall-stock-status" data-sku="123456789018">已售罄</div>',
     )
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html)
+    assert _observe(html=html).price == Decimal("4399")
 
 
 @pytest.mark.parametrize("stock_mutation", ["missing", "duplicate"])
-def test_visible_stock_state_must_be_unique(
+def test_visible_stock_state_presence_does_not_change_price(
     stock_mutation: str,
 ) -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8")
@@ -2546,17 +2563,16 @@ def test_visible_stock_state_must_be_unique(
     elif stock_mutation == "duplicate":
         html = html.replace(stock, stock + stock)
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html)
+    assert _observe(html=html).price == Decimal("4399")
 
 
-def test_hidden_stock_sku_does_not_override_unique_visible_stock_state() -> None:
+def test_hidden_stock_sku_does_not_change_price_result() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         'data-sku="123456789018">现货</div>',
         'data-sku="9">现货</div>',
     )
 
-    assert _observe(html=html).outcome is BusinessOutcome.PRICE_FOUND
+    assert _observe(html=html).price == Decimal("4399")
 
 
 def test_invalid_rectangle_prevents_legal_no() -> None:
