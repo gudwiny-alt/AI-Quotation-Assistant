@@ -17,6 +17,7 @@ class _Page:
         *,
         can_position: bool = True,
         succeeds_at_scale: float = 1.0,
+        scale_samples: tuple[tuple[float, float], ...] | None = None,
     ) -> None:
         self.in_viewport = {
             "title": False,
@@ -35,10 +36,17 @@ class _Page:
         self.current_scale = 1.0
         self.capture_scales: list[float] = []
         self.scale_restored = False
+        self.scale_samples = scale_samples
+        self.scale_sample_index = 0
 
-    def evaluate(self, script: str, value: float | None = None) -> bool:
+    def evaluate(
+        self,
+        script: str,
+        value: float | None = None,
+    ) -> bool | dict[str, str]:
         if "quotation-capture-scale" not in script:
-            raise AssertionError(f"unexpected page script: {script}")
+            assert "getComputedStyle" in script
+            return self._scale_sample()
         if "root.removeAttribute" in script:
             self.scale_restored = True
             self.current_scale = 1.0
@@ -46,7 +54,20 @@ class _Page:
         assert value is not None
         self.current_scale = value
         self.capture_scales.append(value)
-        return True
+        return self._scale_sample()
+
+    def _scale_sample(self) -> dict[str, str]:
+        if self.scale_samples is None:
+            inline_zoom = computed_zoom = self.current_scale
+        else:
+            inline_zoom, computed_zoom = self.scale_samples[
+                min(self.scale_sample_index, len(self.scale_samples) - 1)
+            ]
+        self.scale_sample_index += 1
+        return {
+            "inlineZoom": str(inline_zoom),
+            "computedZoom": str(computed_zoom),
+        }
 
     def center(self, name: str) -> None:
         self.centered.append(name)
@@ -103,10 +124,33 @@ def test_positions_nearest_detail_scroll_area_until_title_price_and_skus_share_v
 def test_applies_one_fixed_capture_scale_and_waits_for_layout() -> None:
     page = _Page()
 
-    apply_capture_scale(page, scale=0.9)
+    proof = apply_capture_scale(page, scale=0.9)
 
+    assert proof.inline_zoom == 0.9
+    assert proof.computed_zoom == 0.9
+    assert proof.sample_count == 2
     assert page.capture_scales == [0.9]
     assert page.waits == [300]
+
+
+def test_rejects_capture_scale_when_computed_zoom_does_not_match_inline_zoom() -> None:
+    page = _Page(scale_samples=((0.8, 1.0), (0.8, 1.0)))
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="capture scale 0.8 did not become visually stable",
+    ):
+        apply_capture_scale(page, scale=0.8)
+
+
+def test_accepts_capture_scale_only_after_two_matching_visual_samples() -> None:
+    page = _Page(scale_samples=((0.8, 0.8), (0.8, 0.8)))
+
+    proof = apply_capture_scale(page, scale=0.8)
+
+    assert proof.inline_zoom == 0.8
+    assert proof.computed_zoom == 0.8
+    assert proof.sample_count == 2
 
 
 def test_restores_the_original_capture_scale() -> None:

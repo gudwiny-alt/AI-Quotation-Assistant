@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from quote_app.tasks.retry import LayoutRecognitionError
@@ -36,8 +37,20 @@ _APPLY_CAPTURE_SCALE = f"""
     root.setAttribute(attribute, root.style.zoom || "");
   }}
   root.style.zoom = String(scale);
-  return root.style.zoom === String(scale);
+  return {{
+    inlineZoom: root.style.zoom,
+    computedZoom: getComputedStyle(root).zoom,
+  }};
 }}
+"""
+_READ_CAPTURE_SCALE = """
+() => {
+  const root = document.documentElement;
+  return {
+    inlineZoom: root.style.zoom,
+    computedZoom: getComputedStyle(root).zoom,
+  };
+}
 """
 _RESTORE_CAPTURE_SCALE = f"""
 () => {{
@@ -56,15 +69,35 @@ _RESTORE_CAPTURE_SCALE = f"""
 """
 
 
-def apply_capture_scale(page: Any, *, scale: float) -> None:
+@dataclass(frozen=True, slots=True)
+class CaptureScaleProof:
+    inline_zoom: float
+    computed_zoom: float
+    sample_count: int
+
+
+def apply_capture_scale(page: Any, *, scale: float) -> CaptureScaleProof:
     """Apply one reversible visual scale for the pending formal capture."""
 
     if not 0.5 <= scale <= 1.0:
         raise ValueError("capture scale must be between 0.5 and 1.0")
-    applied = page.evaluate(_APPLY_CAPTURE_SCALE, scale)
-    if applied is not True:
-        raise LayoutRecognitionError("capture scale could not be applied")
+    raw_samples = [page.evaluate(_APPLY_CAPTURE_SCALE, scale)]
     page.wait_for_timeout(_CAPTURE_SCALE_WAIT_MS)
+    raw_samples.append(page.evaluate(_READ_CAPTURE_SCALE))
+    samples = tuple(_capture_scale_sample(sample) for sample in raw_samples)
+    if not all(
+        inline_zoom == scale and computed_zoom == scale
+        for inline_zoom, computed_zoom in samples
+    ):
+        raise LayoutRecognitionError(
+            f"capture scale {scale} did not become visually stable"
+        )
+    inline_zoom, computed_zoom = samples[-1]
+    return CaptureScaleProof(
+        inline_zoom=inline_zoom,
+        computed_zoom=computed_zoom,
+        sample_count=len(samples),
+    )
 
 
 def restore_capture_scale(page: Any) -> None:
@@ -180,3 +213,10 @@ def _in_viewport(locator: Any) -> bool:
             "detail capture viewport state is unavailable"
         )
     return value
+
+
+def _capture_scale_sample(value: Any) -> tuple[float, float]:
+    try:
+        return float(value["inlineZoom"]), float(value["computedZoom"])
+    except (KeyError, TypeError, ValueError):
+        return float("nan"), float("nan")

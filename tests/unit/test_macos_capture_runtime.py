@@ -640,6 +640,21 @@ class _RawCapturePipeline:
         return self.result
 
 
+class _OrderedRawCapturePipeline(_RawCapturePipeline):
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        super().__init__(result=object(), error=error)
+        self.events = events
+
+    def capture(self, request: CaptureRequest) -> object:
+        self.events.append("capture")
+        return super().capture(request)
+
+
 ReaderFactory = Callable[
     [WebsiteTask, Any, VerifiedSemanticState],
     Callable[[], VerifiedSemanticState],
@@ -2457,6 +2472,55 @@ class _CapturePreparedAdapter(_VerifiedAdapter):
         self.restore_calls.append((task, page, expected))
 
 
+class _OrderedCaptureAdapter(_VerifiedAdapter):
+    def __init__(self, spec: SiteSpec, events: list[str]) -> None:
+        super().__init__(spec)
+        self.events = events
+
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        del task, page, expected
+        self.events.append("prepare")
+
+    def verified_state_reader(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> Callable[[], VerifiedSemanticState]:
+        del task, page
+        self.events.append("reader")
+        return lambda: expected
+
+    def restore_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        del task, page, expected
+        self.events.append("restore")
+
+
+class _FailingCapturePreparationAdapter(_VerifiedAdapter):
+    def __init__(self, spec: SiteSpec, error: BaseException) -> None:
+        super().__init__(spec)
+        self.error = error
+
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        del task, page, expected
+        raise self.error
+
+
 class _CaptureGeometryAdapter(_CapturePreparedAdapter):
     def capture_rectangles_for_capture(
         self,
@@ -2612,6 +2676,33 @@ def test_runtime_restores_prepared_view_once_after_successful_capture() -> None:
     assert adapter.restore_calls == [(task, page, state)]
 
 
+def test_runtime_keeps_prepared_view_until_after_evidence_capture() -> None:
+    events: list[str] = []
+    adapter = _OrderedCaptureAdapter(
+        _site_spec(WebsiteChannel.JD),
+        events,
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    context = runtime.capture_context_provider(
+        _task(channel=WebsiteChannel.JD),
+        object(),
+        _state(canonical_url="https://example.test/jd/item-1"),
+    )
+    runtime.evidence_capture()._pipeline = _OrderedRawCapturePipeline(
+        events
+    )  # type: ignore[assignment]
+
+    runtime.evidence_capture().capture(_capture_request(context))
+
+    assert events == ["prepare", "reader", "capture", "restore"]
+
+
 def test_runtime_restores_view_when_capture_fails() -> None:
     calls: list[str] = []
     adapter = _CapturePreparedAdapter(_site_spec(WebsiteChannel.JD))
@@ -2636,6 +2727,36 @@ def test_runtime_restores_view_when_capture_fails() -> None:
     assert adapter.restore_calls == [(task, page, state)]
 
 
+def test_runtime_final_capture_failure_restores_once_after_capture() -> None:
+    events: list[str] = []
+    adapter = _OrderedCaptureAdapter(
+        _site_spec(WebsiteChannel.JD),
+        events,
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    context = runtime.capture_context_provider(
+        _task(channel=WebsiteChannel.JD),
+        object(),
+        _state(canonical_url="https://example.test/jd/item-1"),
+    )
+    runtime.evidence_capture()._pipeline = _OrderedRawCapturePipeline(
+        events,
+        error=OSError("capture failed"),
+    )  # type: ignore[assignment]
+
+    with pytest.raises(OSError, match="capture failed"):
+        runtime.evidence_capture().capture(_capture_request(context))
+
+    assert events == ["prepare", "reader", "capture", "restore"]
+    assert events.count("restore") == 1
+
+
 def test_runtime_restores_view_when_context_build_fails_after_prepare() -> None:
     calls: list[str] = []
     adapter = _FailingCaptureGeometryAdapter(_site_spec(WebsiteChannel.JD))
@@ -2654,9 +2775,105 @@ def test_runtime_restores_view_when_context_build_fails_after_prepare() -> None:
         _capture_error_code(
             lambda: runtime.capture_context_provider(task, page, state)
         )
-        == "CAPTURE_ENVIRONMENT"
+        == "CAPTURE_GEOMETRY"
     )
     assert adapter.restore_calls == [(task, page, state)]
+
+
+@pytest.mark.parametrize(
+    ("layout_message", "safe_stage"),
+    [
+        (
+            "capture scale 0.8 did not become visually stable",
+            "缩放验证",
+        ),
+        (
+            "JD no-model search input is not visible for capture",
+            "搜索框定位",
+        ),
+        (
+            "JD no-model product card name is not visible for capture",
+            "结果区域定位",
+        ),
+    ],
+)
+def test_capture_preparation_layout_failure_preserves_retryable_safe_stage(
+    layout_message: str,
+    safe_stage: str,
+) -> None:
+    adapter = _FailingCapturePreparationAdapter(
+        _site_spec(WebsiteChannel.JD),
+        LayoutRecognitionError(layout_message),
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    with pytest.raises(RetryableEvidenceCaptureError) as captured:
+        runtime.capture_context_provider(
+            _task(channel=WebsiteChannel.JD),
+            object(),
+            _state(canonical_url="https://example.test/jd/item-1"),
+        )
+
+    assert captured.value.code == "CAPTURE_GEOMETRY"
+    assert safe_stage in captured.value.message
+
+
+def test_capture_rectangle_layout_failure_preserves_result_region_stage() -> None:
+    adapter = _FailingCaptureGeometryAdapter(
+        _site_spec(WebsiteChannel.JD)
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    with pytest.raises(RetryableEvidenceCaptureError) as captured:
+        runtime.capture_context_provider(
+            _task(channel=WebsiteChannel.JD),
+            object(),
+            _state(canonical_url="https://example.test/jd/item-1"),
+        )
+
+    assert captured.value.code == "CAPTURE_GEOMETRY"
+    assert "结果区域定位" in captured.value.message
+
+
+@pytest.mark.parametrize(
+    "error",
+    [PermissionError("screen permission denied"), OSError("filesystem failed")],
+)
+def test_non_layout_capture_preparation_failure_remains_environment_error(
+    error: BaseException,
+) -> None:
+    adapter = _FailingCapturePreparationAdapter(
+        _site_spec(WebsiteChannel.JD),
+        error,
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    with pytest.raises(NonRetryableEvidenceCaptureError) as captured:
+        runtime.capture_context_provider(
+            _task(channel=WebsiteChannel.JD),
+            object(),
+            _state(canonical_url="https://example.test/jd/item-1"),
+        )
+
+    assert captured.value.code == "CAPTURE_ENVIRONMENT"
 
 
 def test_capture_context_uses_final_marketplace_rectangles_after_view_preparation() -> None:

@@ -171,6 +171,8 @@ class _Locator:
             if current is not None:
                 target = current.attrs.get("action")
         if target is not None and target.startswith("#"):
+            if target == "#results":
+                self.page.search_submit_count += 1
             self.page.activate(target[1:])
 
     def scroll_into_view_if_needed(self) -> None:
@@ -205,6 +207,9 @@ class _Locator:
         if "getBoundingClientRect" in script:
             if node.attrs.get("id") == "key01":
                 self.page.search_input_visibility_checks += 1
+                if self.page.capture_position_failures > 0:
+                    self.page.capture_position_failures -= 1
+                    return False
             if "search-empty" in node.attrs.get("class", "").split():
                 return self.page.empty_state_in_viewport
             return True
@@ -251,6 +256,7 @@ class _FixturePage:
         modern_price_after_selection: tuple[str, ...] | None = None,
         result_title_after_search_anchor: str | None = None,
         empty_state_in_viewport: bool = True,
+        capture_position_failures: int = 0,
     ) -> None:
         parser = _DocumentParser()
         parser.feed(html if html is not None else (FIXTURES / fixture).read_text("utf-8"))
@@ -266,7 +272,10 @@ class _FixturePage:
         self.option_events: list[str] = []
         self.capture_view_positions: list[str] = []
         self.capture_scales: list[float] = []
+        self.current_capture_scale = 1.0
+        self.capture_scale_restore_count = 0
         self.scale_restored = False
+        self.search_submit_count = 0
         self.search_input_visibility_checks = 0
         self.window_scroll_offsets: list[int] = []
         self.wait_timeout_milliseconds: list[float] = []
@@ -286,6 +295,7 @@ class _FixturePage:
         self.modern_price_after_selection = modern_price_after_selection
         self.result_title_after_search_anchor = result_title_after_search_anchor
         self.empty_state_in_viewport = empty_state_in_viewport
+        self.capture_position_failures = capture_position_failures
         self.detail_scan_scrolls: list[int] = []
         self.pending_capacity_context: int | None = None
         self.pending_modern_price_update: int | None = None
@@ -455,14 +465,19 @@ class _FixturePage:
         self,
         script: str,
         value: float | None = None,
-    ) -> bool | None:
+    ) -> bool | dict[str, str] | None:
         if "quotation-capture-scale" in script:
             if "root.removeAttribute" in script:
                 self.scale_restored = True
+                self.capture_scale_restore_count += 1
+                self.current_capture_scale = 1.0
                 return True
             assert value is not None
             self.capture_scales.append(value)
-            return True
+            self.current_capture_scale = value
+            return self._capture_scale_sample()
+        if "getComputedStyle" in script:
+            return self._capture_scale_sample()
         if script == "() => window.scrollBy(0, -120)":
             self.window_scroll_offsets.append(-120)
         if script == "() => window.scrollBy(0, 520)":
@@ -476,6 +491,12 @@ class _FixturePage:
                     if "specification-item-sku" in node.attrs.get("class", "").split():
                         node.attrs.pop("hidden", None)
                 self.modern_sku_ready_after_scroll = None
+
+    def _capture_scale_sample(self) -> dict[str, str]:
+        return {
+            "inlineZoom": str(self.current_capture_scale),
+            "computedZoom": str(self.current_capture_scale),
+        }
 
     @staticmethod
     def option_kind(node: _Node) -> str | None:
@@ -2427,6 +2448,44 @@ def test_jd_no_model_prepares_a_search_first_result_view_with_readable_card_name
     )
 
 
+def test_jd_no_model_retries_only_capture_preparation_after_positioning_failure() -> None:
+    page = _FixturePage(
+        "no_model.html",
+        capture_position_failures=1,
+    )
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    page.search_submit_count = 0
+    goto_count = len(page.goto_calls)
+
+    def observe_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("capture preparation retry must not observe")
+
+    adapter.observe = cast(Any, observe_must_not_run)
+
+    adapter.prepare_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert page.search_submit_count == 0
+    assert len(page.goto_calls) == goto_count
+    assert page.capture_scales == [0.8, 0.8]
+    assert page.capture_scale_restore_count == 1
+    assert 500 in page.wait_timeout_milliseconds
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+
+
 def test_jd_no_model_rereads_the_first_product_title_after_search_positioning() -> None:
     page = _FixturePage(
         "no_model.html",
@@ -2436,14 +2495,14 @@ def test_jd_no_model_rereads_the_first_product_title_after_search_positioning() 
     adapter = JDAdapter(_xiaomi_spec())
     observation = adapter.observe(task, cast(Any, page))
 
-    with pytest.raises(LayoutRecognitionError, match="after no-model positioning"):
+    with pytest.raises(LayoutRecognitionError, match="before no-model capture"):
         adapter.prepare_capture_view(
             task,
             cast(Any, page),
             observation.semantic_state,
         )
 
-    assert page.capture_scales == [0.8]
+    assert page.capture_scales == [0.8, 0.8]
     assert page.capture_view_positions == ["search"]
 
 
@@ -2470,7 +2529,7 @@ def test_jd_empty_no_model_capture_requires_the_empty_marker_in_viewport() -> No
         )
 
     assert observation.outcome is BusinessOutcome.NO_MODEL
-    assert page.capture_scales == [0.8]
+    assert page.capture_scales == [0.8, 0.8]
 
 
 def test_jd_no_model_rereads_capture_rectangles_after_result_positioning() -> None:

@@ -142,6 +142,7 @@ _MAX_DETAIL_READY_POLLS = 30
 _MAX_MODERN_SKU_SCAN_STEPS = 8
 _MAX_SEARCH_URL_POLLS = 20
 _MAX_VERIFIED_STATE_POLLS = 10
+_CAPTURE_PREPARATION_RETRY_WAIT_MS = 500
 _POLL_INTERVAL_MS = 100
 _STORE_READY_INTERVAL_MS = 500
 _MODERN_SELECTION_INTERVAL_MS = 250
@@ -936,7 +937,22 @@ class JDAdapter:
         browser_page = _playwright_page(page)
         apply_capture_scale(browser_page, scale=0.8)
         try:
-            self._prepare_capture_view_at_scale(task, browser_page, expected)
+            for attempt in range(2):
+                try:
+                    self._prepare_capture_view_at_scale(
+                        task,
+                        browser_page,
+                        expected,
+                    )
+                    return
+                except LayoutRecognitionError:
+                    if attempt == 1:
+                        raise
+                    restore_capture_scale(browser_page)
+                    browser_page.wait_for_timeout(
+                        _CAPTURE_PREPARATION_RETRY_WAIT_MS
+                    )
+                    apply_capture_scale(browser_page, scale=0.8)
         except BaseException:
             try:
                 restore_capture_scale(browser_page)

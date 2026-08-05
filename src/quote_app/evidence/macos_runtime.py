@@ -58,7 +58,7 @@ from quote_app.evidence.semantic_state import (
     VerifiedSemanticState,
 )
 from quote_app.tasks.models import WebsiteChannel, WebsiteTask
-from quote_app.tasks.retry import LoginRequired
+from quote_app.tasks.retry import LayoutRecognitionError, LoginRequired
 
 ReaderFactory = Callable[
     [WebsiteTask, Any, VerifiedSemanticState],
@@ -74,6 +74,14 @@ _LAYOUT_CONVERGENCE_CLOCK_EPSILON = 1e-9
 _MAC_VISUAL_REVIEW_WINDOW_ARGS = (
     "--window-position=24,49",
     "--window-size=1464,893",
+)
+_CAPTURE_VIEW_LAYOUT_MESSAGES = {
+    "缩放验证": "正式截图缩放验证失败",
+    "搜索框定位": "正式截图搜索框定位失败",
+    "结果区域定位": "正式截图结果区域定位失败",
+}
+_SAFE_CAPTURE_VIEW_LAYOUT_MESSAGES = frozenset(
+    _CAPTURE_VIEW_LAYOUT_MESSAGES.values()
 )
 
 
@@ -344,14 +352,14 @@ class MacFormalCaptureRuntime:
                 probe=current.probe,
                 restore_capture_view=restore_capture_view,
             )
-            capture_rectangles = self._stage(
-                "CAPTURE_ENVIRONMENT",
-                "正式截图证据区域无法读取",
+            capture_rectangles = self._capture_view_stage(
                 lambda: self._capture_rectangles_for_current_view(
                     task,
                     page,
                     state,
                 ),
+                environment_message="正式截图证据区域无法读取",
+                default_layout_stage="结果区域定位",
             )
 
             probe: VerifiedPageStateProbe | None = None
@@ -418,6 +426,11 @@ class MacFormalCaptureRuntime:
             raise
         except EvidenceCaptureError as error:
             self._current = None
+            if (
+                error.code == "CAPTURE_GEOMETRY"
+                and error.message in _SAFE_CAPTURE_VIEW_LAYOUT_MESSAGES
+            ):
+                raise
             raise revalidate_capture_error(
                 error,
                 fallback_code="CAPTURE_ENVIRONMENT",
@@ -985,7 +998,13 @@ class MacFormalCaptureRuntime:
         prepared = False
         try:
             if callable(capture_view_preparer):
-                capture_view_preparer(task, page, state)
+                try:
+                    capture_view_preparer(task, page, state)
+                except LayoutRecognitionError as error:
+                    raise self._capture_view_layout_error(
+                        error,
+                        default_layout_stage="结果区域定位",
+                    ) from None
                 prepared = True
             reader_builder = getattr(adapter, "verified_state_reader", None)
             if not callable(reader_builder):
@@ -1043,6 +1062,61 @@ class MacFormalCaptureRuntime:
             )
         return tuple(rectangles)
 
+    def _capture_view_stage(
+        self,
+        operation: Callable[[], _T],
+        *,
+        environment_message: str,
+        default_layout_stage: str,
+    ) -> _T:
+        """Classify only capture-view layout failures as retryable geometry."""
+
+        try:
+            return operation()
+        except (KeyboardInterrupt, SystemExit):
+            self._current = None
+            raise
+        except LoginRequired:
+            self._current = None
+            raise
+        except LayoutRecognitionError as error:
+            self._current = None
+            raise self._capture_view_layout_error(
+                error,
+                default_layout_stage=default_layout_stage,
+            ) from None
+        except EvidenceCaptureError as error:
+            self._current = None
+            raise revalidate_capture_error(
+                error,
+                fallback_code="CAPTURE_ENVIRONMENT",
+                safe_message=environment_message,
+            ) from None
+        except Exception:
+            self._current = None
+            raise make_capture_error(
+                "CAPTURE_ENVIRONMENT",
+                environment_message,
+            ) from None
+
+    @staticmethod
+    def _capture_view_layout_error(
+        error: LayoutRecognitionError,
+        *,
+        default_layout_stage: str,
+    ) -> EvidenceCaptureError:
+        message = str(error).lower()
+        if "capture scale" in message or "zoom" in message:
+            layout_stage = "缩放验证"
+        elif "search input" in message or "search keyword" in message:
+            layout_stage = "搜索框定位"
+        else:
+            layout_stage = default_layout_stage
+        return make_capture_error(
+            "CAPTURE_GEOMETRY",
+            _CAPTURE_VIEW_LAYOUT_MESSAGES[layout_stage],
+        )
+
     def _stage(
         self,
         code: str,
@@ -1059,6 +1133,11 @@ class MacFormalCaptureRuntime:
             raise
         except EvidenceCaptureError as error:
             self._current = None
+            if (
+                error.code == "CAPTURE_GEOMETRY"
+                and error.message in _SAFE_CAPTURE_VIEW_LAYOUT_MESSAGES
+            ):
+                raise
             raise revalidate_capture_error(
                 error,
                 fallback_code="CAPTURE_ENVIRONMENT",
