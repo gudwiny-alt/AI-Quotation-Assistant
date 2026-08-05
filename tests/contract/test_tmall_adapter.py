@@ -303,6 +303,7 @@ class _FixturePage:
         self.option_events: list[str] = []
         self.capture_view_positions: list[str] = []
         self.capture_scales: list[float] = []
+        self.capture_scale = 1.0
         self.scale_restored = False
         self.window_scroll_offsets: list[int] = []
         self.wait_timeout_milliseconds: list[float] = []
@@ -477,14 +478,22 @@ class _FixturePage:
         self,
         script: str,
         value: float | None = None,
-    ) -> bool | None:
-        if "quotation-capture-scale" in script:
+    ) -> dict[str, float] | bool | None:
+        if (
+            "quotation-capture-scale" in script
+            or "computedZoom: getComputedStyle(root).zoom" in script
+        ):
             if "root.removeAttribute" in script:
+                self.capture_scale = 1.0
                 self.scale_restored = True
                 return True
-            assert value is not None
-            self.capture_scales.append(value)
-            return True
+            if value is not None:
+                self.capture_scale = value
+                self.capture_scales.append(value)
+            return {
+                "inlineZoom": self.capture_scale,
+                "computedZoom": self.capture_scale,
+            }
         if script == "() => window.scrollBy(0, -120)":
             self.window_scroll_offsets.append(-120)
         return None
