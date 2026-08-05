@@ -2518,6 +2518,42 @@ def test_jd_no_model_prepares_a_search_first_result_view_with_readable_card_name
     )
 
 
+def test_jd_no_model_accepts_any_visible_search_input_with_the_target_keyword() -> None:
+    """The matching store/result input wins even when another search box is blank."""
+
+    html = (FIXTURES / "no_model.html").read_text("utf-8")
+    store_input = (
+        '<input id="key01" value="小米 15" '
+        'style="left:20px;top:20px;width:260px;height:32px">'
+    )
+    assert store_input in html
+    html = html.replace(
+        store_input,
+        '<input id="key01" value="" '
+        'style="left:20px;top:20px;width:260px;height:32px">'
+        '<input id="key" value="小米 15" '
+        'style="left:310px;top:20px;width:260px;height:32px">',
+        1,
+    )
+    page = _FixturePage(html=html)
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+
+
 def test_jd_rejects_an_unstable_fixed_scale_without_restoring_to_100() -> None:
     page = _FixturePage(
         "no_model.html",

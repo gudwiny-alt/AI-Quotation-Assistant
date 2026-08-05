@@ -14,12 +14,14 @@ JD_STORE_SEARCH_CONTAINERS = (
 )
 JD_SEARCH_INPUTS = (
     "#key01",
+    "#key",
 )
 JD_SEARCH_ACTIONS = (
     "input.button01[value=\"搜本店\"]",
 )
 JD_RESULT_REGIONS = (
     "#J_goodsList",
+    "#comProlist",
     ".shop-search-result",
     ".jSearchListArea",
 )
@@ -128,6 +130,9 @@ TMALL_PRODUCT_LINKS = (
 TMALL_EMPTY_RESULTS: tuple[str, ...] = ()
 TMALL_DETAIL_TITLES = (
     '[class^="ItemTitle--"]',
+    '[class*="ItemTitle--"]',
+    ".tb-main-title",
+    "#J_Title",
 )
 TMALL_DETAIL_SELLER_MARKERS = (
     'span[class^="shopName--"]',

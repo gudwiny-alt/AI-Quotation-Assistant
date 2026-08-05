@@ -1502,18 +1502,25 @@ class JDAdapter:
         page: Any,
         model_name: str,
     ) -> Any | None:
-        visible_inputs = visible_locators(page, JD_SEARCH_INPUTS)
-        if len(visible_inputs) != 1:
-            return None
-        result_search_input = visible_inputs[0]
-        actual_keyword = result_search_input.input_value()
-        if not isinstance(actual_keyword, str) or not actual_keyword.strip():
-            return None
-        if normalize_product_text(actual_keyword) != normalize_product_text(model_name):
+        expected_keyword = normalize_product_text(model_name)
+        has_nonblank_candidate = False
+        for selector in JD_SEARCH_INPUTS:
+            candidates = page.locator(selector)
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                if not candidate.is_visible():
+                    continue
+                actual_keyword = candidate.input_value()
+                if not isinstance(actual_keyword, str) or not actual_keyword.strip():
+                    continue
+                has_nonblank_candidate = True
+                if normalize_product_text(actual_keyword) == expected_keyword:
+                    return candidate
+        if has_nonblank_candidate:
             raise LayoutRecognitionError(
                 "JD result search keyword does not match the requested model"
             )
-        return result_search_input
+        return None
 
     def _no_model_observation(
         self,
