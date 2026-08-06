@@ -2197,7 +2197,13 @@ def test_tmall_price_and_capture_do_not_require_stock_or_delivery_region() -> No
 
 
 def test_tmall_detail_scales_before_selection_and_positions_only_for_capture() -> None:
-    page = _FixturePage()
+    page = _FixturePage(
+        price_snapshots=(
+            ("¥4,099", "¥4,399", "¥9,999"),
+            ("¥4,199", "¥4,399", "¥9,999"),
+            ("¥4,299", "¥4,399", "¥9,999"),
+        )
+    )
     task = _task()
     adapter = TmallAdapter(_xiaomi_spec())
 
@@ -2231,12 +2237,13 @@ def test_tmall_detail_scales_before_selection_and_positions_only_for_capture() -
 
 def test_tmall_detail_observation_failure_restores_early_scale_once() -> None:
     page = _FixturePage(
-        price_snapshots=(
-            ("¥4,099", "¥4,199", "¥9,999"),
-            ("¥4,199", "¥4,299", "¥9,999"),
-            ("¥4,299", "¥4,399", "¥9,999"),
-            ("¥4,399", "¥4,499", "¥9,999"),
-            ("¥4,499", "¥4,599", "¥9,999"),
+        price_snapshots=tuple(
+            (
+                f"¥{4_099 + (index * 100):,}",
+                f"¥{4_199 + (index * 100):,}",
+                "¥9,999",
+            )
+            for index in range(21)
         ),
     )
     adapter = TmallAdapter(_xiaomi_spec())
@@ -2389,6 +2396,21 @@ def test_old_old_new_new_visible_price_waits_for_post_transition_stability() -> 
     assert str(observation.price) == "4399"
 
 
+def test_changing_auxiliary_prices_do_not_block_a_stable_selected_quotation() -> None:
+    observation = _observe(
+        price_snapshots=(
+            ("¥4,099", "¥4,399", "¥9,999"),
+            ("¥4,199", "¥4,399", "¥9,999"),
+            ("¥4,299", "¥4,399", "¥9,999"),
+            ("¥4,099", "¥4,399", "¥9,999"),
+            ("¥4,199", "¥4,399", "¥9,999"),
+        ),
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
+
+
 def test_multiple_visible_current_price_containers_fail_closed() -> None:
     html = _live_observed_html()
     container = re.search(
@@ -2430,16 +2452,22 @@ def test_missing_or_mixed_hidden_price_bindings_do_not_override_visible_price(
 
 
 def test_price_snapshot_must_stabilize_after_sku_identity() -> None:
-    with pytest.raises(LayoutRecognitionError):
-        _observe(
-            price_snapshots=(
-                ("¥4,099", "¥4,199", "¥9,999"),
-                ("¥4,199", "¥4,299", "¥9,999"),
-                ("¥4,299", "¥4,399", "¥9,999"),
-                ("¥4,399", "¥4,499", "¥9,999"),
-                ("¥4,499", "¥4,599", "¥9,999"),
+    page = _FixturePage(
+        price_snapshots=tuple(
+            (
+                f"¥{4_099 + (index * 100):,}",
+                f"¥{4_199 + (index * 100):,}",
+                "¥9,999",
             )
+            for index in range(21)
         )
+    )
+    adapter = TmallAdapter(_xiaomi_spec())
+
+    with pytest.raises(LayoutRecognitionError):
+        adapter.observe(_task(), cast(Any, page))
+
+    assert page.wait_timeout_milliseconds.count(250) == 20
 
 
 def test_coupon_installment_trade_in_deposit_and_line_through_cannot_win() -> None:

@@ -180,7 +180,6 @@ _RISK_HOSTS = frozenset(
     }
 )
 _MAX_SELECTION_POLLS = 5
-_MAX_PRICE_POLLS = 5
 _MAX_STORE_READY_POLLS = 10
 _MAX_PRICE_CONTEXT_LENGTH = 1000
 _TMALL_CURRENT_SELLING_PRICE_CONTAINERS = (
@@ -190,6 +189,11 @@ _TMALL_CURRENT_SELLING_PRICE_VALUES = (
     '[class^="highlightPrice--"]',
 )
 _POLL_INTERVAL_MS = 100
+_PRICE_STABILITY_TIMEOUT_MS = 5_000
+_PRICE_POLL_INTERVAL_MS = 250
+_MAX_PRICE_POLLS = (
+    _PRICE_STABILITY_TIMEOUT_MS // _PRICE_POLL_INTERVAL_MS
+) + 1
 _STORE_READY_INTERVAL_MS = 500
 _OBSERVED_SUBSIDY_PRICE_MARKER = "平台加补后"
 _STORE_LOGIN_BENEFIT_GATE = "登录后可查看完整店铺优惠权益"
@@ -1312,11 +1316,10 @@ class TmallAdapter:
             raise LayoutRecognitionError(
                 "Tmall matching detail title changed during result polling"
             )
-        page.wait_for_timeout(_POLL_INTERVAL_MS)
-        self._raise_if_blocked_or_error(page)
-
-        previous: TmallVisibleConfigurationEvidence | None = None
+        previous_selected: Decimal | None = None
         for _ in range(_MAX_PRICE_POLLS - 1):
+            page.wait_for_timeout(_PRICE_POLL_INTERVAL_MS)
+            self._raise_if_blocked_or_error(page)
             snapshot = self._visible_configuration_evidence(page, task)
             if snapshot.configuration != configuration:
                 raise LayoutRecognitionError(
@@ -1330,11 +1333,9 @@ class TmallAdapter:
                 snapshot.price_candidates,
                 self.spec.price_policy,
             )
-            if selected is not None and snapshot == previous:
+            if selected is not None and selected == previous_selected:
                 return selected
-            previous = snapshot
-            page.wait_for_timeout(_POLL_INTERVAL_MS)
-            self._raise_if_blocked_or_error(page)
+            previous_selected = selected
         raise LayoutRecognitionError(
             "Tmall selected variant price did not reach a verified stable state"
         )
