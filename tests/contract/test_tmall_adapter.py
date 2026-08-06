@@ -495,6 +495,7 @@ class _FixturePage:
             if value is not None:
                 self.capture_scale = value
                 self.capture_scales.append(value)
+                self.option_events.append(f"scale:{value}")
             return self._capture_scale_sample()
         if script == "() => window.scrollBy(0, -120)":
             self.window_scroll_offsets.append(-120)
@@ -1583,6 +1584,8 @@ def test_tmall_no_model_prepares_a_result_view_with_readable_card_names() -> Non
     adapter = TmallAdapter(_xiaomi_spec())
 
     observation = adapter.observe(task, cast(Any, page))
+
+    assert page.capture_scales == []
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
 
     assert observation.outcome is BusinessOutcome.NO_MODEL
@@ -2193,7 +2196,7 @@ def test_tmall_price_and_capture_do_not_require_stock_or_delivery_region() -> No
     assert page.capture_view_positions == ["capacity"]
 
 
-def test_tmall_positions_the_selected_detail_only_when_formal_capture_is_prepared() -> None:
+def test_tmall_detail_scales_before_selection_and_positions_only_for_capture() -> None:
     page = _FixturePage()
     task = _task()
     adapter = TmallAdapter(_xiaomi_spec())
@@ -2202,12 +2205,15 @@ def test_tmall_positions_the_selected_detail_only_when_formal_capture_is_prepare
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.option_events == [
+        "scale:0.8",
         "scroll:capacity",
         "click:capacity",
         "scroll:color",
         "click:color",
     ]
     assert page.option_scrolls == ["capacity", "color"]
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale_restore_count == 0
     assert page.capture_view_positions == []
     assert page.window_scroll_offsets == []
 
@@ -2221,6 +2227,29 @@ def test_tmall_positions_the_selected_detail_only_when_formal_capture_is_prepare
     adapter.restore_capture_view(task, cast(Any, page), observation.semantic_state)
     assert page.capture_scale_restore_count == 1
     assert page.scale_restored is True
+
+
+def test_tmall_detail_observation_failure_restores_early_scale_once() -> None:
+    page = _FixturePage(
+        price_snapshots=(
+            ("¥4,099", "¥4,199", "¥9,999"),
+            ("¥4,199", "¥4,299", "¥9,999"),
+            ("¥4,299", "¥4,399", "¥9,999"),
+            ("¥4,399", "¥4,499", "¥9,999"),
+            ("¥4,499", "¥4,599", "¥9,999"),
+        ),
+    )
+    adapter = TmallAdapter(_xiaomi_spec())
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="price did not reach a verified stable state",
+    ):
+        adapter.observe(_task(), cast(Any, page))
+
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale_restore_count == 1
+    assert page.capture_scale == 1.0
 
 
 def test_tmall_resume_goes_directly_to_saved_detail_without_store_search() -> None:

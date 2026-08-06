@@ -350,6 +350,24 @@ class TmallAdapter:
         self._require_exact_detail_url(browser_page, detail_url)
         self._wait_for_detail_layout(browser_page, task, detail_url)
 
+        try:
+            apply_capture_scale(browser_page, scale=0.8)
+            return self._observe_scaled_detail(task, browser_page, detail_url)
+        except BaseException:
+            try:
+                restore_capture_scale(browser_page)
+            except Exception:
+                pass
+            raise
+
+    def _observe_scaled_detail(
+        self,
+        task: WebsiteTask,
+        browser_page: Any,
+        detail_url: str,
+    ) -> AdapterObservation:
+        """Observe one verified detail while its 80% capture scale is active."""
+
         capacity_group = self._sku_option_group(
             browser_page,
             "存储容量",
@@ -448,7 +466,8 @@ class TmallAdapter:
         self._validate_task(task)
         browser_page = _playwright_page(page)
         try:
-            apply_capture_scale(browser_page, scale=0.8)
+            if expected.outcome is BusinessOutcome.NO_MODEL:
+                apply_capture_scale(browser_page, scale=0.8)
             self._prepare_capture_view_at_scale(task, browser_page, expected)
         except BaseException:
             try:
