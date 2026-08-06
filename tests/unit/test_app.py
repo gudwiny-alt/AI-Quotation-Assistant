@@ -65,7 +65,7 @@ def test_beta_notice_describes_login_as_runtime_optional() -> None:
 def test_app_build_label_identifies_honor_three_site_test_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
-    assert APP_BUILD_LABEL == "京东无报价截图与天猫必要字段校验版（全部荣耀行）2026.08.05.44"
+    assert APP_BUILD_LABEL == "天猫详情页提前80%缩放版（全部荣耀行）2026.08.06.45"
     assert "当前受控页" in BETA_NOTICE
 
 
