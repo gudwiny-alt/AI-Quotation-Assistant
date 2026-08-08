@@ -401,6 +401,9 @@ class SellingPriceEvidence(StrEnum):
     VERIFIED_CURRENT_SKU_STRUCK_THROUGH_PRICE = (
         "verified_current_sku_struck_through_price"
     )
+    VERIFIED_CURRENT_SKU_PRE_DISCOUNT_PRICE = (
+        "verified_current_sku_pre_discount_price"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,7 +486,10 @@ def filter_valid_prices(
         if (
             candidate.effective_line_through
             and candidate.selling_evidence
-            is not SellingPriceEvidence.VERIFIED_CURRENT_SKU_STRUCK_THROUGH_PRICE
+            not in {
+                SellingPriceEvidence.VERIFIED_CURRENT_SKU_STRUCK_THROUGH_PRICE,
+                SellingPriceEvidence.VERIFIED_CURRENT_SKU_PRE_DISCOUNT_PRICE,
+            }
         ):
             continue
         if not _has_positive_selling_price_evidence(candidate):
@@ -520,6 +526,11 @@ def _has_positive_selling_price_evidence(
         is SellingPriceEvidence.VERIFIED_CURRENT_SKU_STRUCK_THROUGH_PRICE
     ):
         return candidate.effective_line_through
+    if (
+        candidate.selling_evidence
+        is SellingPriceEvidence.VERIFIED_CURRENT_SKU_PRE_DISCOUNT_PRICE
+    ):
+        return True
     if (
         candidate.selling_evidence
         is not SellingPriceEvidence.STRONG_SELLING_LABEL

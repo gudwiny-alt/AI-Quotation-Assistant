@@ -2484,6 +2484,34 @@ def test_live_observed_subprice_prefix_cannot_replace_current_selling_price() ->
     assert str(_observe(html=html, after_search_url=_LIVE_RESULTS_URL).price) == "4399"
 
 
+def test_honor_power2_uses_explicit_pre_discount_price_beside_subsidy_price(
+) -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    html = re.sub(
+        r'(<section id="tbpcDetail_SkuPanelRightWrap">).*?(</section>)',
+        r'\1<div class="priceWrap--fixture">'
+        r'平台补贴后 <span class="highlightPrice--fixture" '
+        r'style="color:rgb(255,0,0)">¥2549</span>'
+        r'<span class="subPrice--fixture" '
+        r'style="color:rgb(120,120,120)">优惠前 ¥2699</span>'
+        r'</div>\2',
+        html,
+        count=1,
+        flags=re.DOTALL,
+    )
+    task = _task(brand="HONOR", model_name="荣耀Power2")
+    page = _FixturePage(html=html, after_search_url=_honor_power2_result_url())
+
+    observation = TmallAdapter(_honor_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("2699")
+
+
 def test_live_observed_platform_subsidy_context_is_not_policy_safe_price() -> None:
     html = _live_observed_html().replace(
         'style="color:rgb(0,0,0)">¥4,299',

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -51,6 +52,7 @@ from quote_app.sites.prices import (
     PriceCandidate,
     SellingPriceEvidence,
     choose_price,
+    parse_price,
 )
 from quote_app.sites.protocol import AdapterObservation, BrowserPage
 from quote_app.tasks.models import (
@@ -187,6 +189,13 @@ _TMALL_CURRENT_SELLING_PRICE_CONTAINERS = (
 )
 _TMALL_CURRENT_SELLING_PRICE_VALUES = (
     '[class^="highlightPrice--"]',
+)
+_TMALL_CURRENT_PRE_DISCOUNT_PRICE_VALUES = (
+    '[class^="subPrice--"]',
+)
+_TMALL_PRE_DISCOUNT_PRICE = re.compile(
+    r"^优惠前(?:价)?(?P<amount>[¥￥](?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
+    r"(?:\.[0-9]{1,2})?(?:元)?)$"
 )
 _POLL_INTERVAL_MS = 100
 _PRICE_STABILITY_TIMEOUT_MS = 5_000
@@ -1283,6 +1292,51 @@ class TmallAdapter:
                     computed_color=color,
                     selling_evidence=(
                         SellingPriceEvidence.VERIFIED_CURRENT_SKU_SELLING_NODE
+                    ),
+                    effective_line_through=line_through,
+                )
+            )
+        container = _unique_visible_locator(
+            page,
+            _TMALL_CURRENT_SELLING_PRICE_CONTAINERS,
+            semantic_name="current selling price container",
+        )
+        for locator in visible_locators(
+            container,
+            _TMALL_CURRENT_PRE_DISCOUNT_PRICE_VALUES,
+        ):
+            normalized_text = "".join(
+                unicodedata.normalize("NFKC", locator.inner_text()).split()
+            )
+            match = _TMALL_PRE_DISCOUNT_PRICE.fullmatch(normalized_text)
+            if match is None:
+                continue
+            amount_text = match.group("amount")
+            if parse_price(amount_text) is None:
+                continue
+            style = locator.evaluate(_PRICE_STYLE_SCRIPT)
+            if not isinstance(style, dict):
+                raise LayoutRecognitionError(
+                    "Tmall pre-discount price style is unavailable"
+                )
+            color = style.get("color")
+            line_through = style.get("effectiveLineThrough")
+            if (
+                not isinstance(color, str)
+                or not color.strip()
+                or type(line_through) is not bool
+            ):
+                raise LayoutRecognitionError(
+                    "Tmall pre-discount price style is invalid"
+                )
+            candidates.append(
+                PriceCandidate(
+                    text=amount_text,
+                    context="优惠前",
+                    visible=locator.is_visible(),
+                    computed_color=color,
+                    selling_evidence=(
+                        SellingPriceEvidence.VERIFIED_CURRENT_SKU_PRE_DISCOUNT_PRICE
                     ),
                     effective_line_through=line_through,
                 )
