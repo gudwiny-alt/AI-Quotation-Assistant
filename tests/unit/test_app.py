@@ -66,7 +66,7 @@ def test_app_build_label_identifies_honor_three_site_test_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
     assert APP_BUILD_LABEL == (
-        "天猫优惠前价格识别版（全部荣耀行）2026.08.08.47"
+        "天猫同商品截图修复版（全部荣耀行）2026.08.08.48"
     )
     assert "当前受控页" in BETA_NOTICE
 

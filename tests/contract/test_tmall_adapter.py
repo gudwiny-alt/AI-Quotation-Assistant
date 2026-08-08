@@ -1840,6 +1840,22 @@ def test_tmall_color_selection_keeps_processing_on_the_same_item_url() -> None:
     assert observation.url.endswith("sku_properties=5919063%3A6536025")
 
 
+def test_tmall_capture_accepts_selected_sku_id_on_the_same_item() -> None:
+    selected_url = (
+        "https://detail.tmall.com/item.htm?id=123456789018&"
+        "skuId=6174222558230"
+    )
+    page = _FixturePage(color_transition_url=selected_url)
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.url == selected_url
+    assert page.capture_view_positions == ["capacity"]
+
+
 @pytest.mark.parametrize(
     "href",
     [

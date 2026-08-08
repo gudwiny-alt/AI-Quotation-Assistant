@@ -1014,7 +1014,9 @@ class TmallAdapter:
 
     @staticmethod
     def _require_exact_detail_url(page: Any, detail_url: str) -> None:
-        if _approved_item_url(page.url, base_url=detail_url) != detail_url:
+        approved_expected = _approved_item_url(detail_url, base_url=detail_url)
+        approved_current = _approved_item_url(page.url, base_url=detail_url)
+        if approved_current != approved_expected:
             raise LayoutRecognitionError(
                 "Tmall product detail URL changed from the approved item"
             )
