@@ -57,6 +57,7 @@ from quote_app.evidence.semantic_state import (
     VerifiedPageStateProbe,
     VerifiedSemanticState,
 )
+from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.detail_capture_view import CaptureViewGeometryError
 from quote_app.tasks.models import WebsiteChannel, WebsiteTask
 from quote_app.tasks.retry import LayoutRecognitionError, LoginRequired
@@ -76,6 +77,7 @@ _MAC_VISUAL_REVIEW_WINDOW_ARGS = (
     "--window-position=24,49",
     "--window-size=1464,893",
 )
+_LIVE_OFFICIAL_CAPTURE_BRANDS = ("小米", "欧珀", "维沃", "华为", "苹果")
 _CAPTURE_VIEW_GEOMETRY_MESSAGES = {
     "缩放验证": "正式截图缩放验证失败",
     "搜索框定位": "正式截图搜索框定位失败",
@@ -227,9 +229,16 @@ class MacFormalCaptureRuntime:
         if reader_factories is None:
             self._reader_factories = (
                 {
-                    ("HONOR", channel):
-                        self._injected_honor_reader_factory
-                    for channel in WebsiteChannel
+                    **{
+                        ("HONOR", channel):
+                            self._injected_honor_reader_factory
+                        for channel in WebsiteChannel
+                    },
+                    **{
+                        (brand, WebsiteChannel.OFFICIAL):
+                            self._injected_live_official_reader_factory
+                        for brand in _LIVE_OFFICIAL_CAPTURE_BRANDS
+                    },
                 }
                 if adapter_registry is not None
                 else {}
@@ -1022,6 +1031,72 @@ class MacFormalCaptureRuntime:
             if not callable(reader_builder):
                 raise ValueError(
                     "HONOR verified-state reader is unavailable for channel"
+                )
+            return reader_builder(task, page, state)
+        except BaseException:
+            self._prepared_adapters.pop((task.brand, task.channel), None)
+            restorer = getattr(adapter, "restore_capture_view", None)
+            if prepared and callable(restorer):
+                try:
+                    restorer(task, page, state)
+                except Exception:
+                    pass
+            raise
+
+    def _injected_live_official_reader_factory(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        state: VerifiedSemanticState,
+    ) -> SemanticStateReader:
+        registry = self._adapter_registry
+        if registry is None:
+            raise ValueError(
+                "Live official verified-state reader registry is required"
+            )
+        adapter = registry.adapter_for(task.brand, task.channel)
+        spec = getattr(adapter, "spec", None)
+        if not isinstance(spec, SiteSpec):
+            raise ValueError(
+                "Live official verified-state reader adapter has invalid "
+                "spec"
+            )
+        try:
+            spec.validate_approved()
+        except ValueError:
+            raise ValueError(
+                "Live official verified-state reader adapter has invalid "
+                "spec"
+            ) from None
+        if (
+            task.brand not in _LIVE_OFFICIAL_CAPTURE_BRANDS
+            or task.channel is not WebsiteChannel.OFFICIAL
+            or spec.brand != task.brand
+            or spec.channel is not WebsiteChannel.OFFICIAL
+            or getattr(adapter, "channel", None)
+            is not WebsiteChannel.OFFICIAL
+        ):
+            raise ValueError(
+                "Live official verified-state reader adapter does not "
+                "match task"
+            )
+
+        self._prepared_adapters[(task.brand, task.channel)] = adapter
+        capture_view_preparer = getattr(adapter, "prepare_capture_view", None)
+        prepared = False
+        try:
+            if callable(capture_view_preparer):
+                try:
+                    capture_view_preparer(task, page, state)
+                except CaptureViewGeometryError as error:
+                    raise self._capture_view_layout_error(error) from None
+                except LayoutRecognitionError as error:
+                    raise self._capture_view_semantic_error(error) from None
+                prepared = True
+            reader_builder = getattr(adapter, "verified_state_reader", None)
+            if not callable(reader_builder):
+                raise ValueError(
+                    "Live official verified-state reader is unavailable"
                 )
             return reader_builder(task, page, state)
         except BaseException:

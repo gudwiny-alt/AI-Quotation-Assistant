@@ -656,6 +656,15 @@ class _OrderedRawCapturePipeline(_RawCapturePipeline):
         return super().capture(request)
 
 
+class _ProbeCapturePipeline:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def capture(self, request: CaptureRequest) -> object:
+        self.events.append("capture")
+        return request.stability_probe.semantic_hash()
+
+
 ReaderFactory = Callable[
     [WebsiteTask, Any, VerifiedSemanticState],
     Callable[[], VerifiedSemanticState],
@@ -3110,3 +3119,498 @@ def test_default_honor_reader_rejects_state_outside_live_price_slice() -> None:
         )
         == "CAPTURE_ENVIRONMENT"
     )
+
+
+_LIVE_OFFICIAL_BRANDS = ("小米", "欧珀", "维沃", "华为", "苹果")
+
+
+def _live_official_spec(brand: str) -> SiteSpec:
+    return next(
+        candidate
+        for candidate in load_site_catalog()
+        if (
+            candidate.brand == brand
+            and candidate.channel is WebsiteChannel.OFFICIAL
+        )
+    )
+
+
+def _live_official_task(brand: str) -> WebsiteTask:
+    return _task(
+        brand=brand,
+        model_name=f"{brand} Test Phone",
+        channel=WebsiteChannel.OFFICIAL,
+    )
+
+
+def _live_official_state(brand: str) -> VerifiedSemanticState:
+    return _state(
+        canonical_url=f"https://example.test/{brand}/product-1",
+        brand=brand,
+        model_name=f"{brand} Test Phone",
+        current_sku="official-detail:product-1",
+        region="excluded-from-live-official-stability:region",
+        stock_state="excluded-from-live-official-stability:stock",
+    )
+
+
+class _OrderedLiveOfficialAdapter(_VerifiedAdapter):
+    def __init__(
+        self,
+        spec: SiteSpec,
+        events: list[str],
+        *,
+        reader_error: BaseException | None = None,
+        state_read_error: BaseException | None = None,
+        rectangle_error: BaseException | None = None,
+        restore_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(spec)
+        self.events = events
+        self.reader_error = reader_error
+        self.state_read_error = state_read_error
+        self.rectangle_error = rectangle_error
+        self.restore_error = restore_error
+        self.received: list[
+            tuple[WebsiteTask, object, VerifiedSemanticState]
+        ] = []
+
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        self.events.append("prepare")
+        self.received.append((task, page, expected))
+
+    def verified_state_reader(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> Callable[[], VerifiedSemanticState]:
+        self.events.append("reader-builder")
+        self.received.append((task, page, expected))
+        if self.reader_error is not None:
+            raise self.reader_error
+
+        def read() -> VerifiedSemanticState:
+            if self.state_read_error is not None:
+                raise self.state_read_error
+            return expected
+
+        return read
+
+    def capture_rectangles_for_capture(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> tuple[CssRect, ...]:
+        self.events.append("rectangles")
+        self.received.append((task, page, expected))
+        if self.rectangle_error is not None:
+            raise self.rectangle_error
+        return (CssRect(10, 20, 300, 200, "result_region"),)
+
+    def restore_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        self.events.append("restore")
+        self.received.append((task, page, expected))
+        if self.restore_error is not None:
+            raise self.restore_error
+
+
+class _PrepareFailingLiveOfficialAdapter(_VerifiedAdapter):
+    def __init__(self, spec: SiteSpec, events: list[str]) -> None:
+        super().__init__(spec)
+        self.events = events
+
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        del task, page, expected
+        self.events.append("prepare")
+        raise OSError("prepare failed")
+
+    def restore_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        del task, page, expected
+        self.events.append("restore")
+
+
+@pytest.mark.parametrize("brand", _LIVE_OFFICIAL_BRANDS)
+def test_live_official_reader_uses_exact_adapter_contract_and_capture_order(
+    brand: str,
+) -> None:
+    events: list[str] = []
+    adapter = _OrderedLiveOfficialAdapter(
+        _live_official_spec(brand),
+        events,
+    )
+    registry = _CustomAdapterRegistry(adapter)
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=registry,
+        monotonic_clock=lambda: _NOW,
+    )
+    task = _live_official_task(brand)
+    page = object()
+    expected = _live_official_state(brand)
+
+    context = runtime.capture_context_provider(task, page, expected)
+    runtime.evidence_capture()._pipeline = _OrderedRawCapturePipeline(
+        events
+    )  # type: ignore[assignment]
+    runtime.evidence_capture().capture(_capture_request(context))
+
+    assert registry.calls == [(brand, WebsiteChannel.OFFICIAL)]
+    assert events == [
+        "prepare",
+        "reader-builder",
+        "rectangles",
+        "capture",
+        "restore",
+    ]
+    assert context.css_rectangles == (
+        CssRect(10, 20, 300, 200, "result_region"),
+    )
+    assert adapter.received == [
+        (task, page, expected),
+        (task, page, expected),
+        (task, page, expected),
+        (task, page, expected),
+    ]
+    assert all(call[2] is expected for call in adapter.received)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "brand"),
+    [
+        (_VerifiedAdapter(_live_official_spec("华为")), "小米"),
+        (_VerifiedAdapter(_site_spec(WebsiteChannel.JD)), "小米"),
+    ],
+)
+def test_live_official_reader_rejects_mismatched_adapter_spec(
+    adapter: _VerifiedAdapter,
+    brand: str,
+) -> None:
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    assert (
+        _capture_error_code(
+            lambda: runtime.capture_context_provider(
+                _live_official_task(brand),
+                object(),
+                _live_official_state(brand),
+            )
+        )
+        == "CAPTURE_ENVIRONMENT"
+    )
+    assert adapter.calls == []
+
+
+def test_live_official_reader_rejects_mismatched_adapter_channel() -> None:
+    adapter = _VerifiedAdapter(_live_official_spec("小米"))
+    adapter.channel = WebsiteChannel.JD
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    assert (
+        _capture_error_code(
+            lambda: runtime.capture_context_provider(
+                _live_official_task("小米"),
+                object(),
+                _live_official_state("小米"),
+            )
+        )
+        == "CAPTURE_ENVIRONMENT"
+    )
+    assert adapter.calls == []
+
+
+def test_live_official_reader_rejects_non_site_spec() -> None:
+    class InvalidSpecAdapter(_VerifiedAdapter):
+        def __init__(self) -> None:
+            self.spec = object()  # type: ignore[assignment]
+            self.channel = WebsiteChannel.OFFICIAL
+            self.calls = []
+
+    adapter = InvalidSpecAdapter()
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    assert (
+        _capture_error_code(
+            lambda: runtime.capture_context_provider(
+                _live_official_task("小米"),
+                object(),
+                _live_official_state("小米"),
+            )
+        )
+        == "CAPTURE_ENVIRONMENT"
+    )
+    assert adapter.calls == []
+
+
+def test_live_official_reader_requires_verified_state_reader() -> None:
+    spec = _live_official_spec("小米")
+
+    class MissingReaderAdapter:
+        channel = WebsiteChannel.OFFICIAL
+
+        def __init__(self) -> None:
+            self.spec = spec
+
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(MissingReaderAdapter()),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    assert (
+        _capture_error_code(
+            lambda: runtime.capture_context_provider(
+                _live_official_task("小米"),
+                object(),
+                _live_official_state("小米"),
+            )
+        )
+        == "CAPTURE_ENVIRONMENT"
+    )
+
+
+def test_live_official_capture_hooks_are_optional() -> None:
+    adapter = _VerifiedAdapter(_live_official_spec("小米"))
+    registry = _CustomAdapterRegistry(adapter)
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=registry,
+        monotonic_clock=lambda: _NOW,
+    )
+    task = _live_official_task("小米")
+    page = object()
+    expected = _live_official_state("小米")
+
+    context = runtime.capture_context_provider(task, page, expected)
+
+    assert registry.calls == [("小米", WebsiteChannel.OFFICIAL)]
+    assert adapter.calls == [(task, page, expected)]
+    assert context.css_rectangles is None
+    assert isinstance(context.stability_probe.semantic_hash(), str)
+
+
+def test_live_official_reader_state_change_fails_closed() -> None:
+    events: list[str] = []
+    adapter = _OrderedLiveOfficialAdapter(
+        _live_official_spec("小米"),
+        events,
+        state_read_error=LayoutRecognitionError(
+            "Live official verified semantic state changed"
+        ),
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    expected = _live_official_state("小米")
+    context = runtime.capture_context_provider(
+        _live_official_task("小米"),
+        object(),
+        expected,
+    )
+    runtime.evidence_capture()._pipeline = _ProbeCapturePipeline(
+        events
+    )  # type: ignore[assignment]
+
+    with pytest.raises(LayoutRecognitionError, match="state changed"):
+        runtime.evidence_capture().capture(_capture_request(context))
+    assert events == [
+        "prepare",
+        "reader-builder",
+        "rectangles",
+        "capture",
+        "restore",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_events"),
+    [
+        (
+            "reader",
+            ["prepare", "reader-builder", "restore"],
+        ),
+        (
+            "rectangles",
+            ["prepare", "reader-builder", "rectangles", "restore"],
+        ),
+    ],
+)
+def test_live_official_context_failure_restores_prepared_view_once(
+    failure_stage: str,
+    expected_events: list[str],
+) -> None:
+    events: list[str] = []
+    adapter = _OrderedLiveOfficialAdapter(
+        _live_official_spec("小米"),
+        events,
+        reader_error=(
+            OSError("reader failed") if failure_stage == "reader" else None
+        ),
+        rectangle_error=(
+            OSError("rectangles failed")
+            if failure_stage == "rectangles"
+            else None
+        ),
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    assert (
+        _capture_error_code(
+            lambda: runtime.capture_context_provider(
+                _live_official_task("小米"),
+                object(),
+                _live_official_state("小米"),
+            )
+        )
+        == "CAPTURE_ENVIRONMENT"
+    )
+    assert events == expected_events
+    assert events.count("restore") == 1
+
+
+def test_live_official_prepare_failure_does_not_restore_unprepared_view() -> None:
+    events: list[str] = []
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(
+            _PrepareFailingLiveOfficialAdapter(
+                _live_official_spec("小米"),
+                events,
+            )
+        ),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    assert (
+        _capture_error_code(
+            lambda: runtime.capture_context_provider(
+                _live_official_task("小米"),
+                object(),
+                _live_official_state("小米"),
+            )
+        )
+        == "CAPTURE_ENVIRONMENT"
+    )
+    assert events == ["prepare"]
+
+
+@pytest.mark.parametrize("capture_fails", (False, True))
+def test_live_official_capture_completion_restores_once(
+    capture_fails: bool,
+) -> None:
+    events: list[str] = []
+    adapter = _OrderedLiveOfficialAdapter(
+        _live_official_spec("小米"),
+        events,
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    context = runtime.capture_context_provider(
+        _live_official_task("小米"),
+        object(),
+        _live_official_state("小米"),
+    )
+    runtime.evidence_capture()._pipeline = _OrderedRawCapturePipeline(
+        events,
+        error=OSError("capture failed") if capture_fails else None,
+    )  # type: ignore[assignment]
+
+    if capture_fails:
+        with pytest.raises(OSError, match="capture failed"):
+            runtime.evidence_capture().capture(_capture_request(context))
+    else:
+        runtime.evidence_capture().capture(_capture_request(context))
+
+    assert events.count("restore") == 1
+    assert events[-1] == "restore"
+
+
+def test_live_official_restore_failure_fails_closed_once() -> None:
+    events: list[str] = []
+    adapter = _OrderedLiveOfficialAdapter(
+        _live_official_spec("小米"),
+        events,
+        restore_error=OSError("restore failed"),
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    context = runtime.capture_context_provider(
+        _live_official_task("小米"),
+        object(),
+        _live_official_state("小米"),
+    )
+    runtime.evidence_capture()._pipeline = _RawCapturePipeline(
+        result=object()
+    )  # type: ignore[assignment]
+
+    with pytest.raises(OSError, match="restore failed"):
+        runtime.evidence_capture().capture(_capture_request(context))
+
+    assert events.count("restore") == 1
