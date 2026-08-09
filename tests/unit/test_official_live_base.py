@@ -7,7 +7,7 @@ import pytest
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.quality import CaptureQualityError
-from quote_app.sites.catalog import SiteSpec, load_site_catalog
+from quote_app.sites.catalog import SiteSpec, load_site_catalog, site_session_family
 from quote_app.sites.official_brands.base import LiveOfficialAdapterBase
 from quote_app.sites.official_brands.models import (
     ApprovedHostFamily,
@@ -220,7 +220,11 @@ def test_manual_page_states_raise_distinct_recoverable_actions(
     with pytest.raises(error_type) as error:
         adapter.raise_if_manual_action(page)
 
-    assert error.value.site == _xiaomi_spec().store_name
+    assert error.value.site == site_session_family(
+        _xiaomi_spec().brand,
+        _xiaomi_spec().channel,
+    )
+    assert error.value.retry_cost == 0
 
 
 def test_offer_snapshot_stabilizes_after_two_consecutive_equal_reads() -> None:

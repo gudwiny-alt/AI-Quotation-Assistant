@@ -12,7 +12,7 @@ from quote_app.evidence.semantic_state import (
     SemanticStateReader,
     VerifiedSemanticState,
 )
-from quote_app.sites.catalog import SiteSpec
+from quote_app.sites.catalog import SiteSpec, site_session_family
 from quote_app.sites.official_brands.models import (
     ApprovedHostFamily,
     OfficialBusinessState,
@@ -129,14 +129,15 @@ class LiveOfficialAdapterBase(ABC):
 
     def raise_if_manual_action(self, page: BrowserPage) -> None:
         action = self._manual_action(page)
+        site = site_session_family(self.spec.brand, self.spec.channel)
         if action is OfficialManualAction.SECURITY_VERIFICATION:
             raise SecurityVerificationRequired(
-                self.spec.store_name,
+                site,
                 "官网触发安全验证，请完成后继续当前任务",
             )
         if action is OfficialManualAction.LOGIN:
             raise LoginRequired(
-                self.spec.store_name,
+                site,
                 "官网需要登录，请完成后继续当前任务",
             )
         if action is not None:
