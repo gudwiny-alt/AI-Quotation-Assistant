@@ -26,7 +26,10 @@ AdapterFactory = Callable[[SiteSpec], RegisteredSiteAdapter]
 _DEFAULT_ADAPTER_CLASSES: Mapping[WebsiteChannel, tuple[str, str]] = {
     WebsiteChannel.JD: ("quote_app.sites.jd", "JDAdapter"),
     WebsiteChannel.TMALL: ("quote_app.sites.tmall", "TmallAdapter"),
-    WebsiteChannel.OFFICIAL: ("quote_app.sites.official", "OfficialSiteAdapter"),
+    WebsiteChannel.OFFICIAL: (
+        "quote_app.sites.official_brands.factory",
+        "create_official_adapter",
+    ),
 }
 
 
