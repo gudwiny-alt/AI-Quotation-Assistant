@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
 from quote_app.sites.catalog import SiteSpec, load_site_catalog
@@ -12,7 +15,7 @@ from quote_app.sites.official_brands.factory import (
     VivoOfficialAdapter,
     XiaomiOfficialAdapter,
 )
-from quote_app.sites.registry import AdapterRegistry
+from quote_app.sites.registry import AdapterRegistry, RegisteredSiteAdapter
 from quote_app.sites.tmall import TmallAdapter
 from quote_app.tasks.models import WebsiteChannel
 
@@ -55,7 +58,7 @@ def test_official_dispatch_does_not_replace_frozen_official_adapters(
 )
 def test_default_registry_routes_new_official_brands_without_copying_specs(
     brand: str,
-    expected_type: type[OfficialSiteAdapter],
+    expected_type: type[RegisteredSiteAdapter],
 ) -> None:
     catalog = load_site_catalog()
     registry = AdapterRegistry(catalog=catalog)
@@ -81,3 +84,31 @@ def test_official_dispatch_leaves_jd_and_tmall_default_classes_unchanged(
     assert jd_adapter.spec is _spec(catalog, brand, WebsiteChannel.JD)
     assert type(tmall_adapter) is TmallAdapter
     assert tmall_adapter.spec is _spec(catalog, brand, WebsiteChannel.TMALL)
+
+
+def test_default_registry_loads_official_brand_factory_only_on_official_request() -> None:
+    script = """
+import sys
+
+from quote_app.sites.registry import AdapterRegistry
+from quote_app.tasks.models import WebsiteChannel
+
+module_name = "quote_app.sites.official_brands.factory"
+assert module_name not in sys.modules
+registry = AdapterRegistry()
+assert module_name not in sys.modules
+registry.adapter_for("小米", WebsiteChannel.JD)
+registry.adapter_for("小米", WebsiteChannel.TMALL)
+assert module_name not in sys.modules
+registry.adapter_for("HONOR", WebsiteChannel.OFFICIAL)
+assert module_name in sys.modules
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr

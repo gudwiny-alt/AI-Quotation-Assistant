@@ -3,6 +3,7 @@
 from quote_app.sites.official_brands.factory import (
     AppleOfficialAdapter,
     HuaweiOfficialAdapter,
+    OfficialBrandAdapterNotRegistered,
     OppoOfficialAdapter,
     VivoOfficialAdapter,
     XiaomiOfficialAdapter,
@@ -12,6 +13,7 @@ from quote_app.sites.official_brands.factory import (
 __all__ = [
     "AppleOfficialAdapter",
     "HuaweiOfficialAdapter",
+    "OfficialBrandAdapterNotRegistered",
     "OppoOfficialAdapter",
     "VivoOfficialAdapter",
     "XiaomiOfficialAdapter",
