@@ -157,6 +157,20 @@ class _StateFixtureLiveAdapter(_FixtureLiveAdapter):
         return self._states[index]
 
 
+class _ReadErrorFixtureLiveAdapter(_FixtureLiveAdapter):
+    def __init__(self, spec: SiteSpec, error: LoginRequired) -> None:
+        super().__init__(spec)
+        self._read_error = error
+
+    def _read_business_state(
+        self,
+        task: WebsiteTask,
+        page: ScriptedOfficialLivePage,
+    ) -> OfficialBusinessState:
+        del task, page
+        raise self._read_error
+
+
 def _page(*frames: OfficialLiveFrame) -> ScriptedOfficialLivePage:
     return ScriptedOfficialLivePage(
         "https://www.mi.com/shop/buy/detail?product_id=123",
@@ -487,6 +501,24 @@ def test_price_found_observation_uses_explicit_legacy_boundary_mapping() -> None
 
 
 @pytest.mark.parametrize(
+    "state",
+    [
+        _price_state(capacity="12GB+512GB"),
+        _price_state(color="白色"),
+    ],
+)
+def test_price_found_observation_rejects_wrong_brand_configuration(
+    state: OfficialBusinessState,
+) -> None:
+    adapter = _FixtureLiveAdapter(_xiaomi_spec())
+
+    with pytest.raises(NonRetryableTechnicalError) as error:
+        adapter.build_observation(_task(), state)
+
+    assert error.value.code == "OFFICIAL_STATE_MISMATCH"
+
+
+@pytest.mark.parametrize(
     ("outcome", "rectangles", "roles"),
     [
         (
@@ -711,6 +743,34 @@ def test_verified_legal_no_reader_revalidates_facts_but_returns_expected() -> No
     )
 
     assert reader() is expected
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [LoginRequired, SecurityVerificationRequired],
+)
+def test_verified_reader_propagates_manual_action_raised_during_state_read(
+    error_type: type[LoginRequired],
+) -> None:
+    site = site_session_family("小米", WebsiteChannel.OFFICIAL)
+    read_error = error_type(site, "请人工处理后继续")
+    adapter = _ReadErrorFixtureLiveAdapter(_xiaomi_spec(), read_error)
+    expected = _FixtureLiveAdapter(_xiaomi_spec()).build_observation(
+        _task(),
+        _price_state(),
+    ).semantic_state
+    reader = adapter.verified_state_reader(
+        _task(),
+        _page(_frame()),
+        expected,
+    )
+
+    with pytest.raises(error_type) as caught:
+        reader()
+
+    assert caught.value is read_error
+    assert caught.value.site == site
+    assert caught.value.retry_cost == 0
 
 
 @pytest.mark.parametrize(

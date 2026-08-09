@@ -196,6 +196,8 @@ class LiveOfficialAdapterBase(ABC):
                     task,
                     state,
                 ).semantic_state
+            except LoginRequired:
+                raise
             except LayoutRecognitionError:
                 raise
             except Exception:
@@ -234,6 +236,11 @@ class LiveOfficialAdapterBase(ABC):
         if state.outcome is BusinessOutcome.PRICE_FOUND:
             if state.detail_identity is None:
                 raise AssertionError("price-found detail identity is required")
+            if not self._offer_matches_task(task, state.offer_snapshot()):
+                raise NonRetryableTechnicalError(
+                    "OFFICIAL_STATE_MISMATCH",
+                    "官网业务状态与当前任务不一致",
+                )
             current_sku = f"official-detail:{state.detail_identity}"
             region = _LEGACY_REGION_EXCLUSION
             stock_state = _LEGACY_STOCK_EXCLUSION
