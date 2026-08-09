@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import get_type_hints
+
 import pytest
 
 import quote_app.sites.official_brands.factory as factory_module
@@ -84,3 +86,9 @@ def test_factory_fails_closed_when_a_non_legacy_brand_has_no_mapping(
 
     with pytest.raises(LookupError, match="小米"):
         create_official_adapter(spec)
+
+
+def test_factory_return_protocol_is_resolvable_at_runtime() -> None:
+    hints = get_type_hints(create_official_adapter)
+
+    assert hints["return"] is RegisteredSiteAdapter

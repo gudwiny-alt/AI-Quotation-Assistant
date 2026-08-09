@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING
 
 from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.official import OfficialSiteAdapter
+from quote_app.sites.registry import RegisteredSiteAdapter
 from quote_app.tasks.models import WebsiteChannel
 
-if TYPE_CHECKING:
-    from quote_app.sites.registry import RegisteredSiteAdapter
-
-
-OfficialAdapterFactory = Callable[[SiteSpec], "RegisteredSiteAdapter"]
+OfficialAdapterFactory = Callable[[SiteSpec], RegisteredSiteAdapter]
 
 
 class XiaomiOfficialAdapter(OfficialSiteAdapter):
