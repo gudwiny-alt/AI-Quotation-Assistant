@@ -16,6 +16,7 @@ from quote_app.sites.catalog import SiteSpec, site_session_family
 from quote_app.sites.official_brands.models import (
     ApprovedHostFamily,
     OfficialBusinessState,
+    OfficialDetailIdentity,
     OfficialManualAction,
     OfficialOfferSnapshot,
 )
@@ -29,6 +30,7 @@ from quote_app.tasks.models import (
     url_contains_credentials,
 )
 from quote_app.tasks.retry import (
+    LayoutRecognitionError,
     LoginRequired,
     NonRetryableTechnicalError,
     SecurityVerificationRequired,
@@ -181,12 +183,36 @@ class LiveOfficialAdapterBase(ABC):
         self,
         task: WebsiteTask,
         page: BrowserPage,
+        expected: VerifiedSemanticState,
     ) -> SemanticStateReader:
         self._validate_task(task)
+        self._validate_expected_state(task, expected)
 
         def reader() -> VerifiedSemanticState:
-            state = self._read_business_state(task, page)
-            return self.build_observation(task, state).semantic_state
+            self.raise_if_manual_action(page)
+            try:
+                state = self._read_business_state(task, page)
+                current = self.build_observation(
+                    task,
+                    state,
+                ).semantic_state
+            except LayoutRecognitionError:
+                raise
+            except Exception:
+                raise LayoutRecognitionError(
+                    "Live official verified semantic state changed"
+                ) from None
+            if expected.outcome is BusinessOutcome.PRICE_FOUND:
+                if current != expected:
+                    raise LayoutRecognitionError(
+                        "Live official verified semantic state changed"
+                    )
+                return current
+            if not self._same_legal_no_business_state(current, expected):
+                raise LayoutRecognitionError(
+                    "Live official verified semantic state changed"
+                )
+            return expected
 
         return reader
 
@@ -299,19 +325,90 @@ class LiveOfficialAdapterBase(ABC):
             )
         return snapshot
 
+    def _validate_expected_state(
+        self,
+        task: WebsiteTask,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        try:
+            valid = (
+                isinstance(expected, VerifiedSemanticState)
+                and expected.brand == task.brand
+                and expected.model_name == task.model_name
+                and expected.outcome in _RECOVERABLE_OUTCOMES
+            )
+            if valid:
+                self.require_approved_url(expected.canonical_url)
+            if valid and expected.outcome is BusinessOutcome.PRICE_FOUND:
+                detail_prefix = "official-detail:"
+                valid = (
+                    expected.current_sku.startswith(detail_prefix)
+                    and len(expected.current_sku) > len(detail_prefix)
+                    and expected.region == _LEGACY_REGION_EXCLUSION
+                    and expected.stock_state == _LEGACY_STOCK_EXCLUSION
+                    and expected.price is not None
+                    and self._offer_matches_task(
+                        task,
+                        OfficialOfferSnapshot(
+                            identity=self._expected_detail_identity(
+                                expected,
+                                detail_prefix,
+                            ),
+                            brand=expected.brand,
+                            model_name=expected.model_name,
+                            capacity=expected.capacity,
+                            color=expected.color,
+                            price=expected.price,
+                        ),
+                    )
+                )
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise LayoutRecognitionError(
+                "Live official verified-state reader is unavailable"
+            )
+
+    @staticmethod
+    def _expected_detail_identity(
+        expected: VerifiedSemanticState,
+        detail_prefix: str,
+    ) -> OfficialDetailIdentity:
+        return OfficialDetailIdentity(
+            expected.canonical_url,
+            expected.current_sku[len(detail_prefix):],
+        )
+
+    @staticmethod
+    def _same_legal_no_business_state(
+        current: VerifiedSemanticState,
+        expected: VerifiedSemanticState,
+    ) -> bool:
+        return (
+            current.canonical_url == expected.canonical_url
+            and current.brand == expected.brand
+            and current.model_name == expected.model_name
+            and current.capacity == expected.capacity
+            and current.color == expected.color
+            and current.current_sku == expected.current_sku
+            and current.region == expected.region
+            and current.stock_state == expected.stock_state
+            and current.price == expected.price
+            and current.outcome is expected.outcome
+        )
+
+    @abstractmethod
     def _offer_matches_task(
         self,
         task: WebsiteTask,
         snapshot: OfficialOfferSnapshot,
     ) -> bool:
-        """Check shared identity only; brand modules own configuration rules."""
-        return (
-            snapshot.brand == task.brand
-            and snapshot.model_name == task.model_name
-        )
+        """Apply the concrete brand's capacity and color matching policy."""
+        raise NotImplementedError
 
+    @abstractmethod
     def _manual_action(self, page: BrowserPage) -> OfficialManualAction | None:
-        return None
+        raise NotImplementedError
 
     @abstractmethod
     def _read_business_state(

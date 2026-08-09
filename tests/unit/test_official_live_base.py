@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -17,6 +18,10 @@ from quote_app.sites.official_brands.models import (
     OfficialManualAction,
     OfficialOfferSnapshot,
 )
+from quote_app.sites.protocol import (
+    ResumableSiteObservationAdapter,
+    SiteObservationAdapter,
+)
 from quote_app.sites.registry import RegisteredSiteAdapter
 from quote_app.tasks.models import (
     BusinessOutcome,
@@ -25,6 +30,7 @@ from quote_app.tasks.models import (
     WebsiteTask,
 )
 from quote_app.tasks.retry import (
+    LayoutRecognitionError,
     LoginRequired,
     NonRetryableTechnicalError,
     SecurityVerificationRequired,
@@ -73,6 +79,18 @@ class _FixtureLiveAdapter(LiveOfficialAdapterBase):
             return OfficialManualAction.LOGIN
         return None
 
+    def _offer_matches_task(
+        self,
+        task: WebsiteTask,
+        snapshot: OfficialOfferSnapshot,
+    ) -> bool:
+        return (
+            snapshot.brand == task.brand
+            and snapshot.model_name == task.model_name
+            and snapshot.capacity == f"{task.ram}+{task.storage}"
+            and snapshot.color == task.color
+        )
+
     def _read_business_state(
         self,
         task: WebsiteTask,
@@ -104,6 +122,41 @@ class _FixtureLiveAdapter(LiveOfficialAdapterBase):
         return self.build_observation(task, self._read_business_state(task, page))
 
 
+class _StorageOnlyFixtureLiveAdapter(_FixtureLiveAdapter):
+    def _offer_matches_task(
+        self,
+        task: WebsiteTask,
+        snapshot: OfficialOfferSnapshot,
+    ) -> bool:
+        return (
+            snapshot.brand == task.brand
+            and snapshot.model_name == task.model_name
+            and snapshot.capacity == task.storage
+            and snapshot.color == task.color
+        )
+
+
+class _StateFixtureLiveAdapter(_FixtureLiveAdapter):
+    def __init__(
+        self,
+        spec: SiteSpec,
+        states: list[OfficialBusinessState],
+    ) -> None:
+        super().__init__(spec)
+        self._states = states
+        self._state_index = 0
+
+    def _read_business_state(
+        self,
+        task: WebsiteTask,
+        page: ScriptedOfficialLivePage,
+    ) -> OfficialBusinessState:
+        del task, page
+        index = min(self._state_index, len(self._states) - 1)
+        self._state_index += 1
+        return self._states[index]
+
+
 def _page(*frames: OfficialLiveFrame) -> ScriptedOfficialLivePage:
     return ScriptedOfficialLivePage(
         "https://www.mi.com/shop/buy/detail?product_id=123",
@@ -128,10 +181,48 @@ def _frame(
     )
 
 
+def _price_state(
+    *,
+    url: str = "https://www.mi.com/shop/buy/detail?product_id=123",
+    detail_identity: str = "product-id:123",
+    capacity: str = "12GB+256GB",
+    color: str = "黑色",
+    price: str = "3999.00",
+) -> OfficialBusinessState:
+    return OfficialBusinessState.price_found(
+        identity=OfficialDetailIdentity(url, detail_identity),
+        brand="小米",
+        model_name="小米 15",
+        capacity=capacity,
+        color=color,
+        price=Decimal(price),
+    )
+
+
+def _no_model_state(*, offset: int = 0) -> OfficialBusinessState:
+    return OfficialBusinessState.legal_no(
+        canonical_url="https://www.mi.com/shop/search?q=xiaomi15",
+        brand="小米",
+        model_name="小米 15",
+        capacity="12GB+256GB",
+        color="黑色",
+        outcome=BusinessOutcome.NO_MODEL,
+        capture_view=OfficialCaptureView(
+            (
+                CssRect(1 + offset, 2, 30, 40, "search_keyword"),
+                CssRect(3 + offset, 4, 50, 60, "result_region"),
+            )
+        ),
+        detail_identity=None,
+    )
+
+
 def test_live_base_satisfies_registry_protocol_and_rejects_direct_execution() -> None:
     adapter = _FixtureLiveAdapter(_xiaomi_spec())
 
     assert isinstance(adapter, RegisteredSiteAdapter)
+    assert isinstance(adapter, SiteObservationAdapter)
+    assert isinstance(adapter, ResumableSiteObservationAdapter)
     with pytest.raises(NonRetryableTechnicalError) as error:
         adapter.execute(_task(), _page(_frame()), object())  # type: ignore[arg-type]
 
@@ -277,7 +368,7 @@ def test_region_and_stock_changes_do_not_participate_in_offer_stability() -> Non
 
 
 def test_common_base_does_not_hard_code_brand_capacity_strategy() -> None:
-    adapter = _FixtureLiveAdapter(_xiaomi_spec())
+    adapter = _StorageOnlyFixtureLiveAdapter(_xiaomi_spec())
     page = _page(
         OfficialLiveFrame(
             detail_identity="product-id:123",
@@ -308,6 +399,44 @@ def test_common_base_does_not_hard_code_brand_capacity_strategy() -> None:
     )
 
     assert snapshot.capacity == "256GB"
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        OfficialLiveFrame(
+            detail_identity="product-id:123",
+            model_name="小米 15",
+            capacity="256GB",
+            color="黑色",
+            price=Decimal("3999.00"),
+            region="福建>福州",
+            stock_state="现货",
+        ),
+        OfficialLiveFrame(
+            detail_identity="product-id:123",
+            model_name="小米 15",
+            capacity="12GB+256GB",
+            color="白色",
+            price=Decimal("3999.00"),
+            region="福建>福州",
+            stock_state="现货",
+        ),
+    ],
+)
+def test_brand_configuration_matcher_rejects_wrong_capacity_or_color(
+    frame: OfficialLiveFrame,
+) -> None:
+    adapter = _FixtureLiveAdapter(_xiaomi_spec())
+
+    with pytest.raises(CaptureQualityError, match="does not match"):
+        adapter.wait_for_stable_offer(
+            _task(),
+            _page(frame, frame),
+            max_checks=2,
+            interval_seconds=0.1,
+            sleeper=lambda _seconds: None,
+        )
 
 def test_offer_wait_fails_closed_when_state_never_stabilizes() -> None:
     adapter = _FixtureLiveAdapter(_xiaomi_spec())
@@ -472,6 +601,119 @@ def test_capture_state_comparison_uses_only_business_snapshot() -> None:
 
 
 @pytest.mark.parametrize(
+    "expected",
+    [
+        object(),
+        replace(
+            _FixtureLiveAdapter(_xiaomi_spec()).build_observation(
+                _task(),
+                _price_state(),
+            ).semantic_state,
+            brand="华为",
+        ),
+        replace(
+            _FixtureLiveAdapter(_xiaomi_spec()).build_observation(
+                _task(),
+                _price_state(),
+            ).semantic_state,
+            model_name="小米 15 Pro",
+        ),
+        replace(
+            _FixtureLiveAdapter(_xiaomi_spec()).build_observation(
+                _task(),
+                _price_state(),
+            ).semantic_state,
+            canonical_url="https://example.com/product/123",
+        ),
+        replace(
+            _FixtureLiveAdapter(_xiaomi_spec()).build_observation(
+                _task(),
+                _price_state(),
+            ).semantic_state,
+            outcome=BusinessOutcome.SOLD_OUT,
+            price=None,
+            css_rectangles=(CssRect(1, 2, 30, 40, "stock_status"),),
+        ),
+    ],
+)
+def test_verified_reader_rejects_invalid_expected_state(expected: object) -> None:
+    adapter = _FixtureLiveAdapter(_xiaomi_spec())
+
+    with pytest.raises(LayoutRecognitionError, match="unavailable"):
+        adapter.verified_state_reader(
+            _task(),
+            _page(_frame()),
+            expected,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        _price_state(price="3998.00"),
+        _price_state(capacity="12GB+512GB"),
+        _price_state(color="白色"),
+        _price_state(
+            url="https://m.mi.com/shop/buy/detail?product_id=456",
+            detail_identity="product-id:456",
+        ),
+        OfficialBusinessState.legal_no(
+            canonical_url="https://www.mi.com/shop/buy/detail?product_id=123",
+            brand="小米",
+            model_name="小米 15",
+            capacity="12GB+256GB",
+            color="黑色",
+            outcome=BusinessOutcome.COLOR_UNAVAILABLE,
+            capture_view=OfficialCaptureView(
+                (CssRect(1, 2, 30, 40, "color"),)
+            ),
+            detail_identity="product-id:123",
+        ),
+    ],
+)
+def test_verified_price_reader_fails_closed_on_business_drift(
+    current: OfficialBusinessState,
+) -> None:
+    expected_adapter = _FixtureLiveAdapter(_xiaomi_spec())
+    expected = expected_adapter.build_observation(
+        _task(),
+        _price_state(),
+    ).semantic_state
+    adapter = _StateFixtureLiveAdapter(_xiaomi_spec(), [current])
+    reader = adapter.verified_state_reader(
+        _task(),
+        _page(_frame()),
+        expected,
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="changed"):
+        reader()
+
+
+def test_verified_legal_no_reader_revalidates_facts_but_returns_expected() -> None:
+    expected_adapter = _StateFixtureLiveAdapter(
+        _xiaomi_spec(),
+        [_no_model_state(offset=0)],
+    )
+    expected = expected_adapter.build_observation(
+        _task(),
+        _no_model_state(offset=0),
+    ).semantic_state
+    adapter = _StateFixtureLiveAdapter(
+        _xiaomi_spec(),
+        [_no_model_state(offset=10)],
+    )
+
+    reader = adapter.verified_state_reader(
+        _task(),
+        _page(_frame()),
+        expected,
+    )
+
+    assert reader() is expected
+
+
+@pytest.mark.parametrize(
     "checkpoint",
     [
         WebsiteObservationCheckpoint(
@@ -497,6 +739,24 @@ def test_resume_rejects_mismatched_task_or_checkpoint(checkpoint) -> None:
         adapter.resume(_task(), _page(_frame()), checkpoint)
 
     assert error.value.code == "RECOVERY_INVALID"
+
+
+def test_resume_accepts_valid_checkpoint_and_revalidates_current_page() -> None:
+    adapter = _FixtureLiveAdapter(_xiaomi_spec())
+    page = _page(_frame())
+    checkpoint = WebsiteObservationCheckpoint(
+        task_id="task-xiaomi-1",
+        outcome=BusinessOutcome.PRICE_FOUND,
+        price=Decimal("3999.00"),
+        url="https://www.mi.com/shop/buy/detail?product_id=123",
+        observed_at=datetime.now(timezone.utc),
+    )
+
+    observation = adapter.resume(_task(), page, checkpoint)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("3999.00")
+    assert page.read_index == 1
 
 
 def test_resume_rejects_unsupported_checkpoint_before_page_read() -> None:
