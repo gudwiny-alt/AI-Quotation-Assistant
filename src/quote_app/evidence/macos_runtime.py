@@ -1098,7 +1098,12 @@ class MacFormalCaptureRuntime:
                 raise ValueError(
                     "Live official verified-state reader is unavailable"
                 )
-            return reader_builder(task, page, state)
+            reader = reader_builder(task, page, state)
+            if not callable(reader):
+                raise ValueError(
+                    "Live official verified-state reader must be callable"
+                )
+            return reader
         except BaseException:
             self._prepared_adapters.pop((task.brand, task.channel), None)
             restorer = getattr(adapter, "restore_capture_view", None)

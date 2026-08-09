@@ -3614,3 +3614,46 @@ def test_live_official_restore_failure_fails_closed_once() -> None:
         runtime.evidence_capture().capture(_capture_request(context))
 
     assert events.count("restore") == 1
+
+
+@pytest.mark.parametrize("invalid_reader", (None, object()))
+def test_live_official_reader_builder_rejects_non_callable_result(
+    invalid_reader: object | None,
+) -> None:
+    events: list[str] = []
+
+    class InvalidReaderAdapter(_OrderedLiveOfficialAdapter):
+        def verified_state_reader(
+            self,
+            task: WebsiteTask,
+            page: object,
+            expected: VerifiedSemanticState,
+        ) -> Any:
+            self.events.append("reader-builder")
+            self.received.append((task, page, expected))
+            return invalid_reader
+
+    adapter = InvalidReaderAdapter(
+        _live_official_spec("小米"),
+        events,
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+
+    assert (
+        _capture_error_code(
+            lambda: runtime.capture_context_provider(
+                _live_official_task("小米"),
+                object(),
+                _live_official_state("小米"),
+            )
+        )
+        == "CAPTURE_ENVIRONMENT"
+    )
+    assert events == ["prepare", "reader-builder", "restore"]
+    assert runtime._prepared_adapters == {}
