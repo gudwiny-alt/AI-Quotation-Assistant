@@ -224,14 +224,102 @@ def test_gui_run_marks_honor_closed_loop_mode_in_status(tmp_path: Path) -> None:
     assert received[0].selected_brand == "HONOR"
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_brand", "expected_status"),
+    (
+        ("小米官网验收（仅官网）", "小米", "小米官网验收模式（仅官网）"),
+        ("OPPO 官网验收（仅官网）", "欧珀", "OPPO 官网验收模式（仅官网）"),
+        ("vivo 官网验收（仅官网）", "维沃", "vivo 官网验收模式（仅官网）"),
+        ("华为官网验收（仅官网）", "华为", "华为官网验收模式（仅官网）"),
+        ("苹果官网验收（仅官网）", "苹果", "苹果官网验收模式（仅官网）"),
+    ),
+)
+def test_gui_official_acceptance_modes_select_one_brand_and_official_channel(
+    mode: str,
+    expected_brand: str,
+    expected_status: str,
+) -> None:
+    """Break caught: a new mode runs the wrong brand/channel or says 荣耀."""
+    from quote_app.app import QuoteApp
+
+    app = object.__new__(QuoteApp)
+    app.brand_mode_var = SimpleNamespace(get=lambda: mode)
+
+    assert app._selected_brand_from_mode() == expected_brand
+    assert app._selected_channels_from_mode() == frozenset(
+        {WebsiteChannel.OFFICIAL}
+    )
+    assert app._run_mode_status_prefix() == expected_status
+
+
+def test_gui_build_lists_every_approved_mode_without_truncating_long_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: a mode is absent from the selector or its label is clipped."""
+    from quote_app import app as app_module
+
+    combobox_options: list[dict[str, object]] = []
+
+    class Widget:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def grid(self, **_kwargs: object) -> None:
+            pass
+
+        def columnconfigure(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class Combobox(Widget):
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            combobox_options.append(kwargs)
+
+    class Root(Widget):
+        def title(self, _title: str) -> None:
+            pass
+
+        def rowconfigure(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    for name in ("Frame", "Label", "Entry", "Button"):
+        monkeypatch.setattr(app_module.ttk, name, Widget)
+    monkeypatch.setattr(app_module.ttk, "Combobox", Combobox)
+    monkeypatch.setattr(app_module.scrolledtext, "ScrolledText", Widget)
+
+    app = object.__new__(app_module.QuoteApp)
+    app.root = Root()
+    app.base_var = object()
+    app.marketing_var = object()
+    app.bop_var = object()
+    app.output_dir_var = object()
+    app.year_var = object()
+    app.month_var = object()
+    app.brand_mode_var = object()
+    app._build()
+
+    assert len(combobox_options) == 1
+    options = combobox_options[0]
+    assert options["values"] == (
+        "荣耀官网验收（仅官网）",
+        "荣耀全站闭环（官网、京东、天猫）",
+        "小米官网验收（仅官网）",
+        "OPPO 官网验收（仅官网）",
+        "vivo 官网验收（仅官网）",
+        "华为官网验收（仅官网）",
+        "苹果官网验收（仅官网）",
+    )
+    assert isinstance(options["width"], int)
+    assert options["width"] >= max(len(value) for value in options["values"])
+
+
 @pytest.mark.parametrize("mode", ("全部品牌", "测试品牌"))
-def test_gui_rejects_any_mode_other_than_honor(mode: str) -> None:
+def test_gui_rejects_unknown_run_mode(mode: str) -> None:
     from quote_app.app import InputValidationError, QuoteApp
 
     app = object.__new__(QuoteApp)
     app.brand_mode_var = SimpleNamespace(get=lambda: mode)
 
-    with pytest.raises(InputValidationError, match="当前版本仅支持 HONOR"):
+    with pytest.raises(InputValidationError, match="当前运行范围不受支持"):
         app._selected_brand_from_mode()
 
 

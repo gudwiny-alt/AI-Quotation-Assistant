@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from tkinter import filedialog, scrolledtext, ttk
+from types import MappingProxyType
 
 from quote_app.domain.models import InputPaths, QuoteMonth
 from quote_app.browser.channel_detection import BrowserNotFoundError
@@ -63,6 +64,51 @@ class InputValidationError(ValueError):
 class RunRequest:
     paths: InputPaths
     quote_month: QuoteMonth
+
+
+@dataclass(frozen=True, slots=True)
+class RunModeScope:
+    selected_brand: str
+    selected_channels: frozenset[WebsiteChannel] | None
+    status_prefix: str
+
+
+_OFFICIAL_ONLY = frozenset({WebsiteChannel.OFFICIAL})
+_RUN_MODE_SCOPES = MappingProxyType(
+    {
+        "仅 HONOR": RunModeScope(
+            "HONOR",
+            None,
+            "荣耀闭环穿测模式（仅输出全部荣耀行）",
+        ),
+        "荣耀官网验收（仅官网）": RunModeScope(
+            "HONOR",
+            _OFFICIAL_ONLY,
+            "荣耀官网验收模式（仅官网）",
+        ),
+        "荣耀全站闭环（官网、京东、天猫）": RunModeScope(
+            "HONOR",
+            None,
+            "荣耀闭环穿测模式（仅输出全部荣耀行）",
+        ),
+        "小米官网验收（仅官网）": RunModeScope(
+            "小米", _OFFICIAL_ONLY, "小米官网验收模式（仅官网）"
+        ),
+        "OPPO 官网验收（仅官网）": RunModeScope(
+            "欧珀", _OFFICIAL_ONLY, "OPPO 官网验收模式（仅官网）"
+        ),
+        "vivo 官网验收（仅官网）": RunModeScope(
+            "维沃", _OFFICIAL_ONLY, "vivo 官网验收模式（仅官网）"
+        ),
+        "华为官网验收（仅官网）": RunModeScope(
+            "华为", _OFFICIAL_ONLY, "华为官网验收模式（仅官网）"
+        ),
+        "苹果官网验收（仅官网）": RunModeScope(
+            "苹果", _OFFICIAL_ONLY, "苹果官网验收模式（仅官网）"
+        ),
+    }
+)
+_RUN_MODE_OPTIONS = tuple(mode for mode in _RUN_MODE_SCOPES if mode != "仅 HONOR")
 
 
 def make_full_pipeline_request(
@@ -399,9 +445,9 @@ class QuoteApp:
         ttk.Combobox(
             month_frame,
             textvariable=self.brand_mode_var,
-            values=("荣耀官网验收（仅官网）", "荣耀全站闭环（官网、京东、天猫）"),
+            values=_RUN_MODE_OPTIONS,
             state="readonly",
-            width=10,
+            width=max(len(mode) for mode in _RUN_MODE_OPTIONS),
         ).grid(row=0, column=5)
 
         actions = ttk.Frame(frame)
@@ -513,10 +559,7 @@ class QuoteApp:
             self._set_status(f"输入无效：{error}")
             return
         status = f"{APP_BUILD_LABEL}\n自动报价运行中"
-        if selected_channels == frozenset({WebsiteChannel.OFFICIAL}):
-            status = f"荣耀官网验收模式（仅官网）\n{status}"
-        elif selected_brand == "HONOR":
-            status = f"荣耀闭环穿测模式（仅输出全部荣耀行）\n{status}"
+        status = f"{self._run_mode_status_prefix()}\n{status}"
         self._set_status(status)
 
         def work() -> None:
@@ -535,24 +578,22 @@ class QuoteApp:
         self._schedule_pipeline_poll()
 
     def _selected_brand_from_mode(self) -> str:
-        mode = self.brand_mode_var.get()
-        if mode in {
-            "仅 HONOR",
-            "荣耀官网验收（仅官网）",
-            "荣耀全站闭环（官网、京东、天猫）",
-        }:
-            return "HONOR"
-        raise InputValidationError("当前版本仅支持 HONOR")
+        return self._selected_run_mode_scope().selected_brand
 
     def _selected_channels_from_mode(
         self,
     ) -> frozenset[WebsiteChannel] | None:
+        return self._selected_run_mode_scope().selected_channels
+
+    def _run_mode_status_prefix(self) -> str:
+        return self._selected_run_mode_scope().status_prefix
+
+    def _selected_run_mode_scope(self) -> RunModeScope:
         mode = self.brand_mode_var.get()
-        if mode == "荣耀官网验收（仅官网）":
-            return frozenset({WebsiteChannel.OFFICIAL})
-        if mode in {"仅 HONOR", "荣耀全站闭环（官网、京东、天猫）"}:
-            return None
-        raise InputValidationError("当前版本仅支持荣耀官网验收或荣耀全站闭环")
+        try:
+            return _RUN_MODE_SCOPES[mode]
+        except KeyError:
+            raise InputValidationError("当前运行范围不受支持") from None
 
     def check_readiness(self) -> None:
         """Render the current local capture and browser preflight state."""
