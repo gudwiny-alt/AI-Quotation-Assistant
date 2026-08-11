@@ -229,7 +229,7 @@ def test_oppo_real_semantic_page_selects_capacity_then_color_and_quotes_lowest_v
     assert page.capture_scale == 0.8
 
 
-def test_oppo_prefers_the_exact_card_that_contains_target_capacity_and_color() -> None:
+def test_oppo_enters_first_exact_model_card_before_selecting_capacity_and_color() -> None:
     page = _OppoFixturePage("normal.html")
     result_titles = [
         node
@@ -247,7 +247,7 @@ def test_oppo_prefers_the_exact_card_that_contains_target_capacity_and_color() -
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.goto_calls[-1] == (
-        "https://www.opposhop.cn/cn/web/products/36932.html?us=search"
+        "https://www.opposhop.cn/cn/web/products/32740.html?us=search"
     )
 
 
@@ -286,9 +286,9 @@ def test_oppo_a6t_enters_exact_model_card_and_rejects_neighbor_variants() -> Non
     _set_result_cards(
         page,
         (
-            ("OPPO A6 Pro 冰川蓝 12GB+256GB", "/cn/web/products/41950.html?us=search"),
+            ("OPPO A6 Pro 墨竹黑 6GB+128GB", "/cn/web/products/41950.html?us=search"),
             ("OPPO A6t 青出于蓝 6GB+128GB 官方标配", "/cn/web/products/41956.html?us=search"),
-            ("OPPO A6i 夜幕黑 8GB+256GB", "/cn/web/products/41960.html?us=search"),
+            ("OPPO A6i 墨竹黑 6GB+128GB", "/cn/web/products/41960.html?us=search"),
         ),
     )
     _set_detail_product(page, model_name="OPPO A6t", capacity="6GB+128GB", color="墨竹黑")
