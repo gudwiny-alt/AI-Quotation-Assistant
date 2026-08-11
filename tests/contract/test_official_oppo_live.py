@@ -325,6 +325,19 @@ def test_oppo_capture_positions_once_only_when_four_proofs_do_not_fit() -> None:
     assert page.position_attempts == 1
 
 
+def test_oppo_capture_does_not_repeat_zoom_when_detail_is_already_at_80_percent() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoFixturePage("normal.html")
+    observation = adapter.observe(task, page)
+    assert page.capture_scales == [0.8]
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert page.capture_scales == [0.8]
+    assert page.position_attempts == 0
+
+
 def test_oppo_emits_formal_no_model_evidence_after_stable_search_results() -> None:
     observation = _adapter().observe(_task(), _OppoFixturePage("no_model.html"))
 
