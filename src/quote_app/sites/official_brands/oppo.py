@@ -232,9 +232,6 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
 
     def _observe_loaded_detail(self, task: WebsiteTask, page: Any) -> AdapterObservation:
         try:
-            # Entering the detail page is immediately followed by the stable
-            # 80% view; option locators are not allowed to move the page first.
-            ensure_capture_scale(page, scale=0.8)
             identity = _detail_identity(page.url)
             self._wait_for_detail_title(page, task.model_name)
 
@@ -335,8 +332,10 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
         self.raise_if_manual_action(browser_page)
         if expected.outcome is BusinessOutcome.PRICE_FOUND:
             try:
-                ensure_capture_scale(browser_page, scale=0.8)
                 proofs = self._capture_proof_locators(task, browser_page)
+                if not _proof_group_fits_current_viewport(browser_page, proofs):
+                    ensure_capture_scale(browser_page, scale=0.8)
+                    proofs = self._capture_proof_locators(task, browser_page)
                 if not _proof_group_fits_current_viewport(browser_page, proofs):
                     if not _scroll_proof_group_into_view(browser_page, proofs):
                         raise LayoutRecognitionError(
@@ -454,13 +453,20 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
         scope = self._search_scope(page)
         if scope is None or self._explicit_empty_result(scope):
             return None
+        exact_model_seen = False
         for link in _visible(scope, _PRODUCT_LINKS):
             if not _title_matches_model(task.model_name, _link_title(link)):
                 continue
-            approved = _approved_product_url(link.get_attribute("href"))
+            exact_model_seen = True
+            try:
+                approved = _approved_product_url(link.get_attribute("href"))
+            except ValueError:
+                continue
             if not _detail_identity(approved).product_key.isdigit():
                 raise LayoutRecognitionError("OPPO product identity is invalid")
             return link
+        if exact_model_seen:
+            raise LayoutRecognitionError("OPPO exact-model cards have no approved product URL")
         return None
 
     def _wait_for_detail_title(self, page: Any, model_name: str) -> None:

@@ -577,7 +577,7 @@ def official_case() -> Callable[..., tuple[Any, Any, _OfficialFixturePage, Any]]
     """Build one saved official-site fixture case without browser or network I/O."""
 
     from quote_app.sites.catalog import load_site_catalog
-    from quote_app.sites.registry import adapter_for
+    from quote_app.sites.official import OfficialSiteAdapter
     from quote_app.tasks.models import WebsiteChannel, WebsiteTask
 
     specs = {
@@ -613,7 +613,10 @@ def official_case() -> Callable[..., tuple[Any, Any, _OfficialFixturePage, Any]]
             channel=WebsiteChannel.OFFICIAL,
         )
         return (
-            adapter_for(brand, WebsiteChannel.OFFICIAL),
+            # This fixture preserves the seven-brand legacy data-driven
+            # OfficialSiteAdapter contract. Live brand factory dispatch has
+            # independent contract fixtures under official_live/.
+            OfficialSiteAdapter(spec),
             task,
             page,
             _RejectingOfficialCapture(),

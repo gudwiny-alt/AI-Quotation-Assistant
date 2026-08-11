@@ -76,6 +76,7 @@ class _OppoFixturePage(_OfficialFixturePage):
         self.capture_scale = 1.0
         self.capture_scales: list[float] = []
         self.proofs_fit = True
+        self.proofs_fit_after_scale = True
         self.position_attempts = 0
         self._product_urls = {
             node.attrs["href"]
@@ -113,10 +114,15 @@ class _OppoFixturePage(_OfficialFixturePage):
                 self.capture_scales.append(float(argument))
             return {"inlineZoom": self.capture_scale, "computedZoom": self.capture_scale}
         if "__oppoProofsFitCurrentViewport" in script:
-            return self.proofs_fit
+            return (
+                self.proofs_fit
+                if self.capture_scale == 1.0
+                else self.proofs_fit_after_scale
+            )
         if "window.scrollTo" in script:
             self.position_attempts += 1
             self.proofs_fit = True
+            self.proofs_fit_after_scale = True
             return True
         raise AssertionError(f"unexpected OPPO fixture evaluate: {script[:80]}")
 
@@ -226,7 +232,7 @@ def test_oppo_real_semantic_page_selects_capacity_then_color_and_quotes_lowest_v
     assert observation.price == Decimal("1899")
     assert observation.url == "https://www.opposhop.cn/cn/web/products/32740.html?us=search"
     assert page.option_clicks == ["capacity", "color"]
-    assert page.capture_scale == 0.8
+    assert page.capture_scale == 1.0
 
 
 def test_oppo_enters_first_exact_model_card_before_selecting_capacity_and_color() -> None:
@@ -299,6 +305,47 @@ def test_oppo_a6t_enters_exact_model_card_and_rejects_neighbor_variants() -> Non
     assert page.goto_calls[-1].endswith("/41956.html?us=search")
 
 
+def test_oppo_skips_invalid_exact_model_url_and_enters_first_later_approved_card() -> None:
+    page = _OppoFixturePage("normal.html")
+    _set_result_cards(
+        page,
+        (
+            ("OPPO A6 5G 蓝海浮光 12GB+256GB", "/cn/web/topic/32739.html"),
+            ("OPPO A6 5G 丝绒灰 8GB+256GB", "/cn/web/products/32740.html?us=search"),
+        ),
+    )
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.goto_calls[-1].endswith("/32740.html?us=search")
+
+
+def test_oppo_exact_model_sold_out_card_still_enters_detail() -> None:
+    page = _OppoFixturePage("normal.html")
+    task = _oppo_task(
+        model_name="OPPO A5m 5G",
+        ram="8GB",
+        storage="256GB",
+        color="钻石白",
+    )
+    _set_result_cards(
+        page,
+        (("OPPO A5m 水晶粉 8GB+256GB 暂时缺货", "/cn/web/products/38672.html"),),
+    )
+    _set_detail_product(
+        page,
+        model_name="OPPO A5m",
+        capacity="8GB+256GB",
+        color="钻石白",
+    )
+
+    observation = _adapter().observe(task, page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.goto_calls[-1].endswith("/38672.html")
+
+
 def test_oppo_capture_accepts_exactly_title_price_capacity_and_color_in_one_view() -> None:
     adapter = _adapter()
     task = _task()
@@ -309,7 +356,8 @@ def test_oppo_capture_accepts_exactly_title_price_capacity_and_color_in_one_view
     current = adapter.verified_state_reader(task, page, observation.semantic_state)()
 
     assert current == observation.semantic_state
-    assert page.capture_scales == [0.8]
+    assert page.capture_scales == []
+    assert page.capture_scale == 1.0
     assert page.position_attempts == 0
 
 
@@ -319,9 +367,11 @@ def test_oppo_capture_positions_once_only_when_four_proofs_do_not_fit() -> None:
     page = _OppoFixturePage("normal.html")
     observation = adapter.observe(task, page)
     page.proofs_fit = False
+    page.proofs_fit_after_scale = False
 
     adapter.prepare_capture_view(task, page, observation.semantic_state)
 
+    assert page.capture_scales == [0.8]
     assert page.position_attempts == 1
 
 
@@ -330,9 +380,15 @@ def test_oppo_capture_does_not_repeat_zoom_when_detail_is_already_at_80_percent(
     task = _task()
     page = _OppoFixturePage("normal.html")
     observation = adapter.observe(task, page)
-    assert page.capture_scales == [0.8]
+    page.proofs_fit = False
+    page.proofs_fit_after_scale = True
 
     adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert page.capture_scales == [0.8]
+
+    second_adapter = _adapter()
+    second_adapter.prepare_capture_view(task, page, observation.semantic_state)
 
     assert page.capture_scales == [0.8]
     assert page.position_attempts == 0

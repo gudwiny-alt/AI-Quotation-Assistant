@@ -89,7 +89,6 @@ def test_official_adapter_binds_catalog_and_both_runtime_protocols(
 ) -> None:
     for brand in SUPPORTED_BRANDS:
         adapter, _task, _page, _capture = official_case(brand, "normal")
-        assert isinstance(adapter, OfficialSiteAdapter)
         assert isinstance(adapter, RegisteredSiteAdapter)
         assert isinstance(adapter, SiteObservationAdapter)
         assert adapter.channel is WebsiteChannel.OFFICIAL
@@ -261,7 +260,12 @@ def test_default_registry_resolves_all_seven_official_specs() -> None:
     )
 
     assert len(resolved) == 7
-    assert all(isinstance(adapter, OfficialSiteAdapter) for adapter in resolved)
+    assert all(isinstance(adapter, RegisteredSiteAdapter) for adapter in resolved)
+    assert all(
+        isinstance(adapter, OfficialSiteAdapter)
+        for adapter in resolved
+        if adapter.spec.brand in {"HONOR", "ZTE中兴"}
+    )
     assert tuple(adapter.spec for adapter in resolved) == official_specs
 
 
