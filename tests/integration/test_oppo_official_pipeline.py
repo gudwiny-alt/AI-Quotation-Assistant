@@ -292,14 +292,12 @@ def _capture_context_provider(registry: AdapterRegistry):
         adapter = registry.adapter_for(task.brand, task.channel)
         prepare = getattr(adapter, "prepare_capture_view")
         reader_factory = getattr(adapter, "verified_state_reader")
-        rectangles_reader = getattr(adapter, "capture_rectangles_for_capture")
         prepare(task, page, expected)
         reader = reader_factory(task, page, expected)
         assert reader() == expected
         return CaptureContext(
             expected_window=BrowserWindowIdentity("fixture", 42, "oppo-window"),
             stability_probe=VerifiedPageStateProbe(reader),
-            css_rectangles=rectangles_reader(task, page, expected),
         )
 
     return provider
