@@ -321,6 +321,20 @@ def test_oppo_skips_invalid_exact_model_url_and_enters_first_later_approved_card
     assert page.goto_calls[-1].endswith("/32740.html?us=search")
 
 
+def test_oppo_fails_technical_only_when_all_exact_model_urls_are_unapproved() -> None:
+    page = _OppoFixturePage("normal.html")
+    _set_result_cards(
+        page,
+        (
+            ("OPPO A6 5G 蓝海浮光 12GB+256GB", "/cn/web/topic/32739.html"),
+            ("OPPO A6 5G 丝绒灰 8GB+256GB", "https://evil.example/32740.html"),
+        ),
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="no approved product URL"):
+        _adapter().observe(_task(), page)
+
+
 def test_oppo_exact_model_sold_out_card_still_enters_detail() -> None:
     page = _OppoFixturePage("normal.html")
     task = _oppo_task(
