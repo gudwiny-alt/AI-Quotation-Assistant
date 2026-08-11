@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+  <head><title>OPPO 商城</title></head>
+  <body>
+    <main data-screen="store">
+      <div data-oppo-role="search-opener" class="nav-search" data-action="open-search">
+        <input type="text" placeholder="旗舰手表新配色">
+        <img class="search-icon">
+      </div>
+    </main>
+    <main data-screen="search" hidden>
+      <div data-oppo-role="search-dialog" class="v-dialog">
+        <input data-oppo-role="search-input" class="v-combobox-input"
+               type="text" placeholder="点击搜索">
+      </div>
+    </main>
+    <main data-screen="results" hidden>
+      <div data-oppo-role="search-dialog" class="v-dialog">
+        <input data-oppo-role="search-input" type="text" value="OPPO A6 5G"
+               style="left:20px;top:20px;width:280px;height:36px">
+        <section data-oppo-role="results" class="five-warp search-result"
+                 style="left:20px;top:70px;width:980px;height:420px">
+          <article class="five-item goods-card">
+            <a data-oppo-role="product-link" class="thumb"
+               href="https://www.opposhop.cn/cn/web/products/32740.html?us=search">
+              <span data-oppo-role="product-title">OPPO A6 5G 蓝海浮光 12GB+256GB 官方标配</span>
+            </a>
+          </article>
+          <article class="five-item goods-card">
+            <a data-oppo-role="product-link" class="thumb"
+               href="https://www.opposhop.cn/cn/web/products/36932.html?us=search">
+              <span data-oppo-role="product-title">OPPO A6 5G 蓝海浮光 8GB+256GB 官方标配</span>
+            </a>
+          </article>
+        </section>
+      </div>
+    </main>
+    <main data-screen="product" hidden>
+      <div id="introduce" class="detail-box">
+        <h1 data-oppo-role="detail-title" class="tit"
+            style="left:670px;top:120px;width:600px;height:40px">OPPO A6 5G 蓝海浮光 12GB+256GB 官方标配</h1>
+        <section data-oppo-role="price-region" class="price-tag"
+                 data-official-price-context="销售价"
+                 style="left:670px;top:175px;width:600px;height:90px">
+          <span class="g-price-original-currency-tag">￥</span>
+          <span data-oppo-role="price" class="g-price-original-integer"
+                style="color:rgb(243,65,65);left:700px;top:195px;width:90px;height:42px">1999</span>
+          <span data-oppo-role="price" class="g-price-original-integer"
+                style="color:rgb(243,65,65);left:805px;top:195px;width:90px;height:42px">1899</span>
+          <del><span data-oppo-role="price" class="g-price-original-integer"
+                     style="color:rgb(120,120,120);text-decoration:line-through">2299</span></del>
+        </section>
+        <section class="coupon-panel" data-official-price-context="优惠券">
+          <span data-oppo-role="price" class="coupon-price" style="color:rgb(243,65,65)">200</span>
+        </section>
+        <section class="installment-panel" data-official-price-context="分期月供">
+          <span data-oppo-role="price" class="installment-price" style="color:rgb(243,65,65)">166</span>
+        </section>
+        <div data-oppo-role="color-group" class="v-item-group"
+             style="left:670px;top:280px;width:600px;height:120px">
+          <div class="item-title">颜色</div>
+          <div class="sku-box">
+            <button data-option-kind="color" class="btn active-btn" aria-selected="true">丝绒灰</button>
+            <button data-option-kind="color" class="btn" aria-selected="false">蓝海浮光</button>
+          </div>
+        </div>
+        <div data-oppo-role="capacity-group" class="v-item-group"
+             style="left:670px;top:410px;width:600px;height:120px">
+          <div class="item-title">版本</div>
+          <div class="sku-box">
+            <button data-option-kind="capacity" class="btn active-btn" aria-selected="true">8GB+256GB</button>
+            <button data-option-kind="capacity" class="btn" aria-selected="false">12GB+256GB</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

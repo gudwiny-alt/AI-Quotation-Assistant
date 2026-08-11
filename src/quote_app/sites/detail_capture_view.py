@@ -114,6 +114,23 @@ def apply_capture_scale(page: Any, *, scale: float) -> CaptureScaleProof:
     )
 
 
+def ensure_capture_scale(page: Any, *, scale: float) -> CaptureScaleProof:
+    """Ensure one capture scale without rewriting an already stable value."""
+
+    if not 0.5 <= scale <= 1.0:
+        raise ValueError("capture scale must be between 0.5 and 1.0")
+    inline_zoom, computed_zoom = _capture_scale_sample(
+        page.evaluate(_READ_CAPTURE_SCALE)
+    )
+    if inline_zoom == scale and computed_zoom == scale:
+        return CaptureScaleProof(
+            inline_zoom=inline_zoom,
+            computed_zoom=computed_zoom,
+            sample_count=1,
+        )
+    return apply_capture_scale(page, scale=scale)
+
+
 def restore_capture_scale(page: Any) -> None:
     """Restore the page scale saved by :func:`apply_capture_scale`."""
 
