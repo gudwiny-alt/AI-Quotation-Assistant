@@ -6,17 +6,11 @@ from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.official import OfficialSiteAdapter
 from quote_app.sites.official_brands.oppo import OppoOfficialAdapter
 from quote_app.sites.registry import RegisteredSiteAdapter
+from quote_app.sites.official_brands.vivo import VivoOfficialAdapter
+from quote_app.sites.official_brands.xiaomi import XiaomiOfficialAdapter
 from quote_app.tasks.models import WebsiteChannel
 
 OfficialAdapterFactory = Callable[[SiteSpec], RegisteredSiteAdapter]
-
-
-class XiaomiOfficialAdapter(OfficialSiteAdapter):
-    """Routing placeholder for the future Xiaomi live adapter."""
-
-
-class VivoOfficialAdapter(OfficialSiteAdapter):
-    """Routing placeholder for the future vivo live adapter."""
 
 
 class HuaweiOfficialAdapter(OfficialSiteAdapter):

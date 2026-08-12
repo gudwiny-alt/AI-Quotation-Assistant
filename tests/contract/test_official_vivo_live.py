@@ -416,7 +416,19 @@ def _set_cards(
         if "page-search-result-content" in node.attrs.get("class", "")
     )
     late = next(node for node in container.children if "late-result" in node.attrs.get("class", ""))
-    container.children = [late] if retain_late else []
+    terminal_empty = next(
+        node for node in container.children if "no-goods" in node.attrs.get("class", "")
+    )
+    keyword_input = next(
+        node
+        for node in container.children
+        if node.tag == "input" and node.attrs.get("placeholder") == "请输入搜索内容"
+    )
+    container.children = [
+        keyword_input,
+        *([late] if retain_late else []),
+        terminal_empty,
+    ]
     for index, (title, href) in enumerate(cards):
         card = _OfficialNode(
             "div", {"data-position": str(index), "data-skuid": str(200000 + index)}, container
@@ -670,7 +682,9 @@ def test_vivo_capture_reads_real_four_proofs_from_scaled_domrects(
     adapter.prepare_capture_view(_task(), page, observation.semantic_state)
     expected_delta = max(0.0, (362.0 + 42.0) * 0.8 - viewport + 8.0)
     assert (
-        page.proofs_from_selectors(_capture_selector_specs())["price"].text.endswith("4399")
+        page.proofs_from_selectors(_capture_selector_specs())["price"]
+        .text.replace("¥", "")
+        .endswith("4399")
         and page.capture_scales == scale
     )
     assert page.capture_selector_arguments and all(
