@@ -4,7 +4,7 @@
 from pathlib import Path
 import sys
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 PROJECT_ROOT = Path(SPECPATH).parent
@@ -36,7 +36,7 @@ a = Analysis(
         "quote_app.sites.jd",
         "quote_app.sites.tmall",
         "quote_app.sites.official",
-    ],
+    ] + collect_submodules("quote_app.sites.official_brands"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
