@@ -8,7 +8,9 @@ from typing import Any
 import pytest
 
 from quote_app.sites.catalog import load_site_catalog
+from quote_app.evidence.quality import CaptureQualityError
 from quote_app.tasks.models import BusinessOutcome, WebsiteChannel, WebsiteTask
+from quote_app.tasks.retry import LayoutRecognitionError, NonRetryableTechnicalError
 from tests.conftest import (
     _OfficialDocumentParser,
     _OfficialFixturePage,
@@ -98,6 +100,7 @@ class _VivoPage(_OfficialFixturePage):
         )
         self.results_root = self.root
         self.detail_root = self._parse((_FIXTURES / detail).read_text())
+        self.blank_root = self._parse("<html><body></body></html>")
         self.active = "blank"
         self.fill_calls: list[str] = []
         self.search_submissions = 0
@@ -136,7 +139,7 @@ class _VivoPage(_OfficialFixturePage):
             "home": self.home_root,
             "results": self.results_root,
             "detail": self.detail_root,
-        }.get(self.active, self._active_root)
+        }.get(self.active, self.blank_root)
 
     def goto(self, url: str, **_kwargs: object) -> None:
         self.goto_calls.append(url)
@@ -251,10 +254,32 @@ class _VivoPage(_OfficialFixturePage):
                 self.capture_scale = float(argument)
                 self.capture_scales.append(float(argument))
             return {"inlineZoom": self.capture_scale, "computedZoom": self.capture_scale}
+        if "window.scrollBy" in script:
+            if (
+                not isinstance(argument, dict)
+                or "delta" not in argument
+                or "proofs" not in argument
+            ):
+                raise AssertionError("geometry scroll requires delta plus proof identities")
+            delta = float(argument["delta"])
+            geometry = self.evaluate("getBoundingClientRect", argument["proofs"])
+            expected = max(0.0, geometry["unionBottom"] - geometry["viewportHeight"] + 8.0)
+            assert self.capture_scale == 0.8 and delta == expected
+            self.light_scrolls.append(delta)
+            self.scroll_offset += delta
+            return True
+        if not isinstance(argument, dict) or tuple(argument) != (
+            "title",
+            "price",
+            "capacity",
+            "color",
+        ):
+            raise AssertionError("capture adapter must provide four explicit proof identities")
+        proofs = self.proofs_for_identities(argument)
         if "elementFromPoint" in script:
-            return all(self.visible_and_unobscured(node) for node in self.capture_proofs().values())
+            return all(self.visible_and_unobscured(node) for node in proofs.values())
         if "getBoundingClientRect" in script:
-            boxes = [self.dom_rect(node) for node in self.capture_proofs().values()]
+            boxes = [self.dom_rect(node) for node in proofs.values()]
             if any(box is None for box in boxes):
                 return {"missing": True}
             return {
@@ -263,12 +288,6 @@ class _VivoPage(_OfficialFixturePage):
                 "viewportHeight": self.viewport_height,
                 "scrollY": self.scroll_offset,
             }
-        if "window.scrollBy" in script:
-            delta = float(argument)
-            assert self.capture_scale == 0.8 and 70 <= delta <= 120
-            self.light_scrolls.append(delta)
-            self.scroll_offset += delta
-            return True
         raise AssertionError(f"unexpected vivo evaluation: {script[:90]}")
 
     def capture_proofs(self) -> dict[str, _OfficialNode]:
@@ -296,6 +315,24 @@ class _VivoPage(_OfficialFixturePage):
                 if "sku-module_item--checked" in node.attrs.get("class", "")
             ),
         }
+
+    def proofs_for_identities(self, identities: dict[str, object]) -> dict[str, _OfficialNode]:
+        proofs = self.capture_proofs()
+        expected = {
+            "title": "h1.name",
+            "price": "p.sale-price:¥4399",
+            "capacity": "li.spec_item.checked:12GB+256GB",
+            "color": "li.spec_item.checked:辰夜黑",
+        }
+        if identities != expected:
+            raise AssertionError("capture proofs must bind exact live fixture nodes")
+        if proofs["title"].tag != "h1" or "name" not in proofs["title"].attrs.get("class", ""):
+            raise AssertionError("title proof mismatch")
+        if proofs["price"].text != "4399":
+            raise AssertionError("adopted price proof mismatch")
+        if proofs["capacity"].text != "12GB+256GB" or proofs["color"].text != "辰夜黑":
+            raise AssertionError("selected configuration proof mismatch")
+        return proofs
 
     def visible_and_unobscured(self, node: _OfficialNode) -> bool:
         box = self.dom_rect(node)
@@ -331,14 +368,19 @@ def _adapter() -> Any:
     return importlib.import_module("quote_app.sites.official_brands.vivo").VivoOfficialAdapter(spec)
 
 
-def _set_cards(page: _VivoPage, cards: tuple[tuple[str, str], ...]) -> None:
+def _set_cards(
+    page: _VivoPage,
+    cards: tuple[tuple[str, str], ...],
+    *,
+    retain_late: bool = False,
+) -> None:
     container = next(
         node
         for node in page.results_root.descendants()
         if "page-search-result-content" in node.attrs.get("class", "")
     )
     late = next(node for node in container.children if "late-result" in node.attrs.get("class", ""))
-    container.children = [late]
+    container.children = [late] if retain_late else []
     for index, (title, href) in enumerate(cards):
         card = _OfficialNode(
             "div", {"data-position": str(index), "data-skuid": str(200000 + index)}, container
@@ -378,6 +420,31 @@ def test_vivo_fixture_uses_real_result_data_attributes_and_isolated_state_dom() 
         page.locator("p.sale-price").count() == 1
         and page.locator("div[data-position][data-skuid]").count() == 0
     )
+    fresh = _VivoPage()
+    assert fresh.locator("input").count() == 0
+    assert fresh.locator("div[data-skuid]").count() == 0
+    assert fresh.locator("p.sale-price").count() == 0
+    fresh.active = "unknown"
+    assert fresh.locator("input").count() == 0
+    assert fresh.locator("div[data-skuid]").count() == 0
+    assert fresh.locator("p.sale-price").count() == 0
+    sku_info = next(
+        node
+        for node in fresh.detail_root.descendants()
+        if "sku-info" in node.attrs.get("class", "")
+    )
+    primary = next(node for node in sku_info.children if "primary" in node.attrs.get("class", ""))
+    assert next(
+        node
+        for node in primary.children
+        if node.tag == "h1" and "name" in node.attrs.get("class", "")
+    )
+    assert next(node for node in primary.children if "summary" in node.attrs.get("class", ""))
+    assert next(
+        node
+        for node in sku_info.children
+        if node.tag == "dl" and "sku-module" in node.attrs.get("class", "")
+    )
 
 
 def test_vivo_searches_once_then_quotes_final_stable_selected_offer() -> None:
@@ -399,12 +466,16 @@ def test_vivo_searches_once_then_quotes_final_stable_selected_offer() -> None:
 
 def test_vivo_waits_multiple_rounds_for_late_exact_card_instead_of_no_model() -> None:
     page = _VivoPage()
-    _set_cards(page, (("vivo X200 Pro", "https://shop.vivo.com.cn/product/10010281?skuId=135001"),))
+    _set_cards(
+        page,
+        (("vivo X200 Pro", "https://shop.vivo.com.cn/product/10010281?skuId=135001"),),
+        retain_late=True,
+    )
     page.late_after_waits = 3
     result = _adapter().observe(_task(), page)
     assert (
         result.outcome is BusinessOutcome.PRICE_FOUND
-        and page.waits >= 3
+        and 3 <= page.waits <= 8
         and result.url.endswith("/product/10010286?skuId=135005")
     )
 
@@ -418,7 +489,7 @@ def test_vivo_visible_terminal_no_goods_after_bounded_wait_is_legal_no() -> None
     result = _adapter().observe(_task(), page)
     assert (
         result.outcome is BusinessOutcome.NO_MODEL
-        and page.waits >= 3
+        and 3 <= page.waits <= 8
         and page.locator("div.no-goods").is_visible()
     )
 
@@ -427,9 +498,11 @@ def test_vivo_visible_terminal_no_goods_after_bounded_wait_is_legal_no() -> None
 def test_vivo_rejects_iqoo_before_any_visit(model: str) -> None:
     page = _VivoPage()
     adapter = _adapter()
-    with pytest.raises(Exception, match="iQOO|不支持|unsupported"):
+    with pytest.raises(NonRetryableTechnicalError, match="iQOO|不支持|unsupported") as caught:
         adapter.observe(_task(model), page)
-    assert page.goto_calls == [] and page.fill_calls == []
+    assert caught.value.code == "UNSUPPORTED_VIVO_MODEL_FAMILY"
+    assert page.goto_calls == [] and page.fill_calls == [] and page.presses == []
+    assert page.search_submissions == 0
 
 
 @pytest.mark.parametrize(
@@ -446,7 +519,7 @@ def test_vivo_rejects_iqoo_before_any_visit(model: str) -> None:
 def test_vivo_excludes_derived_models(name: str) -> None:
     page = _VivoPage()
     _set_cards(page, ((name, "https://shop.vivo.com.cn/product/10010281?skuId=135001"),))
-    page.empty_after_waits = 1
+    page.empty_after_waits = 3
     assert _adapter().observe(_task(), page).outcome is BusinessOutcome.NO_MODEL
 
 
@@ -462,7 +535,7 @@ def test_vivo_skips_invalid_first_exact_url_but_all_invalid_exact_urls_are_techn
     assert _adapter().observe(_task(), page).url.endswith("/product/10010284?skuId=135003")
     bad = _VivoPage()
     _set_cards(bad, (("vivo X200", "https://shop.vivo.com.cn/product/not-a-number?skuId=1"),))
-    with pytest.raises(Exception):
+    with pytest.raises(LayoutRecognitionError):
         _adapter().observe(_task(), bad)
 
 
@@ -496,37 +569,36 @@ def test_vivo_does_not_reclick_preselected_targets_and_revalidates_final_detail(
     )
     changed = _VivoPage()
     changed.redirect_url = "https://shop.vivo.com.cn/product/999999?skuId=9"
-    with pytest.raises(Exception):
+    with pytest.raises((LayoutRecognitionError, NonRetryableTechnicalError)):
         _adapter().observe(_task(), changed)
 
 
 def test_vivo_title_drift_and_unstable_offer_are_technical_failures() -> None:
     title = _VivoPage()
     title.title_override = "vivo X200 Pro"
-    with pytest.raises(Exception):
+    with pytest.raises((LayoutRecognitionError, NonRetryableTechnicalError)):
         _adapter().observe(_task(), title)
     unstable = _VivoPage()
     unstable.unstable_prices = True
-    with pytest.raises(Exception):
+    with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
         _adapter().observe(_task(), unstable)
 
 
 @pytest.mark.parametrize(
-    ("viewport", "scale", "scroll"), [(800.0, [], []), (340.0, [0.8], []), (280.0, [0.8], [70.0])]
+    ("viewport", "scale", "needs_scroll"),
+    [(800.0, [], False), (340.0, [0.8], False), (280.0, [0.8], True)],
 )
 def test_vivo_capture_reads_real_four_proofs_from_scaled_domrects(
-    viewport: float, scale: list[float], scroll: list[float]
+    viewport: float, scale: list[float], needs_scroll: bool
 ) -> None:
     page = _VivoPage()
     adapter = _adapter()
     observation = adapter.observe(_task(), page)
     page.viewport_height = viewport
     adapter.prepare_capture_view(_task(), page, observation.semantic_state)
-    assert (
-        page.capture_proofs()["price"].text.endswith("4399")
-        and page.capture_scales == scale
-        and page.light_scrolls == scroll
-    )
+    expected_delta = max(0.0, (362.0 + 42.0) * 0.8 - viewport + 8.0)
+    assert page.capture_proofs()["price"].text.endswith("4399") and page.capture_scales == scale
+    assert page.light_scrolls == ([expected_delta] if needs_scroll else [])
 
 
 def test_vivo_capture_fixed_overlay_or_disappearing_proof_fails_closed_after_one_attempt() -> None:
@@ -535,12 +607,12 @@ def test_vivo_capture_fixed_overlay_or_disappearing_proof_fails_closed_after_one
     observation = adapter.observe(_task(), page)
     page.viewport_height = 280
     page.blocker = (200, 400, True)
-    with pytest.raises(Exception):
+    with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
         adapter.prepare_capture_view(_task(), page, observation.semantic_state)
     assert page.capture_scales == [0.8] and len(page.light_scrolls) == 1
     gone = _VivoPage()
     second = _adapter()
     state = second.observe(_task(), gone)
     gone.remove_color_on_refresh = True
-    with pytest.raises(Exception):
+    with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
         second.prepare_capture_view(_task(), gone, state.semantic_state)
