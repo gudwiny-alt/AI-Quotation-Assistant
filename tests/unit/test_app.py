@@ -66,7 +66,7 @@ def test_app_build_label_identifies_honor_three_site_test_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
     assert APP_BUILD_LABEL == (
-        "天猫同商品截图修复版（全部荣耀行）2026.08.08.48"
+        "vivo官网验收版（不支持iQOO，荣耀/小米/OPPO冻结）2026.08.12.69"
     )
     assert "当前受控页" in BETA_NOTICE
 
