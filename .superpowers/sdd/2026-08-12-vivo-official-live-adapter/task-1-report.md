@@ -17,7 +17,7 @@ Command:
 .venv/bin/pytest -q tests/contract/test_official_vivo_live.py
 ```
 
-Result: collection succeeds; two fixture/provenance checks pass and the
+Result: collection succeeds; the isolated fixture/provenance check passes and the
 behavior contracts are RED at runtime because importing
 `quote_app.sites.official_brands.vivo` raises `ModuleNotFoundError`.
 
@@ -30,7 +30,7 @@ dedicated adapter is implemented.
 
 - The fixtures retain the 2026-08-12 read-only shapes and provenance notes:
   homepage search input, actual `www.vivo.com.cn/search/searchResult` route,
-  `div.result-card[data-position][data-skuid]` cards, and official numeric
+  `.page-search-result-content > div[data-position][data-skuid]` cards, and official numeric
   `shop.vivo.com.cn/product/<id>?skuId=...` detail URLs. Detail retains the
   public `product.d7d3a960.js` hierarchy through `h1.name`, direct-text
   `p.sale-price`, market price, and `dl.sku-module.specs` groups.
@@ -54,9 +54,11 @@ dedicated adapter is implemented.
   are `4499 → 4399 → 4399`, so the adopted final stable value is 4399; a
   non-converging whole-offer sequence is rejected. Coupon, installment, list,
   and accessory contamination are excluded.
-- Capture derives title/current price/selected version/selected color from
-  the real fixture nodes; its harness computes DOMRects and hit testing from
-  those nodes. It covers 100% fit, 80%-only fit, one bounded geometry scroll,
+- Home, results, and detail use separate active DOMs, so stale inputs/cards
+  cannot satisfy detail behavior. Capture derives title/current price/selected
+  version/selected color from the real fixture nodes; its harness applies 80%
+  to x/y/width/height and computes visibility/hit-testing from those DOMRects.
+  It covers 100% fit, 80%-only fit, one bounded geometry scroll, a fixed
   overlap failure after one attempt, and a disappearing proof. Saving AK/AN
   after an operating-system capture failure belongs to the later runner task.
 
@@ -70,4 +72,4 @@ dedicated adapter is implemented.
 ## Commit
 
 `82aa5fd` — initial Task 1 contract; `7e40c15` — fix round 1;
-`c9366f4` — fix round 2; fix round 3 commit pending.
+`c9366f4` — fix round 2; `f33260d` — fix round 3; fix round 4 commit pending.
