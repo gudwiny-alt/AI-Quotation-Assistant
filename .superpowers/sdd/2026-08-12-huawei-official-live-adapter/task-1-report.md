@@ -80,7 +80,8 @@ code.
   candidates plus reference, promotion and duplicate sticky-footer amounts.
   The harness locates the price selected by business extraction dynamically;
   it does not mark or hard-code `4999` as a fixture-only adopted node.
-- Legal-no capacity/color evidence is contracted as product identity plus the
-  complete corresponding `版本` or `颜色` option-group rectangle.
+- Legal-no capacity/color observations must return two same-screen rectangles:
+  `title` plus the complete corresponding `capacity_group` (`版本`) or
+  `color_group` (`颜色`). A group rectangle alone is not valid evidence.
 - Task 2 must not weaken exact-model, option-completeness, price-stability,
   route or capture-geometry assertions merely to make this contract green.

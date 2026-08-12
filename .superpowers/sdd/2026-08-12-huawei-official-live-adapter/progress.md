@@ -14,5 +14,7 @@
   `www.vmall.com` -> `item.vmall.com` redirect, real title/price nodes,
   label-anchored option groups, style-based selection, dynamic price proof,
   complete legal-no group evidence, and fixture-marker provenance guards.
+- Final Task 1 review fix: legal-no capacity/color observations require
+  same-screen `title` + full `capacity_group` / `color_group` rectangles.
 - Next task: Task 2 — implement the Huawei production adapter against the
   frozen Task 1 contract.

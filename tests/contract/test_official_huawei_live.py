@@ -944,30 +944,47 @@ def test_huawei_never_uses_storage_only_when_full_versions_exist() -> None:
 
 
 @pytest.mark.parametrize(
-    ("fixture", "outcome", "role"),
+    ("fixture", "outcome", "group", "group_role"),
     [
-        ("detail_missing_capacity.html", BusinessOutcome.CAPACITY_UNAVAILABLE, "capacity"),
-        ("detail_missing_color.html", BusinessOutcome.COLOR_UNAVAILABLE, "color"),
+        (
+            "detail_missing_capacity.html",
+            BusinessOutcome.CAPACITY_UNAVAILABLE,
+            "capacity",
+            "capacity_group",
+        ),
+        (
+            "detail_missing_color.html",
+            BusinessOutcome.COLOR_UNAVAILABLE,
+            "color",
+            "color_group",
+        ),
     ],
 )
 def test_huawei_complete_missing_configuration_is_legal_no(
     fixture: str,
     outcome: BusinessOutcome,
-    role: str,
+    group: str,
+    group_role: str,
 ) -> None:
     page = _HuaweiPage(fixture)
     result = _adapter().observe(_task(), page)
     assert result.outcome is outcome
-    assert tuple(rect.role for rect in result.css_rectangles) == (role,)
-    expected = page.dom_rect(page.group(role))
-    assert expected is not None
-    rectangle = result.css_rectangles[0]
-    assert (rectangle.x, rectangle.y, rectangle.width, rectangle.height) == (
-        expected["x"],
-        expected["y"],
-        expected["width"],
-        expected["height"],
-    )
+    assert tuple(rect.role for rect in result.css_rectangles) == ("title", group_role)
+    title_node = page.locator(
+        "div#prd-detail-name[data-testid=prd-detail-name]"
+    ).nodes[0]
+    expected_boxes = (page.dom_rect(title_node), page.dom_rect(page.group(group)))
+    assert all(box is not None for box in expected_boxes)
+    for rectangle, expected in zip(result.css_rectangles, expected_boxes, strict=True):
+        assert expected is not None
+        assert (rectangle.x, rectangle.y, rectangle.width, rectangle.height) == (
+            expected["x"],
+            expected["y"],
+            expected["width"],
+            expected["height"],
+        )
+    assert max(rect.y + rect.height for rect in result.css_rectangles) <= page.viewport_height
+    assert min(rect.y for rect in result.css_rectangles) >= 0
 
 
 @pytest.mark.parametrize(
@@ -1000,8 +1017,14 @@ def test_huawei_legal_no_fixture_keeps_product_identity_and_complete_option_grou
     group = page.group(role)
     assert any(child.text == label for child in group.children)
     assert tuple(option.text for option in page.options(role)) == expected_options
-    assert page.dom_rect(title.nodes[0]) is not None
-    assert page.dom_rect(group) is not None
+    title_box = page.dom_rect(title.nodes[0])
+    group_box = page.dom_rect(group)
+    assert title_box is not None and group_box is not None
+    assert min(title_box["y"], group_box["y"]) >= 0
+    assert max(
+        title_box["y"] + title_box["height"],
+        group_box["y"] + group_box["height"],
+    ) <= page.viewport_height
 
 
 @pytest.mark.parametrize("group", ["capacity", "color"])
