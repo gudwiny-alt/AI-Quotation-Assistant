@@ -261,8 +261,7 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                         task, page, identity, BusinessOutcome.CAPACITY_UNAVAILABLE
                     ),
                 )
-            capacity.click()
-            self._wait_for_selected_option(page, "capacity", task)
+            self._select_exact_option(page, "capacity", task)
 
             self._wait_for_option_group(page, "color", task)
             color = self._exact_option(page, "color", task)
@@ -273,9 +272,8 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                         task, page, _detail_identity(page.url), BusinessOutcome.COLOR_UNAVAILABLE
                     ),
                 )
-            color.click()
+            self._select_exact_option(page, "color", task)
             self._wait_for_selected_option(page, "capacity", task)
-            self._wait_for_selected_option(page, "color", task)
 
             snapshot = self._wait_for_stable_offer(task, page)
             return self.build_observation(
@@ -572,6 +570,18 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             except LayoutRecognitionError:
                 page.wait_for_timeout(250)
         raise LayoutRecognitionError(f"OPPO selected {kind} option did not stabilize")
+
+    def _select_exact_option(self, page: Any, kind: str, task: WebsiteTask) -> None:
+        try:
+            self._require_unique_selected_option(page, kind, task)
+            return
+        except LayoutRecognitionError:
+            pass
+        target = self._exact_option(page, kind, task)
+        if target is None or _is_disabled(target):
+            raise LayoutRecognitionError(f"OPPO target {kind} option is unavailable")
+        target.click()
+        self._wait_for_selected_option(page, kind, task)
 
     def _require_unique_selected_option(self, page: Any, kind: str, task: WebsiteTask) -> Any:
         selected = tuple(
@@ -938,11 +948,19 @@ def _proof_group_fits_current_viewport(page: Any, locators: tuple[Any, ...]) -> 
             """
             (elements) => {
               const __oppoProofsFitCurrentViewport = true;
+              const __oppoProofsUnoccluded = true;
               return __oppoProofsFitCurrentViewport && elements.every(element => {
                 const box = element.getBoundingClientRect();
-                return box.width > 0 && box.height > 0 && box.top >= 0 &&
+                const fits = box.width > 0 && box.height > 0 && box.top >= 0 &&
                   box.left >= 0 && box.bottom <= window.innerHeight &&
                   box.right <= window.innerWidth;
+                if (!fits) return false;
+                const centerX = box.left + box.width / 2;
+                const centerY = box.top + box.height / 2;
+                const topHit = document.elementsFromPoint(centerX, centerY).find(hit =>
+                  window.getComputedStyle(hit).pointerEvents !== "none");
+                return __oppoProofsUnoccluded && Boolean(topHit) &&
+                  (topHit === element || element.contains(topHit) || topHit.contains(element));
               });
             }
             """,
@@ -957,17 +975,77 @@ def _scroll_proof_group_into_view(page: Any, locators: tuple[Any, ...]) -> bool:
         handles = [locator.element_handle() for locator in locators]
         if any(handle is None for handle in handles):
             return False
-        return page.evaluate(
+        state = page.evaluate(
             """
             (elements) => {
+              const __oppoProofPositionState = true;
               const boxes = elements.map(element => element.getBoundingClientRect());
-              const top = Math.min(...boxes.map(box => box.top + window.scrollY));
-              const bottom = Math.max(...boxes.map(box => box.bottom + window.scrollY));
-              window.scrollTo({top: Math.max(0, top - 80), behavior: "instant"});
-              return bottom - top <= window.innerHeight - 100;
+              const __oppoAllProofOcclusions = true;
+              const occlusions = elements.flatMap((element, index) => {
+                const box = boxes[index];
+                const centerX = box.left + box.width / 2;
+                const centerY = box.top + box.height / 2;
+                const topHit = document.elementsFromPoint(centerX, centerY).find(hit =>
+                  window.getComputedStyle(hit).pointerEvents !== "none");
+                const unoccluded = Boolean(topHit) &&
+                  (topHit === element || element.contains(topHit) || topHit.contains(element));
+                if (unoccluded) return [];
+                const blockerBox = topHit ? topHit.getBoundingClientRect() : null;
+                return blockerBox ? [{proofBottom: box.bottom, blockerTop: blockerBox.top}] : [];
+              });
+              return {
+                unionTop: Math.min(...boxes.map(box => box.top)),
+                unionBottom: Math.max(...boxes.map(box => box.bottom)),
+                occlusions,
+                viewportHeight: window.innerHeight,
+                scrollY: window.scrollY,
+                marker: __oppoProofPositionState,
+                occlusionMarker: __oppoAllProofOcclusions,
+              };
             }
             """,
             handles,
+        )
+        if not isinstance(state, dict):
+            return False
+        top = float(state["unionTop"])
+        bottom = float(state["unionBottom"])
+        viewport_height = float(state["viewportHeight"])
+        if bottom - top > viewport_height - 48:
+            return False
+        delta = 0.0
+        occlusions = state.get("occlusions")
+        if isinstance(occlusions, list) and occlusions:
+            overlaps: list[float] = []
+            for occlusion in occlusions:
+                if not isinstance(occlusion, dict):
+                    return False
+                overlaps.append(
+                    float(occlusion["proofBottom"])
+                    - float(occlusion["blockerTop"])
+                    + 24.0
+                )
+            delta = max(overlaps)
+        elif bottom > viewport_height - 24:
+            delta = bottom - (viewport_height - 24)
+        elif top < 24:
+            delta = top - 24
+        if abs(delta) < 1 or abs(delta) > 160:
+            return False
+        if delta > 0 and top - delta < 24:
+            return False
+        return page.evaluate(
+            """
+            (delta) => {
+              const __oppoApplyBoundedProofPosition = true;
+              window.scrollTo({
+                top: Math.max(0, window.scrollY + delta),
+                behavior: "instant",
+              });
+              return __oppoApplyBoundedProofPosition;
+            }
+            """,
+            delta,
         ) is True
-    except (AttributeError, RuntimeError):
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
         return False

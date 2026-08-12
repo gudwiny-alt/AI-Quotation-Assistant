@@ -79,6 +79,9 @@ class _OppoLocator(_OfficialLocator):
 
     def click(self) -> None:
         node = self.nodes[0]
+        option_kind = node.attrs.get("data-option-kind")
+        if option_kind in self.page.blocked_option_click_kinds:
+            raise RuntimeError(f"OPPO {option_kind} click is covered by QR overlay")
         if node.attrs.get("data-action") == "open-search":
             self.page.activate("search")
             self.page.search_waiting_for_enter = True
@@ -96,7 +99,19 @@ class _OppoFixturePage(_OfficialFixturePage):
         self.proofs_fit = True
         self.proofs_fit_after_scale = True
         self.proofs_fit_after_position = True
+        self.capacity_occluded = False
+        self.capacity_occluded_after_position = False
+        self.occluded_proof_index: int | None = None
+        self.occluded_proof_index_after_position: int | None = None
         self.position_attempts = 0
+        self.position_deltas: list[float] = []
+        self.proof_union_top = 180.0
+        self.proof_union_bottom = 720.0
+        self.capacity_bottom = 660.0
+        self.blocker_top = 580.0
+        self.viewport_height = 800.0
+        self.scroll_y = 100.0
+        self.blocked_option_click_kinds: set[str] = set()
         self._product_urls = {
             node.attrs["href"]
             for node in self.root.descendants()
@@ -137,16 +152,48 @@ class _OppoFixturePage(_OfficialFixturePage):
                 self.capture_scales.append(float(argument))
             return {"inlineZoom": self.capture_scale, "computedZoom": self.capture_scale}
         if "__oppoProofsFitCurrentViewport" in script:
-            return (
+            fits = (
                 self.proofs_fit
                 if self.capture_scale == 1.0
                 else self.proofs_fit_after_scale
             )
-        if "window.scrollTo" in script:
+            if "__oppoProofsUnoccluded" in script and (
+                self.capacity_occluded or self.occluded_proof_index is not None
+            ):
+                return False
+            return fits
+        if "__oppoProofPositionState" in script:
+            state: dict[str, object] = {
+                "unionTop": self.proof_union_top,
+                "unionBottom": self.proof_union_bottom,
+                "capacityBottom": self.capacity_bottom,
+                "blockerTop": self.blocker_top if self.capacity_occluded else None,
+                "capacityOccluded": self.capacity_occluded,
+                "viewportHeight": self.viewport_height,
+                "scrollY": self.scroll_y,
+            }
+            if "__oppoAllProofOcclusions" in script:
+                proof_bottoms = (300.0, 360.0, self.capacity_bottom, 620.0)
+                occluded_index = (
+                    2 if self.capacity_occluded else self.occluded_proof_index
+                )
+                state["occlusions"] = (
+                    [] if occluded_index is None else [{
+                        "proofBottom": proof_bottoms[occluded_index],
+                        "blockerTop": self.blocker_top,
+                    }]
+                )
+            return state
+        if "__oppoApplyBoundedProofPosition" in script:
             self.position_attempts += 1
+            self.position_deltas.append(float(argument))
             self.proofs_fit = self.proofs_fit_after_position
             self.proofs_fit_after_scale = self.proofs_fit_after_position
+            self.capacity_occluded = self.capacity_occluded_after_position
+            self.occluded_proof_index = self.occluded_proof_index_after_position
             return True
+        if "window.scrollTo" in script:
+            raise AssertionError("legacy broad OPPO proof positioning is forbidden")
         raise AssertionError(f"unexpected OPPO fixture evaluate: {script[:80]}")
 
 
@@ -312,7 +359,33 @@ def test_oppo_a5m_enters_first_exact_model_card_before_selecting_target_color() 
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.goto_calls[-1].endswith("/38672.html?us=search")
-    assert page.option_clicks == ["capacity", "color"]
+    assert page.option_clicks == []
+
+
+def test_oppo_a5m_does_not_reclick_an_already_selected_target_covered_by_qr() -> None:
+    page = _OppoFixturePage("normal.html")
+    task = _oppo_task(
+        model_name="OPPO A5m 5G",
+        ram="8GB",
+        storage="256GB",
+        color="钻石白",
+    )
+    _set_result_cards(
+        page,
+        (("OPPO A5m 水晶粉 8GB+256GB", "/cn/web/products/38675.html?us=search"),),
+    )
+    _set_detail_product(
+        page,
+        model_name="OPPO A5m",
+        capacity="8GB+256GB",
+        color="钻石白",
+    )
+    page.blocked_option_click_kinds = {"capacity", "color"}
+
+    observation = _adapter().observe(task, page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.option_clicks == []
 
 
 def test_oppo_a6t_enters_exact_model_card_and_rejects_neighbor_variants() -> None:
@@ -497,6 +570,7 @@ def test_oppo_capture_positions_once_only_when_four_proofs_do_not_fit() -> None:
     observation = adapter.observe(task, page)
     page.proofs_fit = False
     page.proofs_fit_after_scale = False
+    page.proof_union_bottom = 830.0
 
     adapter.prepare_capture_view(task, page, observation.semantic_state)
 
@@ -512,6 +586,7 @@ def test_oppo_capture_fails_after_one_position_when_four_proofs_still_do_not_fit
     page.proofs_fit = False
     page.proofs_fit_after_scale = False
     page.proofs_fit_after_position = False
+    page.proof_union_bottom = 830.0
 
     with pytest.raises(
         LayoutRecognitionError,
@@ -521,6 +596,54 @@ def test_oppo_capture_fails_after_one_position_when_four_proofs_still_do_not_fit
 
     assert page.position_attempts == 1
     assert page.capture_scale == 1.0
+
+
+def test_oppo_capture_positions_once_when_qr_initially_occludes_capacity() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoFixturePage("normal.html")
+    observation = adapter.observe(task, page)
+    page.capacity_occluded = True
+    page.capacity_occluded_after_position = False
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert page.position_attempts == 1
+    assert page.position_deltas == [104.0]
+    assert page.capture_scale == 0.8
+
+
+def test_oppo_capture_fails_closed_after_one_position_when_qr_still_occludes_capacity() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoFixturePage("normal.html")
+    observation = adapter.observe(task, page)
+    page.capacity_occluded = True
+    page.capacity_occluded_after_position = True
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="title, price, capacity and color must fit",
+    ):
+        adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert page.position_attempts == 1
+    assert page.position_deltas == [104.0]
+    assert page.capture_scale == 1.0
+
+
+def test_oppo_capture_positions_from_the_actual_non_capacity_proof_occluded_by_qr() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoFixturePage("normal.html")
+    observation = adapter.observe(task, page)
+    page.occluded_proof_index = 3
+    page.occluded_proof_index_after_position = None
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert page.position_attempts == 1
+    assert page.position_deltas == [64.0]
 
 
 def test_oppo_capture_does_not_repeat_zoom_when_detail_is_already_at_80_percent() -> None:
