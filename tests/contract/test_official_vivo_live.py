@@ -945,6 +945,12 @@ def test_vivo_title_drift_and_unstable_offer_are_technical_failures() -> None:
         "vivo X200 耳机 12GB+256GB",
         "vivo X200 数据线 12GB+256GB",
         "vivo X200 配件 12GB+256GB",
+        "vivo X200 12GB+256GB charger",
+        "vivo X200 12GB+256GB CASE",
+        "vivo X200 12GB+256GB 支架",
+        "vivo X200 12GB+256GB 适用",
+        "vivo X200 accessory 12GB+256GB",
+        "vivo X200 cover 12GB+256GB",
     ],
 )
 def test_vivo_rejects_nonphone_or_edition_suffixes(near_match: str) -> None:

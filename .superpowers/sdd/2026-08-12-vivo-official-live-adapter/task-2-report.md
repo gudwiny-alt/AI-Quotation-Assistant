@@ -139,3 +139,32 @@ All checks passed
 .venv/bin/mypy src/quote_app/sites/official_brands/vivo.py
 Success: no issues found in 1 source file
 ```
+
+## Final title-boundary follow-up
+
+- The base-model matcher now applies the project's complete Chinese and
+  English accessory vocabulary to the entire normalized title remainder, not
+  only the first field. Capacity therefore cannot make a later `charger`,
+  `case`, `支架`, `适用`, or equivalent accessory marker look like a phone SKU.
+- The contract covers accessory markers both before and after a valid-looking
+  `12GB+256GB` field.
+
+Follow-up verification:
+
+```text
+.venv/bin/pytest -q tests/contract/test_official_vivo_live.py
+62 passed
+
+.venv/bin/pytest -q tests/contract/test_official_vivo_live.py \
+  tests/contract/test_official_oppo_live.py \
+  tests/contract/test_official_xiaomi_live.py \
+  tests/contract/test_official_honor_live.py
+202 passed
+
+.venv/bin/ruff check src/quote_app/sites/official_brands/vivo.py \
+  tests/contract/test_official_vivo_live.py
+All checks passed
+
+.venv/bin/mypy src/quote_app/sites/official_brands/vivo.py
+Success: no issues found in 1 source file
+```

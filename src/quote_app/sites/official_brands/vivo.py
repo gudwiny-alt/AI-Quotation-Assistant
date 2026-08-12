@@ -31,6 +31,30 @@ from quote_app.tasks.retry import LayoutRecognitionError, NonRetryableTechnicalE
 _DETAIL_PATH = re.compile(r"^/product/(?P<product_id>\d+)$")
 _MONEY = re.compile(r"(?<!\d)(\d[\d,]*(?:\.\d{1,2})?)(?!\d)")
 _VARIANTS = frozenset(("PRO", "PLUS", "ULTRA", "MAX", "S", "T", "SE", "LITE", "NEO"))
+_ACCESSORY_MARKERS = (
+    "手机壳",
+    "保护壳",
+    "保护套",
+    "手机套",
+    "钢化膜",
+    "屏幕膜",
+    "贴膜",
+    "充电器",
+    "数据线",
+    "耳机",
+    "配件",
+    "适用",
+    "支架",
+    "CASE",
+    "COVER",
+    "PROTECTOR",
+    "FILM",
+    "CHARGER",
+    "CABLE",
+    "HEADPHONES",
+    "EARBUDS",
+    "ACCESSORY",
+)
 _SEARCH_INPUT = 'input[placeholder="请输入搜索内容"]'
 _RESULT_REGION = ".page-search-result-content"
 _RESULT_CARD = "div[data-position][data-skuid]"
@@ -515,20 +539,7 @@ def _title_matches(model: str, text: str) -> bool:
     first = re.match(r"[A-Z]+", remainder)
     if first is not None and first.group() in _VARIANTS:
         return False
-    if any(
-        word in remainder
-        for word in (
-            "青春版",
-            "手机壳",
-            "保护壳",
-            "保护套",
-            "钢化膜",
-            "充电器",
-            "耳机",
-            "数据线",
-            "配件",
-        )
-    ):
+    if "青春版" in remainder or any(marker in remainder for marker in _ACCESSORY_MARKERS):
         return False
     # Search-card suffixes are SKU display fields: capacity, network, colour,
     # or ordinary availability copy.  Reject an arbitrary Chinese product
