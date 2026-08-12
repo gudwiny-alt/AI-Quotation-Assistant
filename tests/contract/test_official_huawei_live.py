@@ -29,25 +29,35 @@ from tests.conftest import (
 FIXTURES = Path(__file__).parents[1] / "fixtures/sites/official_live/huawei"
 ENTRY = "https://www.vmall.com/"
 SEARCH = "https://www.vmall.com/search?keyword=HUAWEI%20Mate%2070%20Pro"
-DETAIL = "https://www.vmall.com/product/comdetail/index.html?prdId=10086259366534"
+DETAIL_INPUT = "https://www.vmall.com/product/comdetail/index.html?prdId=10086259366534"
+DETAIL = "https://item.vmall.com/product/comdetail/index.html?prdId=10086259366534"
 _CAPTURE_SELECTOR_SPECS = {
-    "title": {"role": "title", "selector": "main.product-detail h1#pro-name"},
-    "price": {"role": "price", "selector": "div#pro-price span.price-now.adopted"},
+    "title": {"role": "title", "selector": "div#prd-detail-name[data-testid=prd-detail-name]"},
+    "price": {"role": "price", "selector": "[data-testid=vui_text_container]"},
     "capacity": {
         "role": "capacity",
-        "selector": "dl.product-choose li.selected",
-        "group": "version",
+        "selector": "[style]",
+        "group_label": "版本",
     },
     "color": {
         "role": "color",
-        "selector": "dl.product-choose li.selected",
-        "group": "color",
+        "selector": "[style]",
+        "group_label": "颜色",
     },
 }
 
 
-def _capture_selector_specs() -> dict[str, dict[str, str]]:
-    return {role: dict(spec) for role, spec in _CAPTURE_SELECTOR_SPECS.items()}
+def _capture_selector_specs(
+    *,
+    price: str = "4999",
+    capacity: str = "8GB+256GB",
+    color: str = "曜石黑",
+) -> dict[str, dict[str, str]]:
+    specs = {role: dict(spec) for role, spec in _CAPTURE_SELECTOR_SPECS.items()}
+    specs["price"]["expected_text"] = price
+    specs["capacity"]["expected_text"] = capacity
+    specs["color"]["expected_text"] = color
+    return specs
 
 
 class _HuaweiLocator(_OfficialLocator):
@@ -110,9 +120,9 @@ class _HuaweiLocator(_OfficialLocator):
     def inner_text(self) -> str:
         page = _huawei_page(self.page)
         node = self.nodes[0]
-        if node.attrs.get("id") == "pro-name" and page.title_override is not None:
+        if node.attrs.get("id") == "prd-detail-name" and page.title_override is not None:
             return page.title_override
-        if "price-now" in node.attrs.get("class", "").split():
+        if page.is_purchase_price_node(node):
             return page.next_current_price(node)
         return super().inner_text()
 
@@ -195,7 +205,7 @@ class _HuaweiPage(_OfficialFixturePage):
         if url == ENTRY:
             self._url, self.active = url, "home"
         elif _fixture_detail_url(url):
-            self._url, self.active = self.redirect_url or url, "detail"
+            self._url, self.active = self.redirect_url or _item_detail_url(url), "detail"
         else:
             self._url, self.active = url, "results"
 
@@ -244,7 +254,9 @@ class _HuaweiPage(_OfficialFixturePage):
                     for option in self.options("capacity")
                     if option.text != self.target_capacity()
                 )
-                other.attrs["class"] = "selected"
+                other.attrs["style"] = (
+                    "border-color:rgb(207,10,44);color:rgb(207,10,44)"
+                )
             return
         group = "capacity" if self.selected("capacity") != self.target_capacity() else "color"
         self.option_waits[group] += 1
@@ -269,37 +281,49 @@ class _HuaweiPage(_OfficialFixturePage):
         return None
 
     def group(self, group: str) -> _OfficialNode:
-        name = "version" if group == "capacity" else "color"
+        label = "版本" if group == "capacity" else "颜色"
         return next(
             node
             for node in self.detail_root.descendants()
-            if node.tag == "dl" and node.attrs.get("data-group") == name
+            if "sku-row" in node.attrs.get("class", "").split()
+            and any(
+                child.text == label
+                for child in node.children
+                if "sku-label" in child.attrs.get("class", "").split()
+            )
         )
 
     def options(self, group: str) -> list[_OfficialNode]:
-        return [node for node in self.group(group).descendants() if node.tag == "li"]
+        return [
+            node
+            for node in self.group(group).descendants()
+            if node.tag == "button"
+            and "sku-option" in node.attrs.get("class", "").split()
+        ]
 
     def selected(self, group: str) -> str | None:
         return next(
             (
                 node.text
                 for node in self.options(group)
-                if "selected" in node.attrs.get("class", "").split()
+                if self.option_is_selected(node)
             ),
             None,
         )
 
     def select_node(self, group: str, node: _OfficialNode) -> None:
         for option in self.options(group):
-            option.attrs["class"] = " ".join(
-                item for item in option.attrs.get("class", "").split() if item != "selected"
-            )
-        node.attrs["class"] = " ".join((*node.attrs.get("class", "").split(), "selected"))
-        summary = self._class_node(self.detail_root, "selected-summary")
+            option.attrs.pop("style", None)
+        node.attrs["style"] = "border-color:rgb(207,10,44);color:rgb(207,10,44)"
+        summaries = [
+            item
+            for item in self.detail_root.descendants()
+            if "selected-summary" in item.attrs.get("class", "").split()
+        ]
         capacity = node.text if group == "capacity" else self.selected("capacity")
         color = node.text if group == "color" else self.selected("color")
-        if capacity and color:
-            summary.text_parts = [f"已选：{color}·{capacity}"]
+        if summaries and capacity and color:
+            summaries[0].text_parts = [f"已选：{color}·{capacity}"]
 
     def target_capacity(self) -> str:
         return "256GB" if self.storage_only() else "8GB+256GB"
@@ -312,8 +336,28 @@ class _HuaweiPage(_OfficialFixturePage):
         return [
             node
             for node in self.detail_root.descendants()
-            if "price-now" in node.attrs.get("class", "").split()
+            if self.is_purchase_price_node(node)
         ]
+
+    @staticmethod
+    def option_is_selected(node: _OfficialNode) -> bool:
+        style = node.attrs.get("style", "").replace(" ", "").lower()
+        return (
+            "border-color:rgb(207,10,44)" in style
+            and "color:rgb(207,10,44)" in style
+        )
+
+    @staticmethod
+    def is_purchase_price_node(node: _OfficialNode) -> bool:
+        return (
+            node.attrs.get("data-testid") == "vui_text_container"
+            and node.parent is not None
+            and "price-line" in node.parent.attrs.get("class", "").split()
+            and any(
+                "purchase-summary" in ancestor.attrs.get("class", "").split()
+                for ancestor in _ancestors(node)
+            )
+        )
 
     def next_current_price(self, node: _OfficialNode) -> str:
         if node.attrs.get("hidden") is not None:
@@ -335,11 +379,19 @@ class _HuaweiPage(_OfficialFixturePage):
             return None
         if self.remove_color_geometry and node is self.selected_node("color"):
             return None
+        group_role = next(
+            (role for role in ("capacity", "color") if node is self.group(role)),
+            None,
+        )
         raw_y = (
             110.0
-            if node.attrs.get("id") == "pro-name"
+            if node.attrs.get("id") == "prd-detail-name"
             else 174.0
-            if "price-now" in node.attrs.get("class", "").split()
+            if self.is_purchase_price_node(node)
+            else 280.0
+            if group_role == "capacity"
+            else 372.0
+            if group_role == "color"
             else 288.0
             if node is self.selected_node("capacity")
             else 380.0
@@ -347,8 +399,8 @@ class _HuaweiPage(_OfficialFixturePage):
         return {
             "x": 30.0 * self.capture_scale,
             "y": raw_y * self.capture_scale - self.scroll_offset,
-            "width": 520.0 * self.capture_scale,
-            "height": 42.0 * self.capture_scale,
+            "width": (650.0 if group_role else 520.0) * self.capture_scale,
+            "height": (80.0 if group_role else 42.0) * self.capture_scale,
         }
 
     def selected_node(self, group: str) -> _OfficialNode | None:
@@ -356,7 +408,7 @@ class _HuaweiPage(_OfficialFixturePage):
             (
                 node
                 for node in self.options(group)
-                if "selected" in node.attrs.get("class", "").split()
+                if self.option_is_selected(node)
             ),
             None,
         )
@@ -421,21 +473,44 @@ class _HuaweiPage(_OfficialFixturePage):
             if not isinstance(selector, str):
                 raise AssertionError(f"{role} selector is not CSS")
             matches = _official_select(self.detail_root.descendants(), selector)
-            if role in {"capacity", "color"}:
-                expected_group = "version" if role == "capacity" else "color"
-                if declaration.get("group") != expected_group:
+            if role == "price":
+                expected_text = declaration.get("expected_text")
+                if not isinstance(expected_text, str):
+                    raise AssertionError("price selector has no selected business text")
+                matches = [
+                    node
+                    for node in matches
+                    if self.is_purchase_price_node(node) and node.text.strip() == expected_text
+                ]
+            elif role in {"capacity", "color"}:
+                expected_text = declaration.get("expected_text")
+                if not isinstance(expected_text, str):
+                    raise AssertionError(f"{role} selector has no selected business text")
+                expected_group = "版本" if role == "capacity" else "颜色"
+                if declaration.get("group_label") != expected_group:
                     raise AssertionError(f"{role} selector has the wrong VMALL group")
                 group = "capacity" if role == "capacity" else "color"
-                matches = [node for node in matches if node in self.options(group)]
+                matches = [
+                    node
+                    for node in matches
+                    if node in self.options(group)
+                    and self.option_is_selected(node)
+                    and node.text == expected_text
+                ]
+            elif role == "title":
+                if set(declaration) != {"role", "selector"}:
+                    raise AssertionError("title selector has unsupported metadata")
+            if role != "title" and "expected_text" not in declaration:
+                raise AssertionError(f"{role} selector lacks selected business text")
             if len(matches) != 1:
                 raise AssertionError(f"{role} selector must resolve one live VMALL node")
             proofs[role] = matches[0]
-        if "4999" not in proofs["price"].text:
-            raise AssertionError("price selector did not resolve the adopted ¥4999")
+        if proofs["price"].text != selectors["price"]["expected_text"]:
+            raise AssertionError("price selector did not resolve the selected candidate")
         if proofs["capacity"].text != self.target_capacity():
-            raise AssertionError("capacity selector did not resolve the adopted version")
+            raise AssertionError("capacity selector did not resolve the selected version")
         if proofs["color"].text != "曜石黑":
-            raise AssertionError("color selector did not resolve the adopted color")
+            raise AssertionError("color selector did not resolve the selected color")
         return proofs
 
     def capture_geometry(self, selectors: object) -> dict[str, object]:
@@ -484,6 +559,15 @@ def _huawei_page(page: _OfficialFixturePage) -> _HuaweiPage:
     return page
 
 
+def _ancestors(node: _OfficialNode) -> list[_OfficialNode]:
+    result: list[_OfficialNode] = []
+    current = node.parent
+    while current is not None:
+        result.append(current)
+        current = current.parent
+    return result
+
+
 def _disabled(node: _OfficialNode) -> bool:
     return (
         node.attrs.get("disabled") is not None
@@ -494,7 +578,14 @@ def _disabled(node: _OfficialNode) -> bool:
 
 def _fixture_detail_url(url: str) -> bool:
     parsed = urlsplit(url)
-    return parsed.hostname == "www.vmall.com" and parsed.path.startswith("/product/")
+    return parsed.hostname in {"www.vmall.com", "item.vmall.com"} and parsed.path.startswith(
+        "/product/"
+    )
+
+
+def _item_detail_url(url: str) -> str:
+    parsed = urlsplit(url)
+    return parsed._replace(netloc="item.vmall.com").geturl()
 
 
 def _task(
@@ -588,11 +679,10 @@ def _preselect_targets(page: _HuaweiPage) -> None:
         page.select_node(group, next(node for node in page.options(group) if node.text == target))
 
 
-def _detail_page_with_adopted_nodes() -> _HuaweiPage:
+def _detail_page_with_selected_nodes() -> _HuaweiPage:
     page = _HuaweiPage()
     page.goto(DETAIL)
     _preselect_targets(page)
-    page.price_nodes()[0].text_parts = ["¥4999"]
     return page
 
 
@@ -604,19 +694,62 @@ def test_huawei_fixture_preserves_public_vmall_semantics_and_isolated_dom_states
     assert page.locator("input").count() == 0
     page.goto(ENTRY)
     assert page.locator("input#search-kw").count() == 1
-    assert page.locator("h1#pro-name").count() == 0
+    assert page.locator("div#prd-detail-name[data-testid=prd-detail-name]").count() == 0
     search = page.locator("input#search-kw")
     search.fill("HUAWEI Mate 70 Pro")
     search.press("Enter")
     assert page.locator("li[data-product-id] a.product-link").count() > 0
-    assert page.locator("h1#pro-name").count() == 0
+    assert page.locator("div#prd-detail-name[data-testid=prd-detail-name]").count() == 0
     page.goto(DETAIL)
-    assert page.locator("h1#pro-name").count() == 1
+    assert page.locator("div#prd-detail-name[data-testid=prd-detail-name]").count() == 1
     assert page.locator("li[data-product-id]").count() == 0
     fresh = _HuaweiPage()
     assert fresh.locator("input").count() == 0
     assert fresh.locator("li[data-product-id]").count() == 0
-    assert fresh.locator("h1#pro-name").count() == 0
+    assert fresh.locator("div#prd-detail-name[data-testid=prd-detail-name]").count() == 0
+
+
+def test_huawei_fixture_uses_reviewed_vmall_detail_nodes_without_test_markers() -> None:
+    sources = [path.read_text() for path in sorted(FIXTURES.glob("*.html"))]
+    source = "\n".join(sources)
+    page = _HuaweiPage()
+    page.goto(DETAIL)
+
+    assert page.locator("div#prd-detail-name[data-testid=prd-detail-name]").count() == 1
+    assert page.locator("[data-testid=vui_text_container]").count() >= 3
+    assert all(
+        marker not in source
+        for marker in (
+            "adopted",
+            "data-group",
+            "main class=\"product-detail\"",
+            "id=\"pro-name\"",
+            "id=\"pro-price\"",
+            "price-now",
+        )
+    )
+    assert page.url.startswith("https://item.vmall.com/product/")
+
+    fixture_only_markers = (
+        "purchase-summary",
+        "price-line",
+        "sku-row",
+        "sku-label",
+        "sku-option",
+        "late-card",
+        "search-empty",
+        "data-reveal-after",
+        "data-select-after",
+    )
+    serialized_specs = repr(_CAPTURE_SELECTOR_SPECS)
+    assert all(marker not in serialized_specs for marker in fixture_only_markers)
+    production = (
+        Path(__file__).parents[2]
+        / "src/quote_app/sites/official_brands/huawei.py"
+    )
+    if production.exists():
+        production_source = production.read_text()
+        assert all(marker not in production_source for marker in fixture_only_markers)
 
 
 def test_huawei_fixture_contains_current_reference_and_excluded_promotional_amounts() -> None:
@@ -627,19 +760,25 @@ def test_huawei_fixture_contains_current_reference_and_excluded_promotional_amou
 
 
 def test_huawei_capture_harness_resolves_exactly_four_real_detail_nodes() -> None:
-    page = _detail_page_with_adopted_nodes()
+    page = _detail_page_with_selected_nodes()
     proofs = page.proofs_from_selectors(_capture_selector_specs())
     assert tuple(proofs) == ("title", "price", "capacity", "color")
     assert proofs["title"].text.startswith("HUAWEI Mate 70 Pro")
-    assert proofs["price"].text == "¥4999"
+    assert proofs["price"].text == "4999"
     assert proofs["capacity"].text == "8GB+256GB"
     assert proofs["color"].text == "曜石黑"
 
 
+def test_huawei_capture_harness_selects_the_requested_live_price_candidate() -> None:
+    page = _detail_page_with_selected_nodes()
+    proofs = page.proofs_from_selectors(_capture_selector_specs(price="5199"))
+    assert proofs["price"].text == "5199"
+
+
 def test_huawei_capture_harness_rejects_wrong_real_selector() -> None:
-    page = _detail_page_with_adopted_nodes()
+    page = _detail_page_with_selected_nodes()
     wrong = _capture_selector_specs()
-    wrong["price"]["selector"] = "div#pro-price s.price-old"
+    wrong["price"]["selector"] = "s.reference-price [data-testid=vui_text_container]"
     with pytest.raises(AssertionError, match="price selector"):
         page.proofs_from_selectors(wrong)
 
@@ -752,12 +891,14 @@ def test_huawei_rejects_derived_models_and_accessories(name: str) -> None:
     [
         "https://www.vmall.com/product/10086259366534.html",
         "https://www.vmall.com/product/comdetail/index.html?prdId=10086259366534",
+        "https://item.vmall.com/product/10086259366534.html",
+        "https://item.vmall.com/product/comdetail/index.html?prdId=10086259366534",
     ],
 )
 def test_huawei_accepts_both_numeric_vmall_detail_routes(detail_url: str) -> None:
     page = _HuaweiPage()
     _set_huawei_cards(page, exact_href=detail_url)
-    assert _adapter().observe(_task(), page).url == detail_url
+    assert _adapter().observe(_task(), page).url == _item_detail_url(detail_url)
 
 
 @pytest.mark.parametrize(
@@ -818,6 +959,49 @@ def test_huawei_complete_missing_configuration_is_legal_no(
     result = _adapter().observe(_task(), page)
     assert result.outcome is outcome
     assert tuple(rect.role for rect in result.css_rectangles) == (role,)
+    expected = page.dom_rect(page.group(role))
+    assert expected is not None
+    rectangle = result.css_rectangles[0]
+    assert (rectangle.x, rectangle.y, rectangle.width, rectangle.height) == (
+        expected["x"],
+        expected["y"],
+        expected["width"],
+        expected["height"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixture", "role", "label", "expected_options"),
+    [
+        (
+            "detail_missing_capacity.html",
+            "capacity",
+            "版本",
+            ("8GB+128GB", "12GB+512GB"),
+        ),
+        (
+            "detail_missing_color.html",
+            "color",
+            "颜色",
+            ("雪域白", "云杉绿"),
+        ),
+    ],
+)
+def test_huawei_legal_no_fixture_keeps_product_identity_and_complete_option_group(
+    fixture: str,
+    role: str,
+    label: str,
+    expected_options: tuple[str, ...],
+) -> None:
+    page = _HuaweiPage(fixture)
+    page.goto(DETAIL_INPUT)
+    title = page.locator("div#prd-detail-name[data-testid=prd-detail-name]")
+    assert title.count() == 1 and "HUAWEI Mate 70 Pro" in title.inner_text()
+    group = page.group(role)
+    assert any(child.text == label for child in group.children)
+    assert tuple(option.text for option in page.options(role)) == expected_options
+    assert page.dom_rect(title.nodes[0]) is not None
+    assert page.dom_rect(group) is not None
 
 
 @pytest.mark.parametrize("group", ["capacity", "color"])
