@@ -3,18 +3,20 @@
 - Plan: `docs/superpowers/plans/2026-08-12-huawei-official-live-adapter.md`
 - Design: `docs/superpowers/specs/2026-08-12-huawei-official-live-adapter-design.md`
 - Baseline commit: `b3a1e80`
-- Current task: Task 1 — VMALL true-structure contract
-- Status: complete at TDD RED checkpoint
+- Current task: Task 2 — independent Huawei production adapter
+- Status: complete and verified
 - Frozen sites: HONOR, Xiaomi, OPPO, vivo, JD, Tmall
-- Task 1 report: `.superpowers/sdd/2026-08-12-huawei-official-live-adapter/task-1-report.md`
-- Verification: fixture/harness `8 passed`; full contract `8 passed, 55 failed`
-  only because `quote_app.sites.official_brands.huawei` does not yet exist;
-  Ruff passes.
+- Task 2 report: `.superpowers/sdd/2026-08-12-huawei-official-live-adapter/task-2-report.md`
+- Verification: Huawei contract `63 passed`; Huawei/factory/isolation/public
+  evidence boundary selection `210 passed`; frozen HONOR/Xiaomi/OPPO/vivo
+  contracts `208 passed`; Ruff and mypy pass.
 - Review fix: detail fixtures and contracts now follow the reviewed
   `www.vmall.com` -> `item.vmall.com` redirect, real title/price nodes,
   label-anchored option groups, style-based selection, dynamic price proof,
   complete legal-no group evidence, and fixture-marker provenance guards.
 - Final Task 1 review fix: legal-no capacity/color observations require
   same-screen `title` + full `capacity_group` / `color_group` rectangles.
-- Next task: Task 2 — implement the Huawei production adapter against the
-  frozen Task 1 contract.
+- Task 2 includes the explicitly approved complete option-group evidence role
+  compatibility and two independently reproduced harness-only corrections;
+  see its report for exact boundaries.
+- Next task: Task 3 — verify runner/checkpoint/Excel/report integration.

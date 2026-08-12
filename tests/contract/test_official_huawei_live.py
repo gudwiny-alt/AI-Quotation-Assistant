@@ -670,6 +670,7 @@ def _remove_option(page: _HuaweiPage, group: str, target: str) -> None:
 
 def _delay_option(page: _HuaweiPage, group: str, target: str, waits: int) -> None:
     option = next(node for node in page.options(group) if node.text == target)
+    option.attrs.pop("style", None)
     option.attrs["hidden"] = ""
     option.attrs["data-reveal-after-option-waits"] = str(waits)
 
@@ -920,6 +921,9 @@ def test_huawei_rejects_unapproved_or_non_numeric_detail_routes(detail_url: str)
 
 def test_huawei_selects_exact_full_capacity_then_exact_color() -> None:
     page = _HuaweiPage()
+    for group, target in (("capacity", page.target_capacity()), ("color", "曜石黑")):
+        option = next(node for node in page.options(group) if node.text == target)
+        option.attrs.pop("style", None)
     result = _adapter().observe(_task(), page)
     assert result.outcome is BusinessOutcome.PRICE_FOUND
     assert page.option_clicks == ["capacity", "color"]

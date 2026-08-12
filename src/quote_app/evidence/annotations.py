@@ -19,6 +19,18 @@ _EXACT_ROLES = {
     EvidenceState.CAPACITY_UNAVAILABLE: frozenset({"capacity"}),
     EvidenceState.SOLD_OUT: frozenset({"stock_status"}),
 }
+_COMPLETE_GROUP_ROLES = {
+    EvidenceState.CAPACITY_UNAVAILABLE: frozenset(
+        {frozenset({"capacity"}), frozenset({"title", "capacity_group"})}
+    ),
+    EvidenceState.COLOR_UNAVAILABLE: frozenset(
+        {
+            frozenset({"color"}),
+            frozenset({"capacity", "color"}),
+            frozenset({"title", "color_group"}),
+        }
+    ),
+}
 
 
 def validate_annotation_roles(
@@ -47,14 +59,10 @@ def validate_annotation_roles(
         raise AnnotationError("DOM annotation roles do not match expected roles")
 
     actual_set = frozenset(actual_roles)
-    if state is EvidenceState.COLOR_UNAVAILABLE:
-        allowed = {
-            frozenset({"color"}),
-            frozenset({"capacity", "color"}),
-        }
-        if actual_set not in allowed:
+    if state in _COMPLETE_GROUP_ROLES:
+        if actual_set not in _COMPLETE_GROUP_ROLES[state]:
             raise AnnotationError(
-                "color-unavailable evidence requires a color frame"
+                f"annotation roles do not satisfy evidence state {state.value}"
             )
     elif actual_set != _EXACT_ROLES[state]:
         raise AnnotationError(

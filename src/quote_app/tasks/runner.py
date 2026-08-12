@@ -70,11 +70,15 @@ _OUTCOME_STATES = {
     BusinessOutcome.SOLD_OUT: EvidenceState.SOLD_OUT,
 }
 _OUTCOME_ROLES = {
-    BusinessOutcome.PRICE_FOUND: (),
-    BusinessOutcome.NO_MODEL: ("search_keyword", "result_region"),
-    BusinessOutcome.CAPACITY_UNAVAILABLE: ("capacity",),
-    BusinessOutcome.COLOR_UNAVAILABLE: ("color",),
-    BusinessOutcome.SOLD_OUT: ("stock_status",),
+    BusinessOutcome.PRICE_FOUND: frozenset({()}),
+    BusinessOutcome.NO_MODEL: frozenset({("search_keyword", "result_region")}),
+    BusinessOutcome.CAPACITY_UNAVAILABLE: frozenset(
+        {("capacity",), ("title", "capacity_group")}
+    ),
+    BusinessOutcome.COLOR_UNAVAILABLE: frozenset(
+        {("color",), ("title", "color_group")}
+    ),
+    BusinessOutcome.SOLD_OUT: frozenset({("stock_status",)}),
 }
 _AUTOMATION_PAGE_KEY = "quotation-automation"
 _CHANNEL_EXECUTION_PRIORITY = {
@@ -159,11 +163,14 @@ class FixtureObservation:
             "expected_roles",
             tuple(role.strip() for role in self.expected_roles),
         )
-        expected_roles = _OUTCOME_ROLES[self.outcome]
         actual_roles = tuple(
             rectangle.role for rectangle in self.css_rectangles
         )
-        if self.expected_roles != expected_roles or actual_roles != expected_roles:
+        allowed_roles = _OUTCOME_ROLES[self.outcome]
+        if (
+            self.expected_roles != actual_roles
+            or actual_roles not in allowed_roles
+        ):
             raise ValueError(
                 "fixture observation roles do not match the business outcome"
             )

@@ -9,9 +9,13 @@ from quote_app.evidence.geometry import CssRect
 from quote_app.tasks.models import BusinessOutcome, url_contains_credentials
 
 _LEGAL_NO_ROLES = {
-    BusinessOutcome.NO_MODEL: ("search_keyword", "result_region"),
-    BusinessOutcome.CAPACITY_UNAVAILABLE: ("capacity",),
-    BusinessOutcome.COLOR_UNAVAILABLE: ("color",),
+    BusinessOutcome.NO_MODEL: frozenset({("search_keyword", "result_region")}),
+    BusinessOutcome.CAPACITY_UNAVAILABLE: frozenset(
+        {("capacity",), ("title", "capacity_group")}
+    ),
+    BusinessOutcome.COLOR_UNAVAILABLE: frozenset(
+        {("color",), ("title", "color_group")}
+    ),
 }
 
 
@@ -160,7 +164,7 @@ class OfficialBusinessState:
         actual_roles = tuple(
             rectangle.role for rectangle in self.capture_view.css_rectangles
         )
-        if actual_roles != _LEGAL_NO_ROLES[self.outcome]:
+        if actual_roles not in _LEGAL_NO_ROLES[self.outcome]:
             raise ValueError("rectangle roles do not match the business outcome")
         if self.outcome is BusinessOutcome.NO_MODEL:
             if self.detail_identity is not None:
