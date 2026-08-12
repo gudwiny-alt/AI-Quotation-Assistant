@@ -10,7 +10,10 @@ import pytest
 from quote_app.sites.catalog import load_site_catalog
 from quote_app.sites.official_brands.factory import create_official_adapter
 from quote_app.sites.official_brands.models import OfficialCaptureView
-from quote_app.sites.official_brands.oppo import OppoOfficialAdapter
+from quote_app.sites.official_brands.oppo import (
+    OppoOfficialAdapter,
+    OppoSearchCardSelectionError,
+)
 from quote_app.tasks.models import (
     BusinessOutcome,
     WebsiteChannel,
@@ -321,7 +324,7 @@ def test_oppo_skips_invalid_exact_model_url_and_enters_first_later_approved_card
     assert page.goto_calls[-1].endswith("/32740.html?us=search")
 
 
-def test_oppo_fails_technical_only_when_all_exact_model_urls_are_unapproved() -> None:
+def test_oppo_marks_search_selection_failure_when_all_exact_model_urls_are_unapproved() -> None:
     page = _OppoFixturePage("normal.html")
     _set_result_cards(
         page,
@@ -331,7 +334,10 @@ def test_oppo_fails_technical_only_when_all_exact_model_urls_are_unapproved() ->
         ),
     )
 
-    with pytest.raises(LayoutRecognitionError, match="no approved product URL"):
+    with pytest.raises(
+        OppoSearchCardSelectionError,
+        match="no approved product URL",
+    ):
         _adapter().observe(_task(), page)
 
 

@@ -153,6 +153,12 @@ class _PriceUnavailable(LayoutRecognitionError):
     """Transient absence of an approved OPPO main-product price."""
 
 
+class OppoSearchCardSelectionError(LayoutRecognitionError):
+    """Visible OPPO search results cannot safely select a detail card."""
+
+    oppo_search_card_failure = True
+
+
 class OppoOfficialAdapter(LiveOfficialAdapterBase):
     """Live OPPO official-store adapter isolated from every frozen site."""
 
@@ -447,7 +453,7 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             if elapsed < 40:
                 page.wait_for_timeout(250)
                 elapsed += 1
-        raise LayoutRecognitionError("OPPO search results did not stabilize")
+        raise OppoSearchCardSelectionError("OPPO search results did not stabilize")
 
     def _preferred_exact_result_link(self, page: Any, task: WebsiteTask) -> Any | None:
         scope = self._search_scope(page)
@@ -466,7 +472,9 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                 raise LayoutRecognitionError("OPPO product identity is invalid")
             return link
         if exact_model_seen:
-            raise LayoutRecognitionError("OPPO exact-model cards have no approved product URL")
+            raise OppoSearchCardSelectionError(
+                "OPPO exact-model cards have no approved product URL"
+            )
         return None
 
     def _wait_for_detail_title(self, page: Any, model_name: str) -> None:
