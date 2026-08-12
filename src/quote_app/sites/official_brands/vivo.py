@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlsplit
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.quality import CaptureQualityError
 from quote_app.evidence.semantic_state import VerifiedSemanticState
+from quote_app.sites.detail_capture_view import ensure_capture_scale, restore_capture_scale
 from quote_app.sites.matching import (
     capacity_matches,
     color_matches,
@@ -57,26 +58,10 @@ _CAPTURE_SELECTORS = {
         "group_label": "颜色",
     },
 }
-_SCALE = """
-(scale) => {
-  const root = document.documentElement;
-  const key = 'data-quotation-capture-scale-original';
-  if (!root.hasAttribute(key)) root.setAttribute(key, root.style.zoom || '');
-  root.style.zoom = String(scale);
-  return {inlineZoom: root.style.zoom, computedZoom: getComputedStyle(root).zoom};
-}
-"""
-_RESTORE_SCALE = """
-() => {
-  const root = document.documentElement;
-  const key = 'data-quotation-capture-scale-original';
-  if (!root.hasAttribute(key)) return true;
-  const original = root.getAttribute(key) || '';
-  if (original) root.style.zoom = original; else root.style.removeProperty('zoom');
-  root.removeAttribute(key);
-  return true;
-}
-"""
+
+
+class _PriceUnavailable(LayoutRecognitionError):
+    """Transient absence of the vivo current-price node during its wait window."""
 
 
 class VivoOfficialAdapter(LiveOfficialAdapterBase):
@@ -111,6 +96,8 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
             raise LayoutRecognitionError("vivo homepage search input is unavailable")
         search.fill(task.model_name)
         search.press("Enter")
+        if not _is_search_url(browser.url):
+            raise LayoutRecognitionError("vivo search submission did not reach searchResult")
         self._wait_for_results(browser, task)
         link = self._exact_result_link(browser, task)
         if link is None:
@@ -126,6 +113,11 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         self, task: WebsiteTask, page: BrowserPage, checkpoint: WebsiteObservationCheckpoint
     ) -> AdapterObservation:
         browser = _page(page)
+        if checkpoint.outcome is BusinessOutcome.NO_MODEL:
+            if not _is_search_url(checkpoint.url):
+                raise LayoutRecognitionError("vivo no-model checkpoint is not a search URL")
+        elif not _is_detail(checkpoint.url):
+            raise LayoutRecognitionError("vivo detail checkpoint is not a numeric product URL")
         browser.goto(checkpoint.url, wait_until="domcontentloaded")
         browser.wait_for_load_state("domcontentloaded")
         if checkpoint.outcome is BusinessOutcome.NO_MODEL:
@@ -138,13 +130,13 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
     def _observe_detail(self, task: WebsiteTask, page: Any) -> AdapterObservation:
         identity = _detail_identity(page.url)
         self._require_detail_title(page, task.model_name)
-        capacity = self._exact_option(page, "capacity", task)
+        capacity = self._wait_for_target_option(page, "capacity", task)
         if capacity is None or _disabled(capacity):
             return self.build_observation(
                 task, self._configuration_no(task, page, identity, BusinessOutcome.CAPACITY_UNAVAILABLE)
             )
         self._select(page, "capacity", task)
-        color = self._exact_option(page, "color", task)
+        color = self._wait_for_target_option(page, "color", task)
         if color is None or _disabled(color):
             return self.build_observation(
                 task, self._configuration_no(task, page, _detail_identity(page.url), BusinessOutcome.COLOR_UNAVAILABLE)
@@ -185,21 +177,17 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         )
 
     def _wait_for_results(self, page: Any, task: WebsiteTask) -> None:
-        for round_number in range(8):
+        for tick in range(41):
             region = _first_visible(page, (_RESULT_REGION,))
             if region is not None:
                 if self._exact_result_link(page, task) is not None:
                     return
                 empty = _first_visible(region, (_EMPTY_RESULT,))
-                pending_late_card = page.locator(".late-result").count() > 0
-                if empty is not None and empty.is_visible() and round_number >= 3:
+                if empty is not None and empty.is_visible() and tick >= 3:
                     return
-                if round_number >= 3 and not pending_late_card:
-                    return
-            if round_number < 7:
+            if tick < 40:
                 page.wait_for_timeout(250)
-        if _first_visible(page, (_RESULT_REGION,)) is None:
-            raise LayoutRecognitionError("vivo search results are unavailable")
+        raise LayoutRecognitionError("vivo search results lacked a reliable terminal state")
 
     def _exact_result_link(self, page: Any, task: WebsiteTask) -> Any | None:
         region = _first_visible(page, (_RESULT_REGION,))
@@ -258,6 +246,15 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
             raise LayoutRecognitionError(f"vivo exact {kind} option is ambiguous")
         return options[0] if options else None
 
+    def _wait_for_target_option(self, page: Any, kind: str, task: WebsiteTask) -> Any | None:
+        for tick in range(21):
+            target = self._exact_option(page, kind, task)
+            if target is not None:
+                return target
+            if tick < 20:
+                page.wait_for_timeout(250)
+        return None
+
     def _require_selected(self, page: Any, kind: str, task: WebsiteTask) -> Any:
         selected = [option for option in self._options(page, kind) if _selected(option)]
         if len(selected) != 1:
@@ -278,27 +275,63 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         if option is None or _disabled(option):
             raise LayoutRecognitionError(f"vivo target {kind} option is unavailable")
         option.click()
-        self._require_selected(page, kind, task)
+        for tick in range(21):
+            try:
+                self._require_selected(page, kind, task)
+                return
+            except LayoutRecognitionError:
+                if tick == 20:
+                    break
+                page.wait_for_timeout(250)
+        raise LayoutRecognitionError(f"vivo selected {kind} option did not stabilize")
 
     def _stable_price(self, task: WebsiteTask, page: Any) -> Decimal:
-        previous: Decimal | None = None
-        for _ in range(8):
-            self._require_selected(page, "capacity", task)
-            self._require_selected(page, "color", task)
-            price = self._price(page)
-            if price == previous:
-                return price
-            previous = price
+        identity = _detail_identity(page.url)
+        previous: OfficialOfferSnapshot | None = None
+        stable_intervals = 0
+        for tick in range(21):
+            try:
+                current = self._instant_offer(task, page, identity)
+            except _PriceUnavailable:
+                previous = None
+                stable_intervals = 0
+            else:
+                stable_intervals = stable_intervals + 1 if current == previous else 0
+                previous = current
+                if stable_intervals >= 12:
+                    return current.price
+            if tick < 20:
+                page.wait_for_timeout(250)
         raise CaptureQualityError("CAPTURE_UNSTABLE", "vivo selected price did not stabilize")
 
+    def _instant_offer(
+        self, task: WebsiteTask, page: Any, expected_identity: OfficialDetailIdentity
+    ) -> OfficialOfferSnapshot:
+        identity = _detail_identity(page.url)
+        if identity.product_key != expected_identity.product_key:
+            raise LayoutRecognitionError("vivo price wait detail identity changed")
+        self._require_detail_title(page, task.model_name)
+        self._require_selected(page, "capacity", task)
+        self._require_selected(page, "color", task)
+        return OfficialOfferSnapshot(
+            identity=identity,
+            brand=task.brand,
+            model_name=task.model_name,
+            capacity=_capacity(task),
+            color=task.color,
+            price=self._price(page),
+        )
+
     def _price(self, page: Any) -> Decimal:
-        price = _first_visible(page, (_PRICE,))
-        if price is None:
-            raise LayoutRecognitionError("vivo current sale price is unavailable")
-        value = _money(price.inner_text())
-        if value is None:
-            raise LayoutRecognitionError("vivo current sale price is invalid")
-        return value
+        values: list[Decimal] = []
+        for price in _visible(page, (_PRICE,)):
+            style = price.evaluate(_PRICE_STYLE)
+            if isinstance(style, dict) and style.get("effectiveLineThrough") is True:
+                continue
+            values.extend(_money_values(price.inner_text()))
+        if not values:
+            raise _PriceUnavailable("vivo current sale price is unavailable")
+        return min(values)
 
     def _no_model_state(self, task: WebsiteTask, page: Any) -> OfficialBusinessState:
         keyword = next(
@@ -349,7 +382,7 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         selectors = _capture_selectors()
         try:
             if not _proofs_fit(browser, selectors):
-                browser.evaluate(_SCALE, 0.8)
+                ensure_capture_scale(browser, scale=0.8)
                 if not _proofs_fit(browser, selectors):
                     geometry = browser.evaluate(_GEOMETRY, selectors)
                     delta = _scroll_delta(geometry)
@@ -394,7 +427,7 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
 
     @staticmethod
     def _restore_scale(page: Any) -> None:
-        page.evaluate(_RESTORE_SCALE)
+        restore_capture_scale(page)
 
     def capture_rectangles_for_capture(self, task: WebsiteTask, page: BrowserPage, expected: VerifiedSemanticState) -> tuple[CssRect, ...]:
         self._validate_task(task)
@@ -447,6 +480,21 @@ def _is_detail(url: str) -> bool:
     return True
 
 
+def _is_search_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "www.vivo.com.cn"
+        and parsed.port in {None, 443}
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path == "/search/searchResult"
+    )
+
+
 def _detail_identity(url: str) -> OfficialDetailIdentity:
     normalized = _product_url(url)
     matched = _DETAIL_PATH.fullmatch(urlsplit(normalized).path)
@@ -461,8 +509,22 @@ def _title_matches(model: str, text: str) -> bool:
     wanted, actual = normalize_product_text(model), normalize_product_text(text)
     if not actual.startswith(wanted) or len(actual) == len(wanted) or not actual[len(wanted)].isspace():
         return False
-    first = re.match(r"[A-Z]+", actual[len(wanted):].lstrip())
-    return first is None or first.group() not in _VARIANTS
+    remainder = actual[len(wanted):].lstrip()
+    first = re.match(r"[A-Z]+", remainder)
+    if first is not None and first.group() in _VARIANTS:
+        return False
+    if any(word in remainder for word in ("青春版", "手机壳", "保护壳", "保护套", "钢化膜")):
+        return False
+    # Search-card suffixes are SKU display fields: capacity, network, colour,
+    # or ordinary availability copy.  Reject an arbitrary Chinese product
+    # noun immediately after the model instead of treating every prefix as a
+    # phone match.
+    return bool(
+        re.search(r"\d+\s*GB", remainder, re.IGNORECASE)
+        or re.search(r"\b[45]G\b", remainder, re.IGNORECASE)
+        or re.match(r"(?:[\u4e00-\u9fff]{1,8}(?:黑|蓝|白|金|紫|红|绿|灰|粉|银|橙))\b", remainder)
+        or remainder.startswith(("暂时缺货", "缺货", "到货通知"))
+    )
 
 
 def _disabled(locator: Any) -> bool:
@@ -477,25 +539,22 @@ def _capacity(task: WebsiteTask) -> str:
     return f"{task.ram}+{task.storage}"
 
 
-def _money(text: str) -> Decimal | None:
-    matched = _MONEY.search(text)
-    if matched is None:
-        return None
-    try:
-        amount = Decimal(matched.group(1).replace(",", ""))
-    except InvalidOperation:
-        return None
-    return amount if amount.is_finite() and amount >= 0 else None
+def _money_values(text: str) -> tuple[Decimal, ...]:
+    values: list[Decimal] = []
+    for matched in _MONEY.finditer(text):
+        try:
+            amount = Decimal(matched.group(1).replace(",", ""))
+        except InvalidOperation:
+            continue
+        if amount.is_finite() and amount >= 0:
+            values.append(amount)
+    return tuple(values)
 
 
 def _rect(locator: Any, role: str) -> CssRect:
     box = locator.bounding_box()
     if not isinstance(box, dict):
-        # The live Playwright locator always supplies a box.  The tiny
-        # contract DOM deliberately models its result view without layout;
-        # retain the evidence role there while production still uses the
-        # browser's genuine geometry whenever it is available.
-        return CssRect(0.0, 0.0, 1.0, 1.0, role)
+        raise LayoutRecognitionError(f"vivo {role} evidence has no geometry")
     try:
         return CssRect(float(box["x"]), float(box["y"]), float(box["width"]), float(box["height"]), role)
     except (KeyError, TypeError, ValueError):
@@ -560,6 +619,14 @@ _SCROLL = """
   return true;
 }
 """
+_PRICE_STYLE = """
+(element) => ({
+  effectiveLineThrough: (
+    window.getComputedStyle(element).textDecorationLine ||
+    window.getComputedStyle(element).textDecoration || ''
+  ).includes('line-through'),
+})
+"""
 
 
 def _proofs_fit(page: Any, selectors: dict[str, dict[str, str]]) -> bool:
@@ -575,7 +642,8 @@ def _scroll_delta(geometry: object) -> float | None:
         height = float(geometry["viewportHeight"])
     except (KeyError, TypeError, ValueError):
         return None
-    if bottom - top > height:
+    margin = 8.0
+    if bottom - top > height - 2 * margin:
         return None
-    delta = max(0.0, bottom - height + 8.0)
-    return delta if delta > 0 else None
+    delta = bottom - height + margin if bottom > height - margin else top - margin if top < margin else 0.0
+    return delta if 1 <= abs(delta) <= 160 else None
