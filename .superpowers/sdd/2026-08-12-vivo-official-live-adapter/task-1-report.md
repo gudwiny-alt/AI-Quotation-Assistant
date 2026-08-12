@@ -52,4 +52,4 @@ dedicated adapter is implemented.
 
 ## Commit
 
-`7654cef` — `test: define vivo official live contract`
+`82aa5fd` — `test: define vivo official live contract`
