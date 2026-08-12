@@ -58,6 +58,7 @@ _ACCESSORY_MARKERS = (
     "ACCESSORY",
 )
 _DERIVED_PREFIXES = (
+    "PRO",
     "+",
     "PLUS",
     "ULTRA",
@@ -74,19 +75,67 @@ _DERIVED_PREFIXES = (
     "竞速版",
     "至尊版",
 )
+_LEGAL_STATUS_TAILS = (
+    "暂时缺货",
+    "暂无现货",
+    "缺货",
+    "无货",
+    "有货",
+    "现货",
+)
+_COLOR_TAIL = re.compile(
+    r"(?:[\u3400-\u9fff]{1,8}(?:黑|白|红|蓝|绿|紫|金|银|灰|橙|粉|青|棕|色)"
+    r"|BLACK|WHITE|RED|BLUE|GREEN|PURPLE|GOLD|SILVER|GRAY|GREY|ORANGE|PINK)"
+)
+_CAPACITY_TAIL = re.compile(r"\d+(?:\.\d+)?(?:GB|TB)(?:\+\d+(?:\.\d+)?(?:GB|TB))?")
 _SEARCH_INPUT = "input#search-kw"
 _RESULT_REGION = ".search-result"
 _RESULT_CARD = "li[data-product-id]"
 _RESULT_TITLE = ".product-name"
 _RESULT_LINK = "a.product-link"
 _DETAIL_TITLE = "div#prd-detail-name[data-testid=prd-detail-name]"
-_PRICE_CANDIDATE = "[data-prdid] [data-testid=vui_text_container]"
-_CAPTURE_PRICE = "[data-testid=vui_text_container]"
+_PRICE_CANDIDATE = (
+    "[data-prdid] .summary-price .current-price "
+    "[data-testid=vui_text_container]"
+)
+_CAPTURE_PRICE = _PRICE_CANDIDATE
 _SELECTED_CANDIDATE = "[style]"
 _RISK_MARKERS = (
     '[id*="captcha"]',
     '[class*="captcha"]',
     '[class*="geetest"]',
+    'iframe[src*="captcha"]',
+    'iframe[src*="verify"]',
+)
+_LOGIN_MARKERS = (
+    'input[type="password"]',
+    'input[placeholder*="登录密码"]',
+    'form[action*="login"]',
+    '[class*="login-form"]',
+)
+_PRICE_EXCLUSION_MARKERS = (
+    "补贴",
+    "券后",
+    "优惠券",
+    "满减",
+    "直降",
+    "以旧换新",
+    "分期",
+    "保险",
+    "延保",
+    "延长服务",
+    "服务价",
+    "配件",
+    "REFERENCE",
+    "LINE-THROUGH",
+    "SUBSIDY",
+    "COUPON",
+    "INSTALLMENT",
+    "TRADE-IN",
+    "INSURANCE",
+    "WARRANTY",
+    "SERVICE-PRICE",
+    "ACCESSORY",
 )
 _CAPTURE_SELECTORS = {
     "title": {"role": "title", "selector": _DETAIL_TITLE},
@@ -106,15 +155,16 @@ _PRICE_STYLE = """
 (element) => {
   let current = element;
   let lineThrough = false;
-  let contextText = '';
+  const contextText = (element.parentElement?.textContent || '').trim();
+  const ancestorClasses = [];
   while (current) {
     const style = window.getComputedStyle(current);
     if ((style.textDecorationLine || style.textDecoration || '')
         .includes('line-through')) lineThrough = true;
-    if (!contextText) contextText = (current.textContent || '').trim();
+    ancestorClasses.push(String(current.className || ''));
     current = current.parentElement;
   }
-  return {effectiveLineThrough: lineThrough, contextText};
+  return {effectiveLineThrough: lineThrough, contextText, ancestorClasses};
 }
 """
 _FIT = r"""
@@ -235,8 +285,20 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
 
     def _manual_action(self, page: BrowserPage) -> OfficialManualAction | None:
         browser = _page(page)
-        if _visible(browser, _RISK_MARKERS):
+        parsed = urlsplit(str(getattr(browser, "url", "")))
+        path = parsed.path.lower()
+        host = (parsed.hostname or "").lower()
+        if (
+            any(marker in path for marker in ("captcha", "risk", "verify", "security"))
+            or _visible(browser, _RISK_MARKERS)
+        ):
             return OfficialManualAction.SECURITY_VERIFICATION
+        if (
+            (host.endswith("cloud.huawei.com") and any(marker in path for marker in ("cas", "login")))
+            or any(marker in path for marker in ("/login", "/signin", "/account/login"))
+            or _visible(browser, _LOGIN_MARKERS)
+        ):
+            return OfficialManualAction.LOGIN
         return None
 
     def _observe_validated(
@@ -247,6 +309,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         browser = _page(page)
         browser.goto(_ENTRY, wait_until="domcontentloaded")
         browser.wait_for_load_state("domcontentloaded")
+        self.raise_if_manual_action(browser)
         self.require_approved_url(browser.url)
         search = _first_visible(browser, (_SEARCH_INPUT,))
         if search is None:
@@ -261,6 +324,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         target_url = _approved_product_url(exact_link.get_attribute("href"))
         exact_link.click()
         browser.wait_for_load_state("domcontentloaded")
+        self.raise_if_manual_action(browser)
         if _detail_identity(browser.url).product_key != _detail_identity(target_url).product_key:
             raise LayoutRecognitionError("VMALL final detail identity changed")
         return self._observe_detail(task, browser)
@@ -283,6 +347,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             )
         browser.goto(checkpoint.url, wait_until="domcontentloaded")
         browser.wait_for_load_state("domcontentloaded")
+        self.raise_if_manual_action(browser)
         if checkpoint.outcome is BusinessOutcome.NO_MODEL:
             if self._wait_for_exact_result(browser, task) is not None:
                 raise LayoutRecognitionError("VMALL recovered no-model state changed")
@@ -290,6 +355,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         return self._observe_detail(task, browser)
 
     def _observe_detail(self, task: WebsiteTask, page: Any) -> AdapterObservation:
+        self.raise_if_manual_action(page)
         identity = _detail_identity(page.url)
         self._require_detail_title(page, task.model_name)
         capacity = self._wait_for_target_option(page, "capacity", task)
@@ -470,6 +536,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         task: WebsiteTask,
     ) -> Any | None:
         for tick in range(21):
+            self.raise_if_manual_action(page)
             target = self._exact_option(page, kind, task)
             if target is not None:
                 return target
@@ -499,6 +566,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             raise LayoutRecognitionError(f"VMALL target {kind} option is unavailable")
         target.click()
         for tick in range(21):
+            self.raise_if_manual_action(page)
             try:
                 self._require_selected(page, kind, task)
                 return
@@ -534,6 +602,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         previous: OfficialOfferSnapshot | None = None
         stable_intervals = 0
         for tick in range(21):
+            self.raise_if_manual_action(page)
             try:
                 current = self._instant_offer(task, page, identity)
             except _PriceUnavailable:
@@ -555,6 +624,8 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         for candidate in _visible(page, (_PRICE_CANDIDATE,)):
             style = candidate.evaluate(_PRICE_STYLE)
             if isinstance(style, dict) and style.get("effectiveLineThrough") is True:
+                continue
+            if _price_context_rejected(style):
                 continue
             values = _money_values(candidate.inner_text())
             if len(values) > 1:
@@ -814,10 +885,39 @@ def _title_matches(target: str, candidate: str) -> bool:
     if suffix and not suffix[0].isspace() and suffix[0] != "+":
         return False
     remainder = suffix.strip()
-    return not any(
+    if any(
         remainder == marker or remainder.startswith(f"{marker} ")
         for marker in _DERIVED_PREFIXES
-    )
+    ):
+        return False
+    return _legal_model_tail(remainder)
+
+
+def _legal_model_tail(value: str) -> bool:
+    remainder = value.strip()
+    if not remainder:
+        return True
+    for marker in _LEGAL_STATUS_TAILS:
+        remainder = remainder.replace(marker, " ")
+    tokens = tuple(item for item in remainder.split() if item)
+    if not tokens:
+        return True
+    if tokens and _CAPACITY_TAIL.fullmatch(tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return True
+    return len(tokens) == 1 and _COLOR_TAIL.fullmatch(tokens[0]) is not None
+
+
+def _price_context_rejected(style: object) -> bool:
+    if not isinstance(style, dict):
+        return True
+    pieces = [str(style.get("contextText") or "")]
+    ancestor_classes = style.get("ancestorClasses")
+    if isinstance(ancestor_classes, list):
+        pieces.extend(str(item) for item in ancestor_classes)
+    context = normalize_product_text(" ".join(pieces))
+    return any(marker in context for marker in _PRICE_EXCLUSION_MARKERS)
 
 
 def _disabled(locator: Any) -> bool:

@@ -61,11 +61,32 @@ these two harness-only corrections.
 
 ## Verification evidence
 
+### Review fix round
+
+The independent review requested four focused hardening changes. They were
+implemented without changing any frozen adapter or public evidence layer:
+
+- exact base-model boundaries now reject `Pro`, `Pro+`, `Plus`, `Ultra` and
+  `Max` candidates for a non-derived target, while a target that itself names
+  `Pro` still accepts only legal capacity/color/stock tails;
+- price extraction and formal capture now share the same structurally scoped
+  main purchase-summary current-price selector. Promotional nodes carrying the
+  same public `data-testid`, reference/line-through prices and a duplicate
+  sticky-bar price cannot enter the candidate set;
+- the capture harness resolves the formal CSS selector naturally and no longer
+  applies an extra fixture-only purchase-price predicate;
+- common Huawei login and security URL/DOM states explicitly raise the
+  approved zero-cost manual pause errors.
+
+The fix round added 12 Huawei contract cases. It did not modify HONOR, Xiaomi,
+OPPO, vivo, JD, Tmall, Excel, runtime, or the approved public compatibility
+extension.
+
 Commands run from `.worktrees/core-excel`:
 
 ```text
 .venv/bin/pytest -q tests/contract/test_official_huawei_live.py
-63 passed in 0.99s
+75 passed in 13.60s
 
 .venv/bin/pytest -q \
   tests/contract/test_official_huawei_live.py \
@@ -76,27 +97,22 @@ Commands run from `.worktrees/core-excel`:
   tests/unit/test_semantic_state.py \
   tests/unit/test_site_observation.py \
   tests/unit/test_runner_registry_observation.py
-210 passed in 1.77s
+222 passed in 15.88s
 
 .venv/bin/pytest -q \
   tests/contract/test_official_honor_live.py \
   tests/contract/test_official_xiaomi_live.py \
   tests/contract/test_official_oppo_live.py \
   tests/contract/test_official_vivo_live.py
-208 passed in 5.75s
+208 passed in 13.79s
 
-.venv/bin/ruff check <all Task 2 production and test files>
+.venv/bin/ruff check \
+  src/quote_app/sites/official_brands/huawei.py \
+  tests/contract/test_official_huawei_live.py
 All checks passed!
 
-.venv/bin/mypy \
-  src/quote_app/sites/official_brands/huawei.py \
-  src/quote_app/sites/official_brands/factory.py \
-  src/quote_app/sites/official_brands/models.py \
-  src/quote_app/evidence/semantic_state.py \
-  src/quote_app/sites/protocol.py \
-  src/quote_app/tasks/runner.py \
-  src/quote_app/evidence/annotations.py
-Success: no issues found in 7 source files
+.venv/bin/mypy src/quote_app/sites/official_brands/huawei.py
+Success: no issues found in 1 source file
 ```
 
 ## Risks and handoff

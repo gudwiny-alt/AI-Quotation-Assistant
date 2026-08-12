@@ -7,9 +7,14 @@
 - Status: complete and verified
 - Frozen sites: HONOR, Xiaomi, OPPO, vivo, JD, Tmall
 - Task 2 report: `.superpowers/sdd/2026-08-12-huawei-official-live-adapter/task-2-report.md`
-- Verification: Huawei contract `63 passed`; Huawei/factory/isolation/public
-  evidence boundary selection `210 passed`; frozen HONOR/Xiaomi/OPPO/vivo
+- Verification after independent-review fix: Huawei contract `75 passed`;
+  Huawei/factory/isolation/public evidence boundary selection `222 passed`;
+  frozen HONOR/Xiaomi/OPPO/vivo
   contracts `208 passed`; Ruff and mypy pass.
+- Review fix hardens exact base-model tails, scopes extraction and capture to
+  the same main current-price node, excludes promotional/sticky duplicates,
+  and explicitly pauses common Huawei login/security states. No frozen site or
+  public layer changed in the fix round.
 - Review fix: detail fixtures and contracts now follow the reviewed
   `www.vmall.com` -> `item.vmall.com` redirect, real title/price nodes,
   label-anchored option groups, style-based selection, dynamic price proof,

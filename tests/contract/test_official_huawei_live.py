@@ -18,6 +18,7 @@ from quote_app.tasks.models import (
     WebsiteTask,
 )
 from quote_app.tasks.retry import LayoutRecognitionError, NonRetryableTechnicalError
+from quote_app.tasks.retry import LoginRequired, SecurityVerificationRequired
 from tests.conftest import (
     _OfficialDocumentParser,
     _OfficialFixturePage,
@@ -33,7 +34,13 @@ DETAIL_INPUT = "https://www.vmall.com/product/comdetail/index.html?prdId=1008625
 DETAIL = "https://item.vmall.com/product/comdetail/index.html?prdId=10086259366534"
 _CAPTURE_SELECTOR_SPECS = {
     "title": {"role": "title", "selector": "div#prd-detail-name[data-testid=prd-detail-name]"},
-    "price": {"role": "price", "selector": "[data-testid=vui_text_container]"},
+    "price": {
+        "role": "price",
+        "selector": (
+            "[data-prdid] .summary-price .current-price "
+            "[data-testid=vui_text_container]"
+        ),
+    },
     "capacity": {
         "role": "capacity",
         "selector": "[style]",
@@ -89,6 +96,12 @@ class _HuaweiLocator(_OfficialLocator):
             raise AssertionError("VMALL search must submit with Enter")
         page.presses.append(key)
         page.search_submissions += 1
+        result_search = next(
+            node
+            for node in page.results_root.descendants()
+            if node.attrs.get("id") == "search-kw"
+        )
+        result_search.attrs["value"] = self.input_value()
         page._url = page.search_result_url_override or (
             f"https://www.vmall.com/search?keyword={quote(self.input_value())}"
         )
@@ -122,7 +135,7 @@ class _HuaweiLocator(_OfficialLocator):
         node = self.nodes[0]
         if node.attrs.get("id") == "prd-detail-name" and page.title_override is not None:
             return page.title_override
-        if page.is_purchase_price_node(node):
+        if node in page.price_nodes():
             return page.next_current_price(node)
         return super().inner_text()
 
@@ -135,6 +148,9 @@ class _HuaweiLocator(_OfficialLocator):
             "color": "rgb(207, 10, 44)",
             "effectiveLineThrough": node.tag == "s",
             "contextText": node.parent.text if node.parent is not None else node.text,
+            "ancestorClasses": [
+                ancestor.attrs.get("class", "") for ancestor in _ancestors(node)
+            ],
         }
 
 
@@ -333,11 +349,10 @@ class _HuaweiPage(_OfficialFixturePage):
         return bool(values) and all("+" not in value for value in values)
 
     def price_nodes(self) -> list[_OfficialNode]:
-        return [
-            node
-            for node in self.detail_root.descendants()
-            if self.is_purchase_price_node(node)
-        ]
+        return _official_select(
+            self.detail_root.descendants(),
+            _CAPTURE_SELECTOR_SPECS["price"]["selector"],
+        )
 
     @staticmethod
     def option_is_selected(node: _OfficialNode) -> bool:
@@ -345,18 +360,6 @@ class _HuaweiPage(_OfficialFixturePage):
         return (
             "border-color:rgb(207,10,44)" in style
             and "color:rgb(207,10,44)" in style
-        )
-
-    @staticmethod
-    def is_purchase_price_node(node: _OfficialNode) -> bool:
-        return (
-            node.attrs.get("data-testid") == "vui_text_container"
-            and node.parent is not None
-            and "price-line" in node.parent.attrs.get("class", "").split()
-            and any(
-                "purchase-summary" in ancestor.attrs.get("class", "").split()
-                for ancestor in _ancestors(node)
-            )
         )
 
     def next_current_price(self, node: _OfficialNode) -> str:
@@ -387,7 +390,7 @@ class _HuaweiPage(_OfficialFixturePage):
             110.0
             if node.attrs.get("id") == "prd-detail-name"
             else 174.0
-            if self.is_purchase_price_node(node)
+            if node in self.price_nodes()
             else 280.0
             if group_role == "capacity"
             else 372.0
@@ -480,7 +483,7 @@ class _HuaweiPage(_OfficialFixturePage):
                 matches = [
                     node
                     for node in matches
-                    if self.is_purchase_price_node(node) and node.text.strip() == expected_text
+                    if node.text.strip() == expected_text
                 ]
             elif role in {"capacity", "color"}:
                 expected_text = declaration.get("expected_text")
@@ -756,7 +759,10 @@ def test_huawei_fixture_uses_reviewed_vmall_detail_nodes_without_test_markers() 
 def test_huawei_fixture_contains_current_reference_and_excluded_promotional_amounts() -> None:
     page = _HuaweiPage()
     text = page.detail_root.text
-    assert all(value in text for value in ("4999", "5199", "6499", "750", "208.29", "1000", "699"))
+    assert all(
+        value in text
+        for value in ("4999", "5199", "6499", "750", "208.29", "1000", "699", "99")
+    )
     assert all(label in text for label in ("颜色", "版本", "暂时缺货"))
 
 
@@ -774,6 +780,17 @@ def test_huawei_capture_harness_selects_the_requested_live_price_candidate() -> 
     page = _detail_page_with_selected_nodes()
     proofs = page.proofs_from_selectors(_capture_selector_specs(price="5199"))
     assert proofs["price"].text == "5199"
+
+
+def test_huawei_capture_price_selector_excludes_promotional_and_sticky_duplicates() -> None:
+    page = _detail_page_with_selected_nodes()
+    matches = _official_select(
+        page.detail_root.descendants(),
+        _CAPTURE_SELECTOR_SPECS["price"]["selector"],
+    )
+    assert [node.text for node in matches] == ["4999", "5199"]
+    proofs = page.proofs_from_selectors(_capture_selector_specs(price="4999"))
+    assert proofs["price"] is matches[0]
 
 
 def test_huawei_capture_harness_rejects_wrong_real_selector() -> None:
@@ -885,6 +902,32 @@ def test_huawei_rejects_derived_models_and_accessories(name: str) -> None:
     _set_huawei_cards(page, ((name, "https://www.vmall.com/product/10086259366531.html"),))
     page.empty_after_waits = 1
     assert _adapter().observe(_task(), page).outcome is BusinessOutcome.NO_MODEL
+
+
+@pytest.mark.parametrize(
+    "derived",
+    ("Pro", "Pro+", "Plus", "Ultra", "Max"),
+)
+def test_huawei_base_model_rejects_derived_variant_cards(derived: str) -> None:
+    page = _HuaweiPage()
+    _set_huawei_cards(
+        page,
+        ((f"HUAWEI 畅享 90 {derived} 8GB+256GB 曜石黑", DETAIL),),
+    )
+    page.empty_after_waits = 1
+    result = _adapter().observe(_task("华为畅享 90"), page)
+    assert result.outcome is BusinessOutcome.NO_MODEL
+
+
+def test_huawei_target_that_contains_pro_accepts_legal_capacity_color_tail() -> None:
+    page = _HuaweiPage()
+    _set_huawei_cards(
+        page,
+        (("HUAWEI 畅享 90 Pro 8GB+256GB 曜石黑", DETAIL),),
+    )
+    page.title_override = "HUAWEI 畅享 90 Pro 8GB+256GB 曜石黑"
+    result = _adapter().observe(_task("华为畅享 90 Pro"), page)
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
 
 
 @pytest.mark.parametrize(
@@ -1057,6 +1100,47 @@ def test_huawei_product_sold_out_copy_does_not_make_selectable_option_legal_no()
 def test_huawei_uses_lowest_current_price_and_rejects_promotional_numbers() -> None:
     result = _adapter().observe(_task(), _HuaweiPage())
     assert result.price == Decimal("4999")
+
+
+def test_huawei_promotion_with_same_public_text_testid_does_not_pollute_price() -> None:
+    page = _HuaweiPage()
+    promotional = next(
+        node
+        for node in page.detail_root.descendants()
+        if "coupon-offer" in node.attrs.get("class", "").split()
+    )
+    assert any(
+        child.attrs.get("data-testid") == "vui_text_container"
+        for child in promotional.children
+    )
+    assert _adapter().observe(_task(), page).price == Decimal("4999")
+
+
+@pytest.mark.parametrize(
+    ("url", "marker", "error"),
+    [
+        ("https://id1.cloud.huawei.com/CAS/portal/login.html", None, LoginRequired),
+        ("https://www.vmall.com/account/login", "login", LoginRequired),
+        ("https://www.vmall.com/risk/verify", None, SecurityVerificationRequired),
+        ("https://www.vmall.com/", "captcha", SecurityVerificationRequired),
+    ],
+)
+def test_huawei_explicitly_pauses_for_login_and_security_states(
+    url: str,
+    marker: str | None,
+    error: type[Exception],
+) -> None:
+    page = _HuaweiPage()
+    page._url = url
+    page.active = "home"
+    if marker == "login":
+        node = _OfficialNode("input", {"type": "password"}, page.home_root)
+        page.home_root.children.append(node)
+    elif marker == "captcha":
+        node = _OfficialNode("div", {"class": "geetest-panel"}, page.home_root)
+        page.home_root.children.append(node)
+    with pytest.raises(error):
+        _adapter().raise_if_manual_action(page)
 
 
 def test_huawei_price_may_appear_late_then_stabilizes_three_seconds() -> None:
