@@ -60,8 +60,17 @@ dedicated adapter is implemented.
   by the contract. Home, results, detail, blank, and unknown states use
   separate roots, so stale inputs/cards
   cannot satisfy detail behavior. Capture derives title/current price/selected
-  version/selected color from the real fixture nodes; its harness applies 80%
-  to x/y/width/height and computes visibility/hit-testing from those DOMRects.
+  version/selected color from the real fixture nodes. Its harness requires the
+  adapter's `evaluate` calls to pass four real CSS selector declarations:
+  `section.base-info h1.name`, `div.summary_price p.sale-price`, and the
+  checked `dl.sku-module.specs li.sku-module_item--checked` selector scoped by
+  the real `版本` / `颜色` dt+dd groups. It resolves those passed selectors
+  against the active detail DOM, requires one actual node per proof, then reads
+  its text, checked state, DOMRect, and hit-test result. A wrong but parseable
+  market-price selector is independently rejected, preventing a harness from
+  silently substituting fixture nodes or expected-text identities. The harness
+  applies 80% to x/y/width/height and computes visibility/hit-testing from
+  those DOMRects.
   Its scroll delta is derived from `unionBottom - viewportHeight + margin`,
   rather than a fixed literal. It covers 100% fit, 80%-only fit, one bounded geometry scroll, a fixed
   overlap failure after one attempt, and a disappearing proof. Saving AK/AN
@@ -77,7 +86,9 @@ dedicated adapter is implemented.
 ## Commit
 
 `82aa5fd` — initial Task 1 contract; `7e40c15` — fix round 1;
-`c9366f4` — fix round 2; `f33260d` — fix round 3; `c863d0b` — fix round 4.
-This fifth-round commit tightens detail hierarchy, active-DOM isolation,
-terminal-no-model budget, explicit iQOO failure semantics, and capture proof
-identity/geometry requirements.
+`c9366f4` — fix round 2; `f33260d` — fix round 3; `c863d0b` — fix round 4;
+`03d248c` — fix round 5 (detail hierarchy, active-DOM isolation,
+terminal-no-model budget, explicit iQOO failure semantics, and bounded capture
+geometry). This sixth-round update replaces text-bearing proof identities with
+adapter-supplied real CSS selector resolution and includes a wrong-selector
+negative contract.

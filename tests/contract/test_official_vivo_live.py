@@ -22,6 +22,26 @@ from tests.conftest import (
 _FIXTURES = Path(__file__).parents[1] / "fixtures/sites/official_live/vivo"
 _ENTRY = "https://shop.vivo.com.cn/"
 _SEARCH = "https://www.vivo.com.cn/search/searchResult?searchKeyword=vivo%20X200&page_src=1"
+_CAPTURE_SELECTOR_SPECS = {
+    "title": {"role": "title", "selector": "section.base-info h1.name"},
+    "price": {"role": "price", "selector": "div.summary_price p.sale-price"},
+    "capacity": {
+        "role": "capacity",
+        "selector": "dl.sku-module.specs li.sku-module_item--checked",
+        "group_label": "版本",
+    },
+    "color": {
+        "role": "color",
+        "selector": "dl.sku-module.specs li.sku-module_item--checked",
+        "group_label": "颜色",
+    },
+}
+
+
+def _capture_selector_specs() -> dict[str, dict[str, str]]:
+    """Return the four real detail-node selectors an adapter must pass to evaluate."""
+
+    return {role: dict(spec) for role, spec in _CAPTURE_SELECTOR_SPECS.items()}
 
 
 class _VivoLocator(_OfficialLocator):
@@ -114,6 +134,7 @@ class _VivoPage(_OfficialFixturePage):
         self.title_override: str | None = None
         self.capture_scale = 1.0
         self.capture_scales: list[float] = []
+        self.capture_selector_arguments: list[dict[str, object]] = []
         self.scroll_offset = 0.0
         self.light_scrolls: list[float] = []
         self.viewport_height = 800.0
@@ -260,7 +281,7 @@ class _VivoPage(_OfficialFixturePage):
                 or "delta" not in argument
                 or "proofs" not in argument
             ):
-                raise AssertionError("geometry scroll requires delta plus proof identities")
+                raise AssertionError("geometry scroll requires delta plus proof selectors")
             delta = float(argument["delta"])
             geometry = self.evaluate("getBoundingClientRect", argument["proofs"])
             expected = max(0.0, geometry["unionBottom"] - geometry["viewportHeight"] + 8.0)
@@ -274,8 +295,9 @@ class _VivoPage(_OfficialFixturePage):
             "capacity",
             "color",
         ):
-            raise AssertionError("capture adapter must provide four explicit proof identities")
-        proofs = self.proofs_for_identities(argument)
+            raise AssertionError("capture adapter must provide four explicit proof selectors")
+        self.capture_selector_arguments.append(argument)
+        proofs = self.proofs_from_selectors(argument)
         if "elementFromPoint" in script:
             return all(self.visible_and_unobscured(node) for node in proofs.values())
         if "getBoundingClientRect" in script:
@@ -290,57 +312,71 @@ class _VivoPage(_OfficialFixturePage):
             }
         raise AssertionError(f"unexpected vivo evaluation: {script[:90]}")
 
-    def capture_proofs(self) -> dict[str, _OfficialNode]:
-        title = next(
-            node
-            for node in self.detail_root.descendants()
-            if node.tag == "h1" and "name" in node.attrs.get("class", "")
-        )
-        price = next(
-            node
-            for node in self.detail_root.descendants()
-            if node.tag == "p" and "sale-price" in node.attrs.get("class", "")
-        )
-        return {
-            "title": title,
-            "price": price,
-            "capacity": next(
-                node
-                for node in self.options("capacity")
-                if "sku-module_item--checked" in node.attrs.get("class", "")
-            ),
-            "color": next(
-                node
-                for node in self.options("color")
-                if "sku-module_item--checked" in node.attrs.get("class", "")
-            ),
-        }
+    def proofs_from_selectors(self, selectors: object) -> dict[str, _OfficialNode]:
+        """Resolve proof nodes only from adapter-supplied real CSS selectors.
 
-    def proofs_for_identities(self, identities: dict[str, object]) -> dict[str, _OfficialNode]:
-        proofs = self.capture_proofs()
-        expected = {
-            "title": "h1.name",
-            "price": "p.sale-price:¥4399",
-            "capacity": "li.spec_item.checked:12GB+256GB",
-            "color": "li.spec_item.checked:辰夜黑",
-        }
-        if identities != expected:
-            raise AssertionError("capture proofs must bind exact live fixture nodes")
-        if proofs["title"].tag != "h1" or "name" not in proofs["title"].attrs.get("class", ""):
-            raise AssertionError("title proof mismatch")
-        if proofs["price"].text != "4399":
-            raise AssertionError("adopted price proof mismatch")
+        ``group_label`` is deliberately not a test-only locator: it scopes the
+        otherwise shared checked-option selector to the real ``dt``/``dd``
+        section that represents 版本 or 颜色.  The node itself still comes from
+        parsing the selector passed through ``evaluate``.
+        """
+
+        if not isinstance(selectors, dict) or tuple(selectors) != (
+            "title",
+            "price",
+            "capacity",
+            "color",
+        ):
+            raise AssertionError("capture adapter must pass four named CSS selectors")
+        proofs: dict[str, _OfficialNode] = {}
+        for role, expected_tag, expected_class in (
+            ("title", "h1", "name"),
+            ("price", "p", "sale-price"),
+            ("capacity", "li", "sku-module_item--checked"),
+            ("color", "li", "sku-module_item--checked"),
+        ):
+            declaration = selectors[role]
+            if not isinstance(declaration, dict) or declaration.get("role") != role:
+                raise AssertionError(f"{role} proof selector lacks its role")
+            selector = declaration.get("selector")
+            if not isinstance(selector, str):
+                raise AssertionError(f"{role} proof selector is not CSS")
+            matches = _official_select(self.active_root().descendants(), selector)
+            if role in {"capacity", "color"}:
+                group_label = declaration.get("group_label")
+                expected_group = "版本" if role == "capacity" else "颜色"
+                if group_label != expected_group:
+                    raise AssertionError(f"{role} proof has the wrong sku group")
+                if set(declaration) != {"role", "selector", "group_label"}:
+                    raise AssertionError(f"{role} proof has unsupported selector metadata")
+                group = "capacity" if role == "capacity" else "color"
+                matches = [node for node in matches if node in self.options(group)]
+            elif set(declaration) != {"role", "selector"}:
+                raise AssertionError(f"{role} proof has unsupported selector metadata")
+            if len(matches) != 1:
+                raise AssertionError(f"{role} proof selector must resolve exactly one live node")
+            node = matches[0]
+            if node.tag != expected_tag or expected_class not in node.attrs.get("class", ""):
+                raise AssertionError(f"{role} proof selector resolved the wrong node")
+            proofs[role] = node
+        if proofs["price"].text.replace("¥", "") != "4399":
+            raise AssertionError("adopted price proof selector did not resolve ¥4399")
         if proofs["capacity"].text != "12GB+256GB" or proofs["color"].text != "辰夜黑":
-            raise AssertionError("selected configuration proof mismatch")
+            raise AssertionError("selected configuration proof selector did not resolve targets")
         return proofs
 
     def visible_and_unobscured(self, node: _OfficialNode) -> bool:
         box = self.dom_rect(node)
         if box is None or box["y"] < 0 or box["y"] + box["height"] > self.viewport_height:
             return False
-        return self.blocker is None or not (
-            self.blocker[0] <= box["y"] + box["height"] / 2 <= self.blocker[1]
-        )
+        if self.blocker is None:
+            return True
+        blocker_top, blocker_bottom, fixed = self.blocker
+        center_y = box["y"] + box["height"] / 2
+        if not fixed:
+            blocker_top -= self.scroll_offset
+            blocker_bottom -= self.scroll_offset
+        return not blocker_top <= center_y <= blocker_bottom
 
 
 def _task(model: str = "vivo X200") -> WebsiteTask:
@@ -399,6 +435,21 @@ def _set_cards(
         container.children.append(card)
 
 
+def _detail_page_with_adopted_capture_nodes() -> _VivoPage:
+    """Prepare actual selected fixture nodes without a production adapter."""
+
+    page = _VivoPage()
+    page.goto("https://shop.vivo.com.cn/product/10010284?skuId=135003")
+    for group, target in (("capacity", "12GB+256GB"), ("color", "辰夜黑")):
+        _VivoLocator(page, [next(node for node in page.options(group) if node.text == target)]).click()
+    next(
+        node
+        for node in page.detail_root.descendants()
+        if node.tag == "p" and "sale-price" in node.attrs.get("class", "")
+    ).text_parts = ["4399"]
+    return page
+
+
 def test_vivo_fixture_uses_real_result_data_attributes_and_isolated_state_dom() -> None:
     page = _VivoPage()
     search = (_FIXTURES / "search_results.html").read_text()
@@ -445,6 +496,27 @@ def test_vivo_fixture_uses_real_result_data_attributes_and_isolated_state_dom() 
         for node in sku_info.children
         if node.tag == "dl" and "sku-module" in node.attrs.get("class", "")
     )
+
+
+def test_vivo_capture_harness_requires_four_real_selector_resolutions() -> None:
+    page = _detail_page_with_adopted_capture_nodes()
+
+    proofs = page.proofs_from_selectors(_capture_selector_specs())
+
+    assert tuple(proofs) == ("title", "price", "capacity", "color")
+    assert proofs["title"].text == "vivo X200"
+    assert proofs["price"].text.replace("¥", "") == "4399"
+    assert proofs["capacity"].text == "12GB+256GB"
+    assert proofs["color"].text == "辰夜黑"
+
+
+def test_vivo_capture_harness_rejects_a_wrong_real_css_selector() -> None:
+    page = _detail_page_with_adopted_capture_nodes()
+    wrong = _capture_selector_specs()
+    wrong["price"]["selector"] = "div.summary_price p.market-price"
+
+    with pytest.raises(AssertionError, match="price proof selector resolved the wrong node"):
+        page.proofs_from_selectors(wrong)
 
 
 def test_vivo_searches_once_then_quotes_final_stable_selected_offer() -> None:
@@ -597,7 +669,13 @@ def test_vivo_capture_reads_real_four_proofs_from_scaled_domrects(
     page.viewport_height = viewport
     adapter.prepare_capture_view(_task(), page, observation.semantic_state)
     expected_delta = max(0.0, (362.0 + 42.0) * 0.8 - viewport + 8.0)
-    assert page.capture_proofs()["price"].text.endswith("4399") and page.capture_scales == scale
+    assert (
+        page.proofs_from_selectors(_capture_selector_specs())["price"].text.endswith("4399")
+        and page.capture_scales == scale
+    )
+    assert page.capture_selector_arguments and all(
+        selectors == _capture_selector_specs() for selectors in page.capture_selector_arguments
+    )
     assert page.light_scrolls == ([expected_delta] if needs_scroll else [])
 
 
