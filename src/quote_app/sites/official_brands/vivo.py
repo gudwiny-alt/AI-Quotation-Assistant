@@ -177,16 +177,18 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         )
 
     def _wait_for_results(self, page: Any, task: WebsiteTask) -> None:
+        saw_terminal_empty = False
         for tick in range(41):
             region = _first_visible(page, (_RESULT_REGION,))
             if region is not None:
                 if self._exact_result_link(page, task) is not None:
                     return
                 empty = _first_visible(region, (_EMPTY_RESULT,))
-                if empty is not None and empty.is_visible() and tick >= 3:
-                    return
+                saw_terminal_empty = bool(empty is not None and empty.is_visible())
             if tick < 40:
                 page.wait_for_timeout(250)
+        if saw_terminal_empty:
+            return
         raise LayoutRecognitionError("vivo search results lacked a reliable terminal state")
 
     def _exact_result_link(self, page: Any, task: WebsiteTask) -> Any | None:
@@ -513,16 +515,37 @@ def _title_matches(model: str, text: str) -> bool:
     first = re.match(r"[A-Z]+", remainder)
     if first is not None and first.group() in _VARIANTS:
         return False
-    if any(word in remainder for word in ("青春版", "手机壳", "保护壳", "保护套", "钢化膜")):
+    if any(
+        word in remainder
+        for word in (
+            "青春版",
+            "手机壳",
+            "保护壳",
+            "保护套",
+            "钢化膜",
+            "充电器",
+            "耳机",
+            "数据线",
+            "配件",
+        )
+    ):
         return False
     # Search-card suffixes are SKU display fields: capacity, network, colour,
     # or ordinary availability copy.  Reject an arbitrary Chinese product
     # noun immediately after the model instead of treating every prefix as a
     # phone match.
+    leading_field = remainder.split(maxsplit=1)[0]
     return bool(
-        re.search(r"\d+\s*GB", remainder, re.IGNORECASE)
-        or re.search(r"\b[45]G\b", remainder, re.IGNORECASE)
-        or re.match(r"(?:[\u4e00-\u9fff]{1,8}(?:黑|蓝|白|金|紫|红|绿|灰|粉|银|橙))\b", remainder)
+        re.fullmatch(
+            r"\d+GB(?:\+\d+(?:GB|TB))?",
+            leading_field,
+            re.IGNORECASE,
+        )
+        or re.fullmatch(r"(?:(?:全网通|移动|联通|电信))?[45]G(?:手机|版)?", leading_field, re.IGNORECASE)
+        or re.fullmatch(
+            r"[\u4e00-\u9fff]{1,8}(?:黑|蓝|白|金|紫|红|绿|灰|粉|银|橙)",
+            leading_field,
+        )
         or remainder.startswith(("暂时缺货", "缺货", "到货通知"))
     )
 
@@ -604,9 +627,22 @@ _GEOMETRY = f"""
   const elements = Object.values(nodes);
   if (elements.some(element => element === null)) return {{missing: true}};
   const boxes = elements.map(element => element.getBoundingClientRect());
+  const occlusions = elements.flatMap((element, index) => {{
+    const box = boxes[index];
+    const hit = document.elementFromPoint(
+      box.left + box.width / 2,
+      box.top + box.height / 2
+    );
+    const unoccluded = Boolean(hit) &&
+      (hit === element || element.contains(hit) || hit.contains(element));
+    if (unoccluded || !hit) return [];
+    const blocker = hit.getBoundingClientRect();
+    return [{{proofBottom: box.bottom, blockerTop: blocker.top}}];
+  }});
   return {{
     unionTop: Math.min(...boxes.map(box => box.top)),
     unionBottom: Math.max(...boxes.map(box => box.bottom)),
+    occlusions,
     viewportHeight: window.innerHeight,
     scrollY: window.scrollY,
   }};
@@ -645,5 +681,31 @@ def _scroll_delta(geometry: object) -> float | None:
     margin = 8.0
     if bottom - top > height - 2 * margin:
         return None
-    delta = bottom - height + margin if bottom > height - margin else top - margin if top < margin else 0.0
-    return delta if 1 <= abs(delta) <= 160 else None
+    occlusions = geometry.get("occlusions")
+    if isinstance(occlusions, list) and occlusions:
+        overlaps: list[float] = []
+        try:
+            for occlusion in occlusions:
+                if not isinstance(occlusion, dict):
+                    return None
+                overlaps.append(
+                    float(occlusion["proofBottom"])
+                    - float(occlusion["blockerTop"])
+                    + 24.0
+                )
+        except (KeyError, TypeError, ValueError):
+            return None
+        delta = max(overlaps)
+    else:
+        delta = (
+            bottom - height + margin
+            if bottom > height - margin
+            else top - margin
+            if top < margin
+            else 0.0
+        )
+    if not 1 <= abs(delta) <= 160:
+        return None
+    if delta > 0 and top - delta < margin:
+        return None
+    return delta

@@ -367,9 +367,15 @@ class _VivoPage(_OfficialFixturePage):
             ):
                 raise AssertionError("geometry scroll requires delta plus proof selectors")
             delta = float(argument["delta"])
-            geometry = self.evaluate("getBoundingClientRect", argument["proofs"])
+            geometry = self.capture_geometry(argument["proofs"])
+            occlusions = geometry["occlusions"]
             expected = (
-                geometry["unionBottom"] - geometry["viewportHeight"] + 8.0
+                max(
+                    item["proofBottom"] - item["blockerTop"] + 24.0
+                    for item in occlusions
+                )
+                if occlusions
+                else geometry["unionBottom"] - geometry["viewportHeight"] + 8.0
                 if geometry["unionBottom"] > geometry["viewportHeight"] - 8.0
                 else geometry["unionTop"] - 8.0
                 if geometry["unionTop"] < 8.0
@@ -388,18 +394,10 @@ class _VivoPage(_OfficialFixturePage):
             raise AssertionError("capture adapter must provide four explicit proof selectors")
         self.capture_selector_arguments.append(argument)
         proofs = self.proofs_from_selectors(argument)
+        if "unionTop" in script and "getBoundingClientRect" in script:
+            return self.capture_geometry(argument)
         if "elementFromPoint" in script:
             return all(self.visible_and_unobscured(node) for node in proofs.values())
-        if "getBoundingClientRect" in script:
-            boxes = [self.dom_rect(node) for node in proofs.values()]
-            if any(box is None for box in boxes):
-                return {"missing": True}
-            return {
-                "unionTop": min(box["y"] for box in boxes if box),
-                "unionBottom": max(box["y"] + box["height"] for box in boxes if box),
-                "viewportHeight": self.viewport_height,
-                "scrollY": self.scroll_offset,
-            }
         raise AssertionError(f"unexpected vivo evaluation: {script[:90]}")
 
     def proofs_from_selectors(self, selectors: object) -> dict[str, _OfficialNode]:
@@ -455,18 +453,45 @@ class _VivoPage(_OfficialFixturePage):
             raise AssertionError("selected configuration proof selector did not resolve targets")
         return proofs
 
+    def capture_geometry(self, selectors: object) -> dict[str, object]:
+        proofs = self.proofs_from_selectors(selectors)
+        boxes = [self.dom_rect(node) for node in proofs.values()]
+        if any(box is None for box in boxes):
+            return {"missing": True}
+        occlusions: list[dict[str, float]] = []
+        for box in boxes:
+            assert box is not None
+            blocker_top = self.blocker_top_at_center(box)
+            if blocker_top is not None:
+                occlusions.append(
+                    {
+                        "proofBottom": box["y"] + box["height"],
+                        "blockerTop": blocker_top,
+                    }
+                )
+        return {
+            "unionTop": min(box["y"] for box in boxes if box),
+            "unionBottom": max(box["y"] + box["height"] for box in boxes if box),
+            "occlusions": occlusions,
+            "viewportHeight": self.viewport_height,
+            "scrollY": self.scroll_offset,
+        }
+
+    def blocker_top_at_center(self, box: dict[str, float]) -> float | None:
+        if self.blocker is None:
+            return None
+        blocker_top, blocker_bottom, fixed = self.blocker
+        if not fixed:
+            blocker_top -= self.scroll_offset
+            blocker_bottom -= self.scroll_offset
+        center_y = box["y"] + box["height"] / 2
+        return blocker_top if blocker_top <= center_y <= blocker_bottom else None
+
     def visible_and_unobscured(self, node: _OfficialNode) -> bool:
         box = self.dom_rect(node)
         if box is None or box["y"] < 0 or box["y"] + box["height"] > self.viewport_height:
             return False
-        if self.blocker is None:
-            return True
-        blocker_top, blocker_bottom, fixed = self.blocker
-        center_y = box["y"] + box["height"] / 2
-        if not fixed:
-            blocker_top -= self.scroll_offset
-            blocker_bottom -= self.scroll_offset
-        return not blocker_top <= center_y <= blocker_bottom
+        return self.blocker_top_at_center(box) is None
 
 
 def _task(model: str = "vivo X200") -> WebsiteTask:
@@ -715,9 +740,25 @@ def test_vivo_visible_terminal_no_goods_after_bounded_wait_is_legal_no() -> None
     result = _adapter().observe(_task(), page)
     assert (
         result.outcome is BusinessOutcome.NO_MODEL
-        and 3 <= page.waits <= 8
+        and page.waits == 40
         and page.locator("div.no-goods").is_visible()
     )
+
+
+def test_vivo_early_visible_no_goods_does_not_hide_a_late_exact_card() -> None:
+    page = _VivoPage()
+    _set_cards(
+        page,
+        (("vivo X200 Pro", "https://shop.vivo.com.cn/product/10010281?skuId=135001"),),
+        retain_late=True,
+    )
+    page.empty_after_waits = 3
+    page.late_after_waits = 18
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.waits == 18
 
 
 @pytest.mark.parametrize("model", ["iQOO 15", "iqoo 15", "i QOO 15", "I QOO 15"])
@@ -895,7 +936,16 @@ def test_vivo_title_drift_and_unstable_offer_are_technical_failures() -> None:
 
 @pytest.mark.parametrize(
     "near_match",
-    ["vivo X200 青春版", "vivo X200 手机壳", "vivo X200 保护壳", "vivo X200 钢化膜"],
+    [
+        "vivo X200 青春版",
+        "vivo X200 手机壳",
+        "vivo X200 保护壳",
+        "vivo X200 钢化膜",
+        "vivo X200 充电器 12GB+256GB",
+        "vivo X200 耳机 12GB+256GB",
+        "vivo X200 数据线 12GB+256GB",
+        "vivo X200 配件 12GB+256GB",
+    ],
 )
 def test_vivo_rejects_nonphone_or_edition_suffixes(near_match: str) -> None:
     page = _VivoPage()
@@ -978,12 +1028,29 @@ def test_vivo_capture_reads_real_four_proofs_from_scaled_domrects(
     assert page.light_scrolls == ([expected_delta] if needs_scroll else [])
 
 
-def test_vivo_capture_fixed_overlay_or_disappearing_proof_fails_closed_after_one_attempt() -> None:
+def test_vivo_capture_fixed_overlay_uses_each_proof_hit_test_and_clears_after_one_scroll() -> None:
     page = _VivoPage()
     adapter = _adapter()
     observation = adapter.observe(_task(), page)
     page.viewport_height = 280
-    page.blocker = (200, 400, True)
+    page.blocker = (280, 330, True)
+
+    adapter.prepare_capture_view(_task(), page, observation.semantic_state)
+
+    expected_delta = (362.0 + 42.0) * 0.8 - 280.0 + 24.0
+    assert page.light_scrolls == [expected_delta]
+    assert all(
+        page.visible_and_unobscured(node)
+        for node in page.proofs_from_selectors(_capture_selector_specs()).values()
+    )
+
+
+def test_vivo_capture_persistent_overlay_or_disappearing_proof_fails_closed() -> None:
+    page = _VivoPage()
+    adapter = _adapter()
+    observation = adapter.observe(_task(), page)
+    page.viewport_height = 280
+    page.blocker = (280, 330, False)
     with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
         adapter.prepare_capture_view(_task(), page, observation.semantic_state)
     assert page.capture_scales == [0.8] and len(page.light_scrolls) == 1

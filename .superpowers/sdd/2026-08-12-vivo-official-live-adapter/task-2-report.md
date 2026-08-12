@@ -51,9 +51,9 @@ acceptance before it is frozen.
 ## Review fix — live wait and boundary hardening
 
 - Search now waits up to the complete 40 × 250 ms budget. It succeeds on a
-  visible exact card, accepts only a visible `div.no-goods` terminal after the
-  minimum settlement threshold, and otherwise fails technically at the
-  deadline instead of writing an early `NO_MODEL`.
+  visible exact card and evaluates a visible `div.no-goods` terminal only at
+  the deadline. An early empty marker therefore cannot hide an exact card that
+  arrives later in the same window; no card and no terminal remains technical.
 - Capacity and color each have an independent 20 × 250 ms target-appearance
   window. A reliably disabled exact target remains an immediate legal no;
   absence becomes legal no only after the complete window. A click has its own
@@ -99,3 +99,43 @@ Success: no issues found in 1 source file
 
 The previously accepted but untracked Xiaomi adapter was recorded unchanged in
 the isolated baseline commit `7dd8dd5`; it is not part of the vivo fix.
+
+## Final review fix — per-proof occlusion and strict result settlement
+
+- `_GEOMETRY` resolves the adapter-supplied title, current-price, selected
+  capacity, and selected color selectors, then performs an independent center
+  `elementFromPoint` hit test for every resolved node. Each obstruction is
+  reported as `{proofBottom, blockerTop}` from the real DOMRects.
+- A single occlusion-driven scroll uses the maximum
+  `proofBottom - blockerTop + 24` displacement. Every displacement is bounded
+  to 1–160 px and a downward document scroll is rejected when it would move the
+  proof union above the 8 px safety margin. The contract covers a fixed overlay
+  that clears after exactly one scroll and an in-document obstruction that
+  remains aligned with the proof and therefore fails closed after one attempt.
+- Base-model search matching now checks the leading SKU field after the model
+  and rejects accessory product nouns including charger, headphones, data
+  cable, and generic accessories even when later text contains a valid-looking
+  capacity.
+- `div.no-goods` is never authoritative before the full 40-tick search window.
+  The contract covers both an early empty marker followed by an exact card at
+  tick 18 and an early empty marker that stays empty until tick 40.
+
+Final review verification:
+
+```text
+.venv/bin/pytest -q tests/contract/test_official_vivo_live.py
+56 passed
+
+.venv/bin/pytest -q tests/contract/test_official_vivo_live.py \
+  tests/contract/test_official_oppo_live.py \
+  tests/contract/test_official_xiaomi_live.py \
+  tests/contract/test_official_honor_live.py
+196 passed
+
+.venv/bin/ruff check src/quote_app/sites/official_brands/vivo.py \
+  tests/contract/test_official_vivo_live.py
+All checks passed
+
+.venv/bin/mypy src/quote_app/sites/official_brands/vivo.py
+Success: no issues found in 1 source file
+```
