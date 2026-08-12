@@ -193,6 +193,7 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
         browser_page.wait_for_load_state("domcontentloaded")
         if not _is_detail_url(browser_page.url):
             raise LayoutRecognitionError("OPPO product card did not reach a detail URL")
+        self._prepare_detail_view(browser_page)
         return self._observe_loaded_detail(task, browser_page)
 
     def _resume_validated(
@@ -214,7 +215,17 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             return self.build_observation(task, self._no_model_state(task, browser_page))
         if not _is_detail_url(browser_page.url):
             raise LayoutRecognitionError("OPPO recovery URL is not a product detail")
+        self._prepare_detail_view(browser_page)
         return self._observe_loaded_detail(task, browser_page)
+
+    def _prepare_detail_view(self, page: Any) -> None:
+        if not _is_detail_url(page.url):
+            raise LayoutRecognitionError("OPPO detail view requires a product URL")
+        try:
+            ensure_capture_scale(page, scale=0.8)
+        except Exception:
+            restore_capture_scale(page)
+            raise
 
     def _start_search(self, page: Any, task: WebsiteTask) -> None:
         opener = _first_visible(page, _SEARCH_OPENERS)
@@ -278,9 +289,8 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                     price=snapshot.price,
                 ),
             )
-        except Exception:
+        finally:
             restore_capture_scale(page)
-            raise
 
     def _read_business_state(self, task: WebsiteTask, page: BrowserPage) -> OfficialBusinessState:
         browser_page = _playwright_page(page)
@@ -338,10 +348,8 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
         self.raise_if_manual_action(browser_page)
         if expected.outcome is BusinessOutcome.PRICE_FOUND:
             try:
+                ensure_capture_scale(browser_page, scale=0.8)
                 proofs = self._capture_proof_locators(task, browser_page)
-                if not _proof_group_fits_current_viewport(browser_page, proofs):
-                    ensure_capture_scale(browser_page, scale=0.8)
-                    proofs = self._capture_proof_locators(task, browser_page)
                 if not _proof_group_fits_current_viewport(browser_page, proofs):
                     if not _scroll_proof_group_into_view(browser_page, proofs):
                         raise LayoutRecognitionError(
@@ -443,13 +451,14 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                 else None
             )
             explicit_empty = self._explicit_empty_result(scope)
-            if stable_reads >= 3 and keyword is not None and region is not None:
-                if explicit_empty:
-                    return
+            if stable_reads >= 3 and region is not None:
                 if self._preferred_exact_result_link(page, task) is not None:
                     return
-                if elapsed >= 40 and signature:
-                    return
+                if keyword is not None:
+                    if explicit_empty:
+                        return
+                    if elapsed >= 40 and signature:
+                        return
             if elapsed < 40:
                 page.wait_for_timeout(250)
                 elapsed += 1
