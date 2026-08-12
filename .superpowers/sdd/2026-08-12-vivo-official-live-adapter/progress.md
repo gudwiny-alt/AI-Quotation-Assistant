@@ -5,5 +5,5 @@ Task 1: complete — contracts/fixtures commits 82aa5fd..142b919; independent re
 Task 2: complete — independent vivo adapter/factory registration, approved
 Task 1 harness corrections, vivo contract GREEN (25 passed), ruff/mypy GREEN,
 and OPPO/Xiaomi frozen contract regression GREEN (92 passed).
-Task 3: pending — runner/checkpoint/Excel AK/AN integration.
+Task 3: implementation complete, review pending — added vivo runner/checkpoint/formal-capture/Excel AK/AN integration; 8 focused tests pass, plan suite 139 passes, ruff clean.
 Task 4: pending — frozen-site regression and package verification.
