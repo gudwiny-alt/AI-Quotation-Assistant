@@ -42,7 +42,7 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "苹果官网选中颜色组截图证据修复版（仅官网，荣耀/小米/OPPO/vivo/华为冻结）2026.08.22.117"
+APP_BUILD_LABEL = "苹果官网浏览器标题备用凭证版（仅官网，荣耀/小米/OPPO/vivo/华为冻结）2026.08.22.118"
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：荣耀官网首次使用无需预先登录；遇到登录或验证页面时，"
     "完成后点击“继续当前任务”。京东安全验证最多人工重试2次，仍未通过会跳过京东并继续天猫。"

@@ -1618,6 +1618,91 @@ def test_apple_capture_uses_visible_sticky_model_title_after_full_heading_scroll
     assert rectangles[0].y == 10
 
 
+def test_apple_capture_accepts_exact_browser_identity_when_page_title_never_pins() -> None:
+    """Apple may omit its in-page sticky title for one selected colour.
+
+    The native screenshot still shows Chrome's tab and address bar.  Once the
+    exact Apple purchase URL and the browser document title both name the task
+    model, those browser-level facts may replace only the missing in-page title
+    proof.  Price, selected storage and selected colour must remain exposed.
+    """
+    from quote_app.sites.official_brands.apple import AppleOfficialAdapter
+
+    page = _ApplePaintAwareScrollPage(
+        """
+        <title data-screen-title="product">购买 iPhone 17 256GB 青雾蓝色 - Apple</title>
+        <section data-screen="store"><a class="thumb"
+          href="/shop/buy-iphone/iphone-17/mg734ch/a"><h2>iPhone 17</h2></a></section>
+        <section data-screen="product" hidden><main>
+          <h1 style="left:50px;top:-320px;width:400px;height:45px">购买 iPhone 17</h1>
+          <section data-apple-role="color-group"><h2>颜色 - 雾蓝</h2>
+            <input id=":r0:" type="radio" name="color" checked hidden>
+            <label for=":r0:"
+              style="left:760px;top:80px;width:160px;height:58px">雾蓝</label>
+          </section>
+          <section data-apple-role="storage-group"><h2>存储容量</h2>
+            <input id=":r1:" type="radio" name="capacity" checked hidden>
+            <label for=":r1:"
+              style="left:760px;top:400px;width:440px;height:100px">256GB RMB 5,999</label>
+          </section>
+        </main></section>
+        """
+    )
+    task = replace(_apple_task(), storage="256GB", color="青雾蓝色")
+    adapter = AppleOfficialAdapter(_apple_spec())
+
+    observation = adapter.observe(task, page)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    )
+
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "title",
+        "price",
+        "capacity",
+        "color",
+    )
+
+
+def test_apple_browser_identity_fallback_rejects_a_different_tab_model() -> None:
+    """A stale or different browser tab must not authorize Apple capture."""
+    from quote_app.sites.official_brands.apple import AppleOfficialAdapter
+    from quote_app.tasks.retry import LayoutRecognitionError
+
+    page = _ApplePaintAwareScrollPage(
+        """
+        <title data-screen-title="product">购买 iPhone 17 Pro - Apple</title>
+        <section data-screen="store"><a class="thumb"
+          href="/shop/buy-iphone/iphone-17/mg734ch/a"><h2>iPhone 17</h2></a></section>
+        <section data-screen="product" hidden><main>
+          <h1 style="left:50px;top:-320px;width:400px;height:45px">购买 iPhone 17</h1>
+          <section data-apple-role="color-group"><h2>颜色 - 雾蓝</h2>
+            <input id=":r0:" type="radio" name="color" checked hidden>
+            <label for=":r0:"
+              style="left:760px;top:80px;width:160px;height:58px">雾蓝</label>
+          </section>
+          <section data-apple-role="storage-group"><h2>存储容量</h2>
+            <input id=":r1:" type="radio" name="capacity" checked hidden>
+            <label for=":r1:"
+              style="left:760px;top:400px;width:440px;height:100px">256GB RMB 5,999</label>
+          </section>
+        </main></section>
+        """
+    )
+    task = replace(_apple_task(), storage="256GB", color="青雾蓝色")
+    adapter = AppleOfficialAdapter(_apple_spec())
+    observation = adapter.observe(task, page)
+
+    with pytest.raises(LayoutRecognitionError):
+        adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+
+
 def test_apple_waits_for_temporarily_disabled_selected_configuration_cards() -> None:
     """Hydrating Apple controls must not be recorded as a final legal-no result."""
     from quote_app.sites.official_brands.apple import AppleOfficialAdapter

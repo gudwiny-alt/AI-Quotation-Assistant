@@ -192,6 +192,34 @@ _CAPTURE_STATE_WAIT_TICKS = 8
 _CAPTURE_STATE_WAIT_MS = 250
 _CAPTURE_GEOMETRY_CORRECTIONS = 8
 _CAPTURE_GEOMETRY_WAIT_MS = 300
+_BROWSER_TITLE_VARIANT_SUFFIX = re.compile(
+    r"^\s*(?:PRO|PRO\s+MAX|PLUS|MAX|AIR|MINI|SE|ULTRA)(?:\b|$)",
+    re.IGNORECASE,
+)
+
+
+class _AppleBrowserTitleEvidence:
+    """Geometry anchor for Apple browser-level model identity.
+
+    The model proof itself comes from the exact Apple purchase URL plus the
+    browser document title, both visible in the native whole-window capture.
+    Normal price-found screenshots are not DOM-annotated, but the semantic
+    state still needs one stable on-page rectangle per proof role.  Reuse the
+    already verified visible price card only as that geometry anchor.
+    """
+
+    def __init__(self, anchor: Any, model_name: str) -> None:
+        self._anchor = anchor
+        self._model_name = model_name
+
+    def bounding_box(self) -> Any:
+        return self._anchor.bounding_box()
+
+    def evaluate(self, script: str) -> Any:
+        return self._anchor.evaluate(script)
+
+    def inner_text(self) -> str:
+        return self._model_name
 
 
 class AppleOfficialAdapter(LiveOfficialAdapterBase):
@@ -209,6 +237,7 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
     def __init__(self, spec: Any) -> None:
         super().__init__(spec)
         self._prepared: set[tuple[int, str, str]] = set()
+        self._browser_title_fallback: set[tuple[int, str, str]] = set()
 
     def _manual_action(self, page: BrowserPage) -> OfficialManualAction | None:
         browser = _page(page)
@@ -769,7 +798,9 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
         self._validate_task(task)
         self._validate_expected_state(task, expected)
         browser = _page(page)
-        self._prepared.discard((id(browser), task.task_id, expected.current_sku))
+        key = (id(browser), task.task_id, expected.current_sku)
+        self._prepared.discard(key)
+        self._browser_title_fallback.discard(key)
         if expected.outcome is BusinessOutcome.PRICE_FOUND:
             restore_capture_scale(browser)
 
@@ -846,6 +877,21 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
         if identity != expected_identity:
             raise LayoutRecognitionError("Apple final detail identity changed")
 
+        fallback_key = (id(page), task.task_id, expected.current_sku)
+        if fallback_key in self._browser_title_fallback:
+            fallback = self._browser_identity_capture_proofs(
+                task,
+                page,
+                expected,
+            )
+            if fallback is not None and _proofs_fit(page, fallback):
+                return self._capture_state_from_proofs(
+                    page,
+                    expected,
+                    fallback,
+                )
+            self._browser_title_fallback.discard(fallback_key)
+
         proofs: tuple[Any, Any, Any, Any] | None = None
         for tick in range(_CAPTURE_STATE_WAIT_TICKS + 1):
             try:
@@ -856,14 +902,31 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
                 break
             if tick < _CAPTURE_STATE_WAIT_TICKS:
                 page.wait_for_timeout(_CAPTURE_STATE_WAIT_MS)
-        if proofs is None:
-            raise LayoutRecognitionError("Apple final four-proof state is unavailable")
-
-        proofs = self._reframe_capture_proofs(task, page, proofs)
-        if not _proofs_fit(page, proofs):
-            raise LayoutRecognitionError(
-                "Apple final four-proof capture frame cannot be established"
+        if proofs is not None:
+            proofs = self._reframe_capture_proofs(task, page, proofs)
+        if proofs is None or not _proofs_fit(page, proofs):
+            fallback = self._browser_identity_capture_proofs(
+                task,
+                page,
+                expected,
             )
+            if fallback is None or not _proofs_fit(page, fallback):
+                raise LayoutRecognitionError(
+                    "Apple final four-proof capture frame cannot be established"
+                )
+            proofs = fallback
+            self._browser_title_fallback.add(fallback_key)
+
+        return self._capture_state_from_proofs(page, expected, proofs)
+
+    def _capture_state_from_proofs(
+        self,
+        page: Any,
+        expected: VerifiedSemanticState,
+        proofs: tuple[Any, Any, Any, Any],
+    ) -> VerifiedSemanticState:
+        """Build one final state from four already exposed Apple proofs."""
+
         price, _price_locator = self._current_price(page)
         if price != expected.price:
             raise LayoutRecognitionError("Apple final price changed")
@@ -876,6 +939,38 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
             )
         )
         return replace(expected, css_rectangles=rectangles)
+
+    def _browser_identity_capture_proofs(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> tuple[Any, Any, Any, Any] | None:
+        """Use Apple browser identity only when the in-page title never pins.
+
+        This is intentionally narrower than a generic URL fallback: both the
+        selected Apple purchase route and the browser document title must name
+        the exact task model.  Price, storage and colour remain live visible
+        DOM proofs and cannot be replaced by browser metadata.
+        """
+
+        if not _same_apple_purchase_model(page.url, expected.canonical_url):
+            return None
+        if not _apple_browser_title_matches(page, task.model_name):
+            return None
+        try:
+            _price, price = self._current_price(page)
+            capacity = self._require_selected(page, "capacity", task)
+            color = self._require_selected(page, "color", task)
+            price_evidence = _option_evidence(page, price)
+            return (
+                _AppleBrowserTitleEvidence(price_evidence, task.model_name),
+                price_evidence,
+                _option_evidence(page, capacity),
+                self._selected_color_capture_evidence(page, color),
+            )
+        except LayoutRecognitionError:
+            return None
 
     def _capture_proofs(
         self,
@@ -1140,6 +1235,37 @@ def _apple_model_matches(target: str, candidate: str) -> bool:
 
     stripped = re.sub(r"^(?:购买|选购|BUY)\s*", "", candidate, flags=re.IGNORECASE)
     return model_matches(target, stripped)
+
+
+def _apple_browser_title_matches(page: Any, model_name: str) -> bool:
+    """Whether Chrome's Apple document title names the exact task model.
+
+    Apple appends selected storage, colour and store copy to the browser tab,
+    so the generic full-title matcher is deliberately too strict here.  The
+    purchase URL is independently checked before this helper is used.  Still
+    reject a model-family suffix immediately following the requested name so
+    an ``iPhone 17 Pro`` tab cannot authorize an ``iPhone 17`` screenshot.
+    """
+
+    title_reader = getattr(page, "title", None)
+    if not callable(title_reader):
+        return False
+    try:
+        title = normalize_product_text(title_reader())
+    except (AttributeError, RuntimeError, TypeError):
+        return False
+    wanted = normalize_product_text(model_name)
+    if not title or not wanted:
+        return False
+    wanted_pattern = re.escape(wanted).replace(r"\ ", r"\s+")
+    marker = re.compile(
+        rf"(?<![A-Z0-9]){wanted_pattern}(?![A-Z0-9])",
+        re.IGNORECASE,
+    )
+    matches = tuple(marker.finditer(title))
+    if len(matches) != 1:
+        return False
+    return _BROWSER_TITLE_VARIANT_SUFFIX.match(title[matches[0].end() :]) is None
 
 
 def _apple_card_model_matches(target: str, candidate: str) -> bool:
