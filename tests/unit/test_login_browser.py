@@ -5,7 +5,7 @@ from pathlib import Path
 from quote_app.browser.channel_detection import BrowserChoice
 
 
-def test_open_login_browser_marks_the_dedicated_profile_and_opens_only_login_pages(
+def test_open_login_browser_uses_distinct_persistent_profiles_for_tmall_and_jd(
     tmp_path: Path,
 ) -> None:
     from quote_app.browser.login import JD_LOGIN_URL, TMALL_LOGIN_URL, open_login_browser
@@ -22,14 +22,20 @@ def test_open_login_browser_marks_the_dedicated_profile_and_opens_only_login_pag
     )
 
     assert (tmp_path / "program-profile" / PROFILE_MARKER_NAME).is_file()
+    assert (tmp_path / "program-profile-jd" / PROFILE_MARKER_NAME).is_file()
     assert commands == [
         [
             str(executable),
             f"--user-data-dir={tmp_path / 'program-profile'}",
             "--new-window",
-            JD_LOGIN_URL,
             TMALL_LOGIN_URL,
-        ]
+        ],
+        [
+            str(executable),
+            f"--user-data-dir={tmp_path / 'program-profile-jd'}",
+            "--new-window",
+            JD_LOGIN_URL,
+        ],
     ]
 
 

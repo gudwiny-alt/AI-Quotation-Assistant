@@ -368,7 +368,7 @@ def test_fixture_outcomes_frames_sorting_and_output_mapping(
         }
 
 
-def test_stable_sort_is_brand_channel_row_and_preserves_exact_ties(
+def test_stable_sort_is_channel_brand_row_and_preserves_exact_ties(
     tmp_path: Path,
 ) -> None:
     tasks = (
@@ -433,13 +433,13 @@ def test_stable_sort_is_brand_channel_row_and_preserves_exact_ties(
         runner.run(tuple(reversed(tasks)))
 
         assert page.loads == [
+            "channel",
             "color",
             "storage",
             "ram",
             "model",
             "row-earlier",
             "row-later",
-            "channel",
             "brand",
         ]
 

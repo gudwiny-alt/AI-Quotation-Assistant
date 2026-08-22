@@ -66,10 +66,11 @@ def test_app_build_label_identifies_six_brand_full_site_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
     assert APP_BUILD_LABEL == (
-        "六品牌全站运行范围与紧凑界面版（六品牌官网冻结）2026.08.22.119"
+        "六品牌分阶段全站版（官网天猫先行·京东独立收尾）2026.08.23.120"
     )
     assert "当前受控页" in BETA_NOTICE
-    assert "官网、京东、天猫" in BETA_NOTICE
+    assert "全部官网、全部天猫，最后执行全部京东" in BETA_NOTICE
+    assert "京东独立登录状态" in BETA_NOTICE
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(
@@ -1043,7 +1044,7 @@ def test_gui_opens_the_dedicated_login_browser_before_a_quotation_run(
 
     assert opened_profiles == [app.app_paths.browser_profile]
     assert statuses == [
-        "已打开京东/天猫登录浏览器。请自行完成登录，完成后关闭该浏览器，再点击“开始自动报价”。"
+        "已分别打开天猫和京东独立登录浏览器。请自行完成登录，完成后关闭浏览器，再点击“开始自动报价”。"
     ]
 
 

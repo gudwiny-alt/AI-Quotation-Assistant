@@ -100,6 +100,15 @@ def _request(tmp_path: Path, tasks: tuple[WebsiteTask, ...]):
     )
 
 
+def _patch_browser_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    web_run: object,
+    browser_type: type[object],
+) -> None:
+    monkeypatch.setattr(web_run, "PersistentBrowserSession", browser_type)
+    monkeypatch.setattr(web_run, "NativeChromeCdpSession", browser_type)
+
+
 def test_manual_action_controller_keeps_action_visible_until_continue() -> None:
     from quote_app.tasks.scheduler import ManualActionEvent
     from quote_app.services.web_run import WebsiteRunController
@@ -197,7 +206,7 @@ def test_service_event_sink_forwards_durable_event_and_same_repository_snapshot(
         capture_context_provider=lambda *_args: None,
     )
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
 
     web_run.run_website_tasks(
@@ -470,7 +479,7 @@ def test_service_surfaces_checkpoint_failure_before_showing_manual_action(
         capture_context_provider=lambda *_args: None,
     )
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
     controller = Controller()
     request = web_run.WebsiteRunRequest(
@@ -584,7 +593,7 @@ def test_service_keeps_browser_open_until_manual_action_is_continued(
             return (_success(task, evidence),)
 
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
     monkeypatch.setattr(web_run, "default_registry", lambda: registry)
     controller = web_run.WebsiteRunController()
@@ -627,7 +636,7 @@ def test_service_constructs_one_registry_browser_runtime_and_serial_runner(
 ) -> None:
     from quote_app.services import web_run
 
-    task = _task("success")
+    task = _task("success", channel=WebsiteChannel.OFFICIAL)
     evidence = _evidence(tmp_path / "success.png", b"formal")
     result = _success(task, evidence)
     lifecycle: list[str] = []
@@ -690,7 +699,7 @@ def test_service_constructs_one_registry_browser_runtime_and_serial_runner(
         return runtime
 
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
     monkeypatch.setattr(web_run, "default_registry", make_registry)
 
@@ -710,6 +719,104 @@ def test_service_constructs_one_registry_browser_runtime_and_serial_runner(
         "browser-close",
         "repository-close",
     ]
+
+
+def test_service_finishes_official_and_tmall_before_isolated_jd_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from quote_app.services import web_run
+
+    official = _task("official", channel=WebsiteChannel.OFFICIAL, output_row=2)
+    tmall = _task("tmall", channel=WebsiteChannel.TMALL, output_row=2)
+    jd = _task("jd", channel=WebsiteChannel.JD, output_row=2)
+    tasks = (jd, tmall, official)
+    results = {
+        task.task_id: _success(
+            task,
+            _evidence(tmp_path / f"{task.task_id}.png", task.task_id.encode()),
+        )
+        for task in tasks
+    }
+    lifecycle: list[str] = []
+    phase_tasks: list[tuple[str, ...]] = []
+
+    class Repository:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def task_state(self, _task_id: str) -> TaskState:
+            return TaskState.SUCCEEDED
+
+        def close(self) -> None:
+            lifecycle.append("repository-close")
+
+    class Browser:
+        def __init__(self, profile_dir: Path, **_kwargs: object) -> None:
+            assert profile_dir == tmp_path / "profile"
+
+        def __enter__(self):
+            lifecycle.append("regular-enter")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            lifecycle.append("regular-close")
+
+    class JdBrowser:
+        def __init__(self, profile_dir: Path, **_kwargs: object) -> None:
+            assert profile_dir == tmp_path / "profile-jd"
+
+        def __enter__(self):
+            lifecycle.append("jd-enter")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            lifecycle.append("jd-close")
+
+    class Runner:
+        def __init__(self, **kwargs: object) -> None:
+            browser = kwargs["browser_session"]
+            self.phase = "jd" if isinstance(browser, JdBrowser) else "regular"
+            self.scheduler = SimpleNamespace(waiting_action=None)
+
+        def run(
+            self,
+            received_tasks: tuple[WebsiteTask, ...],
+        ) -> tuple[WebsiteResult, ...]:
+            phase_tasks.append(tuple(task.task_id for task in received_tasks))
+            if self.phase == "regular":
+                assert all(task.channel is not WebsiteChannel.JD for task in received_tasks)
+            else:
+                assert all(task.channel is WebsiteChannel.JD for task in received_tasks)
+            return tuple(results[task.task_id] for task in received_tasks)
+
+    runtime = SimpleNamespace(
+        evidence_capture=lambda: SimpleNamespace(capture=lambda _request: None),
+        capture_context_provider=lambda *_args: None,
+    )
+    monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
+    monkeypatch.setattr(web_run, "NativeChromeCdpSession", JdBrowser)
+    monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
+
+    summary = web_run.run_website_tasks(
+        _request(tmp_path, tasks),
+        runtime_factory=lambda _registry: runtime,
+    )
+
+    assert phase_tasks == [("official", "tmall"), ("jd",)]
+    assert lifecycle == [
+        "regular-enter",
+        "regular-close",
+        "jd-enter",
+        "jd-close",
+        "repository-close",
+    ]
+    assert summary.succeeded == 3
+    assert set(summary.evidence_paths) == {
+        results[task.task_id].evidence.path  # type: ignore[union-attr]
+        for task in tasks
+    }
 
 
 def test_service_darwin_beta_uses_manual_window_session_defaults(
@@ -748,7 +855,7 @@ def test_service_darwin_beta_uses_manual_window_session_defaults(
             return ()
 
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
 
     summary = web_run.run_website_tasks(
@@ -822,7 +929,7 @@ def test_service_preserves_partial_results_login_and_authoritative_failure_codes
         capture_context_provider=lambda *_args: None,
     )
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
     monkeypatch.setattr(web_run, "default_registry", lambda: registry)
 
@@ -889,7 +996,7 @@ def test_summary_excludes_missing_or_hash_mismatched_evidence(
         capture_context_provider=lambda *_args: None,
     )
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
 
     summary = web_run.run_website_tasks(
@@ -939,7 +1046,7 @@ def test_service_closes_browser_and_repository_when_runner_raises(
         capture_context_provider=lambda *_args: None,
     )
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
 
     with pytest.raises(RuntimeError, match="runner failed"):
@@ -1049,7 +1156,7 @@ def test_service_binds_beta_acceptance_to_a_beta_runtime_capture(
         capture_context_provider=lambda *_args: None,
     )
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    monkeypatch.setattr(web_run, "PersistentBrowserSession", Browser)
+    _patch_browser_sessions(monkeypatch, web_run, Browser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
 
     summary = web_run.run_website_tasks(

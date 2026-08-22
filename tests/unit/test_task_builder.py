@@ -212,8 +212,8 @@ def test_eligible_row_builds_three_channels_from_web_query_only(
     assert result.issues == ()
     assert tuple(task.channel for task in result.tasks) == (
         WebsiteChannel.OFFICIAL,
-        WebsiteChannel.JD,
         WebsiteChannel.TMALL,
+        WebsiteChannel.JD,
     )
     assert len(result.tasks) == 3
     for task in result.tasks:
@@ -286,10 +286,10 @@ def test_multiple_rows_are_built_channel_major_in_input_order(
     ] == [
         (WebsiteChannel.OFFICIAL, 2),
         (WebsiteChannel.OFFICIAL, 3),
-        (WebsiteChannel.JD, 2),
-        (WebsiteChannel.JD, 3),
         (WebsiteChannel.TMALL, 2),
         (WebsiteChannel.TMALL, 3),
+        (WebsiteChannel.JD, 2),
+        (WebsiteChannel.JD, 3),
     ]
 
 

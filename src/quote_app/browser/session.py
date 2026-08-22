@@ -3,8 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
+import subprocess
 import tempfile
 import threading
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -80,6 +85,12 @@ def prepare_dedicated_profile(profile_dir: Path) -> Path:
     with BrowserProfileLock(normalized) as profile_lock:
         _ensure_dedicated_profile(normalized, lock_name=profile_lock.lock_path.name)
     return normalized
+
+
+def jd_profile_dir_for(profile_dir: Path) -> Path:
+    """Return the stable, application-owned profile used only for JD."""
+    normalized = Path(profile_dir).expanduser().resolve()
+    return normalized.with_name(f"{normalized.name}-jd")
 
 
 class PersistentBrowserSession:
@@ -269,6 +280,262 @@ class PersistentBrowserSession:
         self._owner_thread_id = None
         if errors and not suppress_errors:
             raise errors[0]
+
+
+class NativeChromeCdpSession:
+    """Launch ordinary Chrome first, then attach Playwright over local CDP.
+
+    This keeps the browser visible and locally persistent without the
+    automation command-line switches that marketplace risk controls can use as
+    a coarse browser fingerprint.
+    """
+
+    def __init__(
+        self,
+        profile_dir: Path,
+        *,
+        browser_choice: BrowserChoice | None = None,
+        playwright_factory: Callable[[], Any] = sync_playwright,
+        launch_args: tuple[str, ...] | None = None,
+        startup_preflight: Callable[[Any], None] | None = None,
+        process_launcher: Callable[..., Any] = subprocess.Popen,
+        port_allocator: Callable[[], int] | None = None,
+        cdp_ready_probe: Callable[[str], bool] | None = None,
+        cdp_ready_timeout_seconds: float = 12.0,
+    ) -> None:
+        self.profile_dir = Path(profile_dir).expanduser().resolve()
+        self.browser_choice = browser_choice
+        self._playwright_factory = playwright_factory
+        if launch_args is not None and (
+            not isinstance(launch_args, tuple)
+            or not all(isinstance(arg, str) and arg.strip() for arg in launch_args)
+        ):
+            raise ValueError("launch_args must contain nonblank strings")
+        if startup_preflight is not None and not callable(startup_preflight):
+            raise ValueError("startup_preflight must be callable")
+        if not callable(process_launcher):
+            raise ValueError("process_launcher must be callable")
+        if port_allocator is not None and not callable(port_allocator):
+            raise ValueError("port_allocator must be callable")
+        if cdp_ready_probe is not None and not callable(cdp_ready_probe):
+            raise ValueError("cdp_ready_probe must be callable")
+        if (
+            isinstance(cdp_ready_timeout_seconds, bool)
+            or not isinstance(cdp_ready_timeout_seconds, int | float)
+            or cdp_ready_timeout_seconds <= 0
+        ):
+            raise ValueError("cdp_ready_timeout_seconds must be positive")
+        self._launch_args = launch_args
+        self._startup_preflight = startup_preflight
+        self._process_launcher = process_launcher
+        self._port_allocator = port_allocator or _allocate_loopback_port
+        self._cdp_ready_probe = cdp_ready_probe or _cdp_endpoint_is_ready
+        self._cdp_ready_timeout_seconds = float(cdp_ready_timeout_seconds)
+        self._profile_lock = BrowserProfileLock(self.profile_dir)
+        self._playwright: Any | None = None
+        self._browser: Any | None = None
+        self._context: Any | None = None
+        self._process: Any | None = None
+        self._pages: dict[str, Any] = {}
+        self._owner_thread_id: int | None = None
+
+    @property
+    def context(self) -> Any:
+        self._require_started_on_owner_thread()
+        return self._context
+
+    def start(self) -> NativeChromeCdpSession:
+        if self._context is not None:
+            self._require_owner_thread()
+            return self
+        if self._owner_thread_id is not None:
+            self._require_owner_thread()
+        self._owner_thread_id = threading.get_ident()
+        try:
+            _preflight_dedicated_profile(self.profile_dir)
+            ensure_browser_profile_available(self.profile_dir)
+            choice = self.browser_choice or detect_browser_choice()
+            self.browser_choice = choice
+            self._profile_lock.acquire()
+            _ensure_dedicated_profile(
+                self.profile_dir,
+                lock_name=self._profile_lock.lock_path.name,
+            )
+            port = self._port_allocator()
+            endpoint = f"http://127.0.0.1:{port}"
+            launch_args = (
+                self._launch_args
+                if self._launch_args is not None
+                else ("--start-maximized",)
+            )
+            command = [
+                str(choice.executable_path),
+                *launch_args,
+                "--force-renderer-accessibility",
+                "--remote-debugging-address=127.0.0.1",
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={self.profile_dir}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ]
+            self._process = self._process_launcher(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._wait_until_cdp_ready(endpoint)
+            manager = self._playwright_factory()
+            self._playwright = manager.start()
+            self._browser = self._playwright.chromium.connect_over_cdp(endpoint)
+            contexts = tuple(self._browser.contexts)
+            if not contexts:
+                raise RuntimeError("京东专用 Chrome 未提供可用的浏览器会话")
+            self._context = contexts[0]
+            if self._startup_preflight is not None:
+                self._startup_preflight(self._context)
+        except BaseException:
+            self._close_resources(suppress_errors=True)
+            raise
+        return self
+
+    def page_for(self, site_family: str) -> Any:
+        self._require_started_on_owner_thread()
+        context = self._context
+        if context is None:
+            raise RuntimeError("browser session has not been started")
+        normalized_family = site_family.strip()
+        if not normalized_family:
+            raise ValueError("site_family must not be blank")
+        page = self._pages.get(normalized_family)
+        if page is not None and not page.is_closed():
+            return page
+        unassigned_pages = [
+            candidate
+            for candidate in context.pages
+            if candidate not in self._pages.values() and not candidate.is_closed()
+        ]
+        page = unassigned_pages[0] if unassigned_pages else context.new_page()
+        self._pages[normalized_family] = page
+        return page
+
+    def automation_page(self) -> Any:
+        self._require_started_on_owner_thread()
+        context = self._context
+        if context is None:
+            raise RuntimeError("browser session has not been started")
+        page = self._pages.get(AUTOMATION_PAGE_KEY)
+        if page is None or page.is_closed():
+            page = context.new_page()
+            self._pages[AUTOMATION_PAGE_KEY] = page
+        page.title()
+        return page
+
+    def close_unassigned_pages(self) -> int:
+        self._require_started_on_owner_thread()
+        context = self._context
+        if context is None:
+            raise RuntimeError("browser session has not been started")
+        automation = self.automation_page()
+        closed = 0
+        for candidate in tuple(context.pages):
+            if candidate is automation or candidate.is_closed():
+                continue
+            candidate.close()
+            closed += 1
+        return closed
+
+    def close(self) -> None:
+        if self._owner_thread_id is not None:
+            self._require_owner_thread()
+        self._close_resources(suppress_errors=False)
+
+    def __enter__(self) -> NativeChromeCdpSession:
+        return self.start()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def _wait_until_cdp_ready(self, endpoint: str) -> None:
+        deadline = time.monotonic() + self._cdp_ready_timeout_seconds
+        while True:
+            if self._cdp_ready_probe(endpoint):
+                return
+            process = self._process
+            if process is not None and process.poll() is not None:
+                raise RuntimeError("京东专用 Chrome 启动后提前退出")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("京东专用 Chrome 启动超时")
+            time.sleep(0.1)
+
+    def _require_started_on_owner_thread(self) -> None:
+        self._require_owner_thread()
+        if self._context is None:
+            raise RuntimeError("browser session has not been started")
+
+    def _require_owner_thread(self) -> None:
+        if (
+            self._owner_thread_id is not None
+            and threading.get_ident() != self._owner_thread_id
+        ):
+            raise RuntimeError(
+                "Playwright browser session must be used on its creating thread"
+            )
+
+    def _close_resources(self, *, suppress_errors: bool) -> None:
+        browser = self._browser
+        playwright = self._playwright
+        process = self._process
+        self._browser = None
+        self._playwright = None
+        self._context = None
+        self._process = None
+        self._pages.clear()
+        errors: list[BaseException] = []
+        try:
+            if browser is not None:
+                browser.close()
+        except BaseException as error:
+            errors.append(error)
+        try:
+            if playwright is not None:
+                playwright.stop()
+        except BaseException as error:
+            errors.append(error)
+        try:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5.0)
+        except BaseException as error:
+            errors.append(error)
+        try:
+            self._profile_lock.close()
+        except BaseException as error:
+            errors.append(error)
+        self._owner_thread_id = None
+        if errors and not suppress_errors:
+            raise errors[0]
+
+
+def _allocate_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    if not isinstance(port, int) or port <= 0:
+        raise RuntimeError("无法为京东专用 Chrome 分配本地端口")
+    return port
+
+
+def _cdp_endpoint_is_ready(endpoint: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"{endpoint}/json/version", timeout=0.25) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, urllib.error.URLError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("webSocketDebuggerUrl"))
 
 
 def _preflight_dedicated_profile(profile_dir: Path) -> None:

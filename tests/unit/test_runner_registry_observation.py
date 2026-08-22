@@ -214,7 +214,7 @@ def _task() -> WebsiteTask:
     )
 
 
-def test_task_sort_is_brand_then_channel_then_output_row() -> None:
+def test_task_sort_is_channel_then_brand_then_output_row() -> None:
     base = _task()
     tasks = (
         replace(
@@ -261,10 +261,51 @@ def test_task_sort_is_brand_then_channel_then_output_row() -> None:
     ] == [
         (WebsiteChannel.OFFICIAL, 2),
         (WebsiteChannel.OFFICIAL, 3),
-        (WebsiteChannel.JD, 2),
-        (WebsiteChannel.JD, 3),
         (WebsiteChannel.TMALL, 2),
         (WebsiteChannel.TMALL, 3),
+        (WebsiteChannel.JD, 2),
+        (WebsiteChannel.JD, 3),
+    ]
+
+
+def test_task_sort_finishes_every_brand_on_a_channel_before_next_channel() -> None:
+    base = _task()
+    tasks = (
+        replace(base, task_id="apple-jd", brand="苹果", channel=WebsiteChannel.JD),
+        replace(
+            base,
+            task_id="honor-tmall",
+            brand="HONOR",
+            channel=WebsiteChannel.TMALL,
+        ),
+        replace(
+            base,
+            task_id="apple-official",
+            brand="苹果",
+            channel=WebsiteChannel.OFFICIAL,
+        ),
+        replace(base, task_id="honor-jd", brand="HONOR", channel=WebsiteChannel.JD),
+        replace(
+            base,
+            task_id="apple-tmall",
+            brand="苹果",
+            channel=WebsiteChannel.TMALL,
+        ),
+        replace(
+            base,
+            task_id="honor-official",
+            brand="HONOR",
+            channel=WebsiteChannel.OFFICIAL,
+        ),
+    )
+
+    assert [task.task_id for task in sorted(tasks, key=task_sort_key)] == [
+        "honor-official",
+        "apple-official",
+        "honor-tmall",
+        "apple-tmall",
+        "honor-jd",
+        "apple-jd",
     ]
 
 

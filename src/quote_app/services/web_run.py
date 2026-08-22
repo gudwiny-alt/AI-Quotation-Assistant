@@ -9,9 +9,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from quote_app.browser.session import PersistentBrowserSession
+from quote_app.browser.session import (
+    NativeChromeCdpSession,
+    PersistentBrowserSession,
+    jd_profile_dir_for,
+)
 from quote_app.evidence.macos_runtime import MacFormalCaptureRuntime
 from quote_app.evidence.models import MacCapturePolicy, validate_mac_capture_policy
+from quote_app.evidence.platform import PlatformEvidenceCapture
 from quote_app.evidence.validation import read_validated_evidence
 from quote_app.sites.catalog import site_session_family
 from quote_app.sites.honor_diagnostics import capture_honor_search_diagnostic
@@ -20,12 +25,13 @@ from quote_app.sites.registry import AdapterRegistry
 from quote_app.browser.worker import WorkerEvent
 from quote_app.tasks.models import (
     TaskState,
+    WebsiteChannel,
     WebsiteObservationCheckpoint,
     WebsiteResult,
     WebsiteTask,
 )
 from quote_app.tasks.repository import SQLiteTaskRepository
-from quote_app.tasks.runner import WebsiteTaskRunner
+from quote_app.tasks.runner import WebsiteTaskRunner, task_sort_key
 from quote_app.tasks.scheduler import EventSink, ManualActionEvent
 
 RuntimeFactory = Callable[[AdapterRegistry], MacFormalCaptureRuntime]
@@ -185,7 +191,7 @@ def run_website_tasks(
     *,
     runtime_factory: RuntimeFactory = _default_runtime_factory,
 ) -> WebsiteRunSummary:
-    """Run one resumable website workload in one persistent browser session."""
+    """Run official and Tmall first, then finish JD in an isolated session."""
     if not isinstance(request, WebsiteRunRequest):
         raise ValueError("request must be a WebsiteRunRequest")
     if not callable(runtime_factory):
@@ -195,85 +201,184 @@ def run_website_tasks(
     try:
         registry = default_registry()
         runtime = runtime_factory(registry)
-        browser_session: PersistentBrowserSession
-        if isinstance(runtime, MacFormalCaptureRuntime):
-            launch_args = runtime.browser_launch_args()
-            startup_preflight = runtime.browser_startup_preflight()
-            if launch_args is not None:
-                if startup_preflight is not None:
-                    browser_session = PersistentBrowserSession(
+        evidence_capture = runtime.evidence_capture()
+        capture_acceptance_policy = _capture_acceptance_policy(evidence_capture)
+        checkpoint_errors: list[Exception] = []
+        event_sink = _event_sink_for_request(
+            request,
+            repository,
+            checkpoint_errors=checkpoint_errors,
+        )
+        ordered_tasks = tuple(sorted(request.tasks, key=task_sort_key))
+        regular_tasks = tuple(
+            task for task in ordered_tasks if task.channel is not WebsiteChannel.JD
+        )
+        jd_tasks = tuple(
+            task for task in ordered_tasks if task.channel is WebsiteChannel.JD
+        )
+        phases: list[
+            tuple[
+                tuple[WebsiteTask, ...],
+                PersistentBrowserSession | NativeChromeCdpSession,
+            ]
+        ] = []
+        if regular_tasks or not ordered_tasks:
+            phases.append(
+                (
+                    regular_tasks,
+                    _browser_session_for_runtime(
+                        runtime,
                         request.profile_dir,
-                        launch_args=launch_args,
-                        startup_preflight=startup_preflight,
-                    )
-                else:
-                    browser_session = PersistentBrowserSession(
-                        request.profile_dir,
-                        launch_args=launch_args,
-                    )
-            elif startup_preflight is not None:
-                browser_session = PersistentBrowserSession(
-                    request.profile_dir,
-                    startup_preflight=startup_preflight,
+                        session_type=PersistentBrowserSession,
+                    ),
                 )
-            else:
-                browser_session = PersistentBrowserSession(request.profile_dir)
-        else:
-            browser_session = PersistentBrowserSession(request.profile_dir)
-        with browser_session as browser:
-            evidence_capture = runtime.evidence_capture()
-            capture_acceptance_policy = _capture_acceptance_policy(
-                evidence_capture
             )
-            checkpoint_errors: list[Exception] = []
-            event_sink = _event_sink_for_request(
-                request,
-                repository,
-                checkpoint_errors=checkpoint_errors,
+        if jd_tasks:
+            phases.append(
+                (
+                    jd_tasks,
+                    _browser_session_for_runtime(
+                        runtime,
+                        jd_profile_dir_for(request.profile_dir),
+                        session_type=NativeChromeCdpSession,
+                    ),
+                )
             )
-            runner = WebsiteTaskRunner(
+
+        combined_results: list[WebsiteResult] = []
+        for phase_tasks, browser_session in phases:
+            phase_results, cancelled = _run_browser_phase(
+                request=request,
+                tasks=phase_tasks,
                 repository=repository,
-                run_id=request.run_id,
-                browser_session=browser,
+                registry=registry,
+                runtime=runtime,
+                browser_session=browser_session,
                 evidence_capture=evidence_capture,
-                evidence_dir=request.evidence_dir,
-                adapter_registry=registry,
-                capture_context_provider=runtime.capture_context_provider,
                 capture_acceptance_policy=capture_acceptance_policy,
                 event_sink=event_sink,
-                diagnostic_capture=lambda task, error, path: _capture_search_diagnostic(
-                    task,
-                    error,
-                    path,
-                    browser.automation_page(),
-                ),
-                # A technical failure is recorded per task; it must not prevent
-                # the next brand from being processed in the same run.
-                stop_after_brand_issue=False,
+                checkpoint_errors=checkpoint_errors,
             )
-            while True:
-                results = runner.run(request.tasks)
-                _raise_checkpoint_error(checkpoint_errors)
-                controller = request.controller
-                if controller is None:
-                    break
-                action = runner.scheduler.waiting_action
-                if action is None:
-                    break
-                controller.publish_manual_action(action)
-                if controller.wait_for_resolution():
-                    runner.scheduler.continue_current_task()
-                    continue
-                runner.scheduler.cancel_manual_action()
+            combined_results.extend(phase_results)
+            if cancelled:
                 break
         return _summarize(
             request,
             repository,
-            results,
+            tuple(combined_results),
             capture_acceptance_policy=capture_acceptance_policy,
         )
     finally:
         repository.close()
+
+
+def _browser_session_for_runtime(
+    runtime: object,
+    profile_dir: Path,
+    *,
+    session_type: type[PersistentBrowserSession] | type[NativeChromeCdpSession],
+) -> PersistentBrowserSession | NativeChromeCdpSession:
+    launch_args_provider = getattr(runtime, "browser_launch_args", None)
+    launch_args = (
+        launch_args_provider() if callable(launch_args_provider) else None
+    )
+    startup_preflight_provider = getattr(
+        runtime,
+        "browser_startup_preflight",
+        None,
+    )
+    startup_preflight = (
+        startup_preflight_provider()
+        if callable(startup_preflight_provider)
+        else None
+    )
+    if session_type is NativeChromeCdpSession:
+        if launch_args is not None and startup_preflight is not None:
+            return NativeChromeCdpSession(
+                profile_dir,
+                launch_args=launch_args,
+                startup_preflight=startup_preflight,
+            )
+        if launch_args is not None:
+            return NativeChromeCdpSession(
+                profile_dir,
+                launch_args=launch_args,
+            )
+        if startup_preflight is not None:
+            return NativeChromeCdpSession(
+                profile_dir,
+                startup_preflight=startup_preflight,
+            )
+        return NativeChromeCdpSession(profile_dir)
+    if launch_args is not None and startup_preflight is not None:
+        return PersistentBrowserSession(
+            profile_dir,
+            launch_args=launch_args,
+            startup_preflight=startup_preflight,
+        )
+    if launch_args is not None:
+        return PersistentBrowserSession(
+            profile_dir,
+            launch_args=launch_args,
+        )
+    if startup_preflight is not None:
+        return PersistentBrowserSession(
+            profile_dir,
+            startup_preflight=startup_preflight,
+        )
+    return PersistentBrowserSession(profile_dir)
+
+
+def _run_browser_phase(
+    *,
+    request: WebsiteRunRequest,
+    tasks: tuple[WebsiteTask, ...],
+    repository: SQLiteTaskRepository,
+    registry: AdapterRegistry,
+    runtime: MacFormalCaptureRuntime,
+    browser_session: PersistentBrowserSession | NativeChromeCdpSession,
+    evidence_capture: PlatformEvidenceCapture,
+    capture_acceptance_policy: MacCapturePolicy,
+    event_sink: EventSink | None,
+    checkpoint_errors: list[Exception],
+) -> tuple[tuple[WebsiteResult, ...], bool]:
+    phase_results: tuple[WebsiteResult, ...] = ()
+    with browser_session as browser:
+        runner = WebsiteTaskRunner(
+            repository=repository,
+            run_id=request.run_id,
+            browser_session=browser,
+            evidence_capture=evidence_capture,
+            evidence_dir=request.evidence_dir,
+            adapter_registry=registry,
+            capture_context_provider=runtime.capture_context_provider,
+            capture_acceptance_policy=capture_acceptance_policy,
+            event_sink=event_sink,
+            diagnostic_capture=lambda task, error, path: _capture_search_diagnostic(
+                task,
+                error,
+                path,
+                browser.automation_page(),
+            ),
+            # A technical failure is recorded per task; it must not prevent
+            # the next brand or the later JD phase from being processed.
+            stop_after_brand_issue=False,
+        )
+        while True:
+            phase_results = runner.run(tasks)
+            _raise_checkpoint_error(checkpoint_errors)
+            controller = request.controller
+            if controller is None:
+                return phase_results, False
+            action = runner.scheduler.waiting_action
+            if action is None:
+                return phase_results, False
+            controller.publish_manual_action(action)
+            if controller.wait_for_resolution():
+                runner.scheduler.continue_current_task()
+                continue
+            runner.scheduler.cancel_manual_action()
+            return phase_results, True
 
 
 def _capture_search_diagnostic(

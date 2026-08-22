@@ -31,8 +31,8 @@ SNAPSHOT_TYPE = "quote_rows"
 
 _CHANNEL_ORDER = (
     WebsiteChannel.OFFICIAL,
-    WebsiteChannel.JD,
     WebsiteChannel.TMALL,
+    WebsiteChannel.JD,
 )
 _CHANNEL_PRIORITY = {
     channel: priority for priority, channel in enumerate(_CHANNEL_ORDER)

@@ -83,8 +83,8 @@ _OUTCOME_ROLES = {
 _AUTOMATION_PAGE_KEY = "quotation-automation"
 _CHANNEL_EXECUTION_PRIORITY = {
     WebsiteChannel.OFFICIAL: 0,
-    WebsiteChannel.JD: 1,
-    WebsiteChannel.TMALL: 2,
+    WebsiteChannel.TMALL: 1,
+    WebsiteChannel.JD: 2,
 }
 _CAPTURE_RETRY_CODES = frozenset(
     {
@@ -706,10 +706,10 @@ class WebsiteTaskRunner:
 
 def task_sort_key(
     task: WebsiteTask,
-) -> tuple[str, int, int]:
+) -> tuple[int, str, int]:
     return (
-        task.brand,
         _CHANNEL_EXECUTION_PRIORITY[task.channel],
+        task.brand,
         task.output_row_number,
     )
 

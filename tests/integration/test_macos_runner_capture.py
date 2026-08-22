@@ -220,6 +220,7 @@ def test_service_composes_real_runner_and_preserves_partial_macos_results(
     )
     runtime_registries: list[AdapterRegistry] = []
     monkeypatch.setattr(web_run, "PersistentBrowserSession", _Session)
+    monkeypatch.setattr(web_run, "NativeChromeCdpSession", _Session)
     monkeypatch.setattr(web_run, "default_registry", lambda: registry)
 
     def runtime_factory(received: AdapterRegistry) -> _Runtime:
@@ -290,6 +291,7 @@ def test_official_login_pauses_before_later_channel_and_resumes_atomically(
     _Session.closed = 0
     _Session.pages_by_family = {"quotation-automation": login_page}
     monkeypatch.setattr(web_run, "PersistentBrowserSession", _Session)
+    monkeypatch.setattr(web_run, "NativeChromeCdpSession", _Session)
     monkeypatch.setattr(web_run, "default_registry", lambda: registry)
     request = web_run.WebsiteRunRequest(
         run_id="run-1",
@@ -320,5 +322,5 @@ def test_official_login_pauses_before_later_channel_and_resumes_atomically(
         assert repository.task_state(succeeded.task_id) is TaskState.PENDING
         assert repository.attempt_count(waiting.task_id) == 1
         assert repository.attempt_count(succeeded.task_id) == 0
-    assert _Session.opened == 2
-    assert _Session.closed == 2
+    assert _Session.opened == 4
+    assert _Session.closed == 4

@@ -161,6 +161,102 @@ def _fake_session(
     return session, manager, fake_context
 
 
+def test_native_cdp_session_launches_installed_chrome_without_automation_flags(
+    tmp_path: Path,
+) -> None:
+    from quote_app.browser.session import NativeChromeCdpSession
+
+    context = _FakeContext()
+
+    class Browser:
+        contexts = [context]
+
+        def close(self) -> None:
+            pass
+
+    class Chromium:
+        def __init__(self) -> None:
+            self.endpoints: list[str] = []
+
+        def connect_over_cdp(self, endpoint: str) -> Browser:
+            self.endpoints.append(endpoint)
+            return Browser()
+
+    class Playwright:
+        def __init__(self) -> None:
+            self.chromium = Chromium()
+            self.stop_calls = 0
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    class Manager:
+        def __init__(self) -> None:
+            self.playwright = Playwright()
+
+        def start(self) -> Playwright:
+            return self.playwright
+
+    class Process:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout: float) -> int:
+            assert timeout > 0
+            return 0
+
+    commands: list[tuple[list[str], dict[str, object]]] = []
+    process = Process()
+
+    def launch(command: list[str], **kwargs: object) -> Process:
+        commands.append((command, kwargs))
+        return process
+
+    manager = Manager()
+    profile = tmp_path / "profile-jd"
+    session = NativeChromeCdpSession(
+        profile,
+        browser_choice=_browser_choice(tmp_path),
+        playwright_factory=lambda: manager,
+        launch_args=("--window-size=1024,640",),
+        process_launcher=launch,
+        port_allocator=lambda: 49321,
+        cdp_ready_probe=lambda _endpoint: True,
+    )
+
+    with session as started:
+        assert started.automation_page() is context.pages[-1]
+
+    command, kwargs = commands[0]
+    assert command == [
+        str((tmp_path / "chrome").resolve()),
+        "--window-size=1024,640",
+        "--force-renderer-accessibility",
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-debugging-port=49321",
+        f"--user-data-dir={profile.resolve()}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+    ]
+    assert not any("automation" in argument for argument in command)
+    assert not any("webdriver" in argument for argument in command)
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert manager.playwright.chromium.endpoints == ["http://127.0.0.1:49321"]
+    assert manager.playwright.stop_calls == 1
+    assert process.terminated is True
+    with BrowserProfileLock(profile):
+        pass
+
+
 def test_context_startup_failure_stops_playwright_and_releases_lock(
     tmp_path: Path,
 ) -> None:
