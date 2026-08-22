@@ -42,9 +42,10 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "苹果官网浏览器标题备用凭证版（仅官网，荣耀/小米/OPPO/vivo/华为冻结）2026.08.22.118"
+APP_BUILD_LABEL = "六品牌全站运行范围与紧凑界面版（六品牌官网冻结）2026.08.22.119"
 BETA_NOTICE = (
-    f"{APP_BUILD_LABEL}：荣耀官网首次使用无需预先登录；遇到登录或验证页面时，"
+    f"{APP_BUILD_LABEL}：选中的品牌均执行官网、京东、天猫；首次使用无需预先登录；"
+    "遇到登录或验证页面时，"
     "完成后点击“继续当前任务”。京东安全验证最多人工重试2次，仍未通过会跳过京东并继续天猫。"
     "程序在当前受控页中搜索、读取匹配商品卡并进入正式详情页。"
 )
@@ -68,12 +69,11 @@ class RunRequest:
 
 @dataclass(frozen=True, slots=True)
 class RunModeScope:
-    selected_brand: str
+    selected_brand: str | None
     selected_channels: frozenset[WebsiteChannel] | None
     status_prefix: str
 
 
-_OFFICIAL_ONLY = frozenset({WebsiteChannel.OFFICIAL})
 _RUN_MODE_SCOPES = MappingProxyType(
     {
         "仅 HONOR": RunModeScope(
@@ -81,34 +81,34 @@ _RUN_MODE_SCOPES = MappingProxyType(
             None,
             "荣耀闭环穿测模式（仅输出全部荣耀行）",
         ),
-        "荣耀官网验收（仅官网）": RunModeScope(
-            "HONOR",
-            _OFFICIAL_ONLY,
-            "荣耀官网验收模式（仅官网）",
+        "全品牌": RunModeScope(
+            None,
+            None,
+            "全品牌全站模式（官网、京东、天猫）",
         ),
-        "荣耀全站闭环（官网、京东、天猫）": RunModeScope(
+        "荣耀": RunModeScope(
             "HONOR",
             None,
-            "荣耀闭环穿测模式（仅输出全部荣耀行）",
+            "荣耀全站模式（官网、京东、天猫）",
         ),
-        "小米官网验收（仅官网）": RunModeScope(
-            "小米", _OFFICIAL_ONLY, "小米官网验收模式（仅官网）"
+        "小米": RunModeScope(
+            "小米", None, "小米全站模式（官网、京东、天猫）"
         ),
-        "OPPO 官网验收（仅官网）": RunModeScope(
-            "欧珀", _OFFICIAL_ONLY, "OPPO 官网验收模式（仅官网）"
+        "OPPO": RunModeScope(
+            "欧珀", None, "OPPO 全站模式（官网、京东、天猫）"
         ),
-        "vivo 官网验收（仅官网）": RunModeScope(
-            "维沃", _OFFICIAL_ONLY, "vivo 官网验收模式（仅官网）"
+        "vivo": RunModeScope(
+            "维沃", None, "vivo 全站模式（官网、京东、天猫）"
         ),
-        "华为官网验收（仅官网）": RunModeScope(
-            "华为", _OFFICIAL_ONLY, "华为官网验收模式（仅官网）"
+        "华为": RunModeScope(
+            "华为", None, "华为全站模式（官网、京东、天猫）"
         ),
-        "苹果官网验收（仅官网）": RunModeScope(
-            "苹果", _OFFICIAL_ONLY, "苹果官网验收模式（仅官网）"
+        "苹果": RunModeScope(
+            "苹果", None, "苹果全站模式（官网、京东、天猫）"
         ),
     }
 )
-_RUN_MODE_OPTIONS = tuple(mode for mode in _RUN_MODE_SCOPES if mode != "仅 HONOR")
+_RUN_MODE_OPTIONS = ("全品牌", "荣耀", "小米", "OPPO", "vivo", "华为", "苹果")
 
 
 def make_full_pipeline_request(
@@ -408,7 +408,7 @@ class QuoteApp:
         self.output_dir_var = tk.StringVar()
         self.year_var = tk.StringVar(value=str(current.year))
         self.month_var = tk.StringVar(value=str(current.month))
-        self.brand_mode_var = tk.StringVar(value="荣耀官网验收（仅官网）")
+        self.brand_mode_var = tk.StringVar(value="全品牌")
         self._last_output_dir: Path | None = None
         self._website_controller: WebsiteRunController | None = None
         self._shown_manual_action_task_id: str | None = None
@@ -419,6 +419,7 @@ class QuoteApp:
 
     def _build(self) -> None:
         self.root.title(f"资金物流平台铺货报价 - {APP_BUILD_LABEL}")
+        self.root.geometry("900x620")
         frame = ttk.Frame(self.root, padding=16)
         frame.grid(sticky="nsew")
         self.root.columnconfigure(0, weight=1)
@@ -437,7 +438,13 @@ class QuoteApp:
         month_frame.grid(row=5, column=1, columnspan=2, sticky="w", pady=4)
         ttk.Entry(month_frame, width=8, textvariable=self.year_var).grid(row=0, column=0)
         ttk.Label(month_frame, text="年").grid(row=0, column=1, padx=(4, 12))
-        ttk.Entry(month_frame, width=5, textvariable=self.month_var).grid(row=0, column=2)
+        ttk.Combobox(
+            month_frame,
+            width=5,
+            textvariable=self.month_var,
+            values=tuple(str(month) for month in range(1, 13)),
+            state="readonly",
+        ).grid(row=0, column=2)
         ttk.Label(month_frame, text="月").grid(row=0, column=3, padx=4)
         ttk.Label(month_frame, text="运行范围").grid(
             row=0, column=4, padx=(16, 4)
@@ -483,7 +490,7 @@ class QuoteApp:
         self.cancel_button.grid(row=1, column=1, pady=(8, 0))
 
         ttk.Label(frame, text="运行结果").grid(row=7, column=0, sticky="nw", pady=(4, 0))
-        self.status = scrolledtext.ScrolledText(frame, width=72, height=13, state="disabled")
+        self.status = scrolledtext.ScrolledText(frame, width=72, height=8, state="disabled")
         self.status.grid(row=7, column=1, columnspan=2, sticky="nsew", pady=(4, 0))
 
     def _add_file_row(
@@ -577,7 +584,7 @@ class QuoteApp:
         self._pipeline_thread.start()
         self._schedule_pipeline_poll()
 
-    def _selected_brand_from_mode(self) -> str:
+    def _selected_brand_from_mode(self) -> str | None:
         return self._selected_run_mode_scope().selected_brand
 
     def _selected_channels_from_mode(

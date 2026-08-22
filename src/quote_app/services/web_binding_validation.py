@@ -8,7 +8,7 @@ from quote_app.tasks.models import WebsiteChannel, WebsiteTask
 
 
 SUPPORTED_WEB_BRANDS = frozenset(
-    ("HONOR", "华为", "维沃", "欧珀", "小米", "苹果", "ZTE中兴")
+    ("HONOR", "华为", "维沃", "欧珀", "小米", "苹果")
 )
 
 

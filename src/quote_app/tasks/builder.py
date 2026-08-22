@@ -24,7 +24,7 @@ from quote_app.tasks.models import (
 from quote_app.tasks.serialization import to_payload
 
 SUPPORTED_BRANDS = frozenset(
-    {"HONOR", "华为", "维沃", "欧珀", "小米", "苹果", "ZTE中兴"}
+    {"HONOR", "华为", "维沃", "欧珀", "小米", "苹果"}
 )
 SOURCE_ROLES = ("base", "marketing", "bop")
 SNAPSHOT_TYPE = "quote_rows"

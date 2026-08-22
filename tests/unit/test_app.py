@@ -62,13 +62,14 @@ def test_beta_notice_describes_login_as_runtime_optional() -> None:
     assert "继续当前任务" in BETA_NOTICE
 
 
-def test_app_build_label_identifies_apple_official_acceptance_scope() -> None:
+def test_app_build_label_identifies_six_brand_full_site_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
     assert APP_BUILD_LABEL == (
-        "苹果官网浏览器标题备用凭证版（仅官网，荣耀/小米/OPPO/vivo/华为冻结）2026.08.22.118"
+        "六品牌全站运行范围与紧凑界面版（六品牌官网冻结）2026.08.22.119"
     )
     assert "当前受控页" in BETA_NOTICE
+    assert "官网、京东、天猫" in BETA_NOTICE
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(
@@ -227,38 +228,55 @@ def test_gui_run_marks_honor_closed_loop_mode_in_status(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("mode", "expected_brand", "expected_status"),
     (
-        ("小米官网验收（仅官网）", "小米", "小米官网验收模式（仅官网）"),
-        ("OPPO 官网验收（仅官网）", "欧珀", "OPPO 官网验收模式（仅官网）"),
-        ("vivo 官网验收（仅官网）", "维沃", "vivo 官网验收模式（仅官网）"),
-        ("华为官网验收（仅官网）", "华为", "华为官网验收模式（仅官网）"),
-        ("苹果官网验收（仅官网）", "苹果", "苹果官网验收模式（仅官网）"),
+        ("全品牌", None, "全品牌全站模式（官网、京东、天猫）"),
+        ("荣耀", "HONOR", "荣耀全站模式（官网、京东、天猫）"),
+        ("小米", "小米", "小米全站模式（官网、京东、天猫）"),
+        ("OPPO", "欧珀", "OPPO 全站模式（官网、京东、天猫）"),
+        ("vivo", "维沃", "vivo 全站模式（官网、京东、天猫）"),
+        ("华为", "华为", "华为全站模式（官网、京东、天猫）"),
+        ("苹果", "苹果", "苹果全站模式（官网、京东、天猫）"),
     ),
 )
-def test_gui_official_acceptance_modes_select_one_brand_and_official_channel(
+def test_gui_run_modes_select_brand_and_all_three_channels(
     mode: str,
-    expected_brand: str,
+    expected_brand: str | None,
     expected_status: str,
 ) -> None:
-    """Break caught: a new mode runs the wrong brand/channel or says 荣耀."""
+    """Break caught: a selected scope omits JD/Tmall or runs the wrong brand."""
     from quote_app.app import QuoteApp
 
     app = object.__new__(QuoteApp)
     app.brand_mode_var = SimpleNamespace(get=lambda: mode)
 
     assert app._selected_brand_from_mode() == expected_brand
-    assert app._selected_channels_from_mode() == frozenset(
-        {WebsiteChannel.OFFICIAL}
-    )
+    assert app._selected_channels_from_mode() is None
     assert app._run_mode_status_prefix() == expected_status
 
 
-def test_gui_build_lists_every_approved_mode_without_truncating_long_labels(
+def test_gui_approved_run_modes_are_ordered_with_all_brands_first() -> None:
+    """Break caught: the selector defaults to a single brand or exposes test modes."""
+    from quote_app.app import _RUN_MODE_OPTIONS
+
+    assert _RUN_MODE_OPTIONS == (
+        "全品牌",
+        "荣耀",
+        "小米",
+        "OPPO",
+        "vivo",
+        "华为",
+        "苹果",
+    )
+
+
+def test_gui_build_uses_compact_window_and_readonly_selectors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Break caught: a mode is absent from the selector or its label is clipped."""
+    """Break caught: the window grows tall or month/run inputs permit invalid text."""
     from quote_app import app as app_module
 
     combobox_options: list[dict[str, object]] = []
+    scrolled_options: list[dict[str, object]] = []
+    geometries: list[str] = []
 
     class Widget:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -274,9 +292,16 @@ def test_gui_build_lists_every_approved_mode_without_truncating_long_labels(
         def __init__(self, *_args: object, **kwargs: object) -> None:
             combobox_options.append(kwargs)
 
+    class ScrolledText(Widget):
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            scrolled_options.append(kwargs)
+
     class Root(Widget):
         def title(self, _title: str) -> None:
             pass
+
+        def geometry(self, geometry: str) -> None:
+            geometries.append(geometry)
 
         def rowconfigure(self, *_args: object, **_kwargs: object) -> None:
             pass
@@ -284,7 +309,7 @@ def test_gui_build_lists_every_approved_mode_without_truncating_long_labels(
     for name in ("Frame", "Label", "Entry", "Button"):
         monkeypatch.setattr(app_module.ttk, name, Widget)
     monkeypatch.setattr(app_module.ttk, "Combobox", Combobox)
-    monkeypatch.setattr(app_module.scrolledtext, "ScrolledText", Widget)
+    monkeypatch.setattr(app_module.scrolledtext, "ScrolledText", ScrolledText)
 
     app = object.__new__(app_module.QuoteApp)
     app.root = Root()
@@ -297,19 +322,24 @@ def test_gui_build_lists_every_approved_mode_without_truncating_long_labels(
     app.brand_mode_var = object()
     app._build()
 
-    assert len(combobox_options) == 1
-    options = combobox_options[0]
-    assert options["values"] == (
-        "荣耀官网验收（仅官网）",
-        "荣耀全站闭环（官网、京东、天猫）",
-        "小米官网验收（仅官网）",
-        "OPPO 官网验收（仅官网）",
-        "vivo 官网验收（仅官网）",
-        "华为官网验收（仅官网）",
-        "苹果官网验收（仅官网）",
+    assert geometries == ["900x620"]
+    assert len(combobox_options) == 2
+    month_options, run_options = combobox_options
+    assert month_options["textvariable"] is app.month_var
+    assert month_options["values"] == tuple(str(month) for month in range(1, 13))
+    assert month_options["state"] == "readonly"
+    assert run_options["textvariable"] is app.brand_mode_var
+    assert run_options["values"] == (
+        "全品牌",
+        "荣耀",
+        "小米",
+        "OPPO",
+        "vivo",
+        "华为",
+        "苹果",
     )
-    assert isinstance(options["width"], int)
-    assert options["width"] >= max(len(value) for value in options["values"])
+    assert run_options["state"] == "readonly"
+    assert scrolled_options == [{"width": 72, "height": 8, "state": "disabled"}]
 
 
 @pytest.mark.parametrize("mode", ("全部品牌", "测试品牌"))

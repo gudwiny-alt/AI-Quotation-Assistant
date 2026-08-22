@@ -367,7 +367,27 @@ def test_unsupported_nonblank_brand_returns_issue_without_tasks(
     assert "不支持品牌" in result.issues[0].message
 
 
-def test_all_seven_normalized_brands_are_supported(input_paths: dict[str, Path]) -> None:
+def test_zte_is_retained_as_an_unsupported_row_without_website_tasks(
+    input_paths: dict[str, Path],
+) -> None:
+    """Break caught: all-brand mode unexpectedly opens ZTE websites."""
+    row = _eligible_row(brand="ZTE中兴")
+    run = _run(input_paths, [row])
+
+    result = build_website_tasks(run, [row])
+
+    assert result.tasks == ()
+    assert len(result.issues) == 1
+    assert result.issues[0].code == "UNSUPPORTED_BRAND"
+    assert "ZTE中兴" in result.issues[0].message
+
+
+def test_all_six_approved_normalized_brands_are_supported(
+    input_paths: dict[str, Path],
+) -> None:
+    assert SUPPORTED_BRANDS == frozenset(
+        {"HONOR", "小米", "欧珀", "维沃", "华为", "苹果"}
+    )
     rows = [
         _eligible_row(
             source_row_number=index + 2,

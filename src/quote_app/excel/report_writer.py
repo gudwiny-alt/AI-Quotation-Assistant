@@ -295,7 +295,7 @@ def _assess_row(
         manual_supplement = True
         failed_step = "网站渠道自动处理"
         reason = (
-            f"品牌“{brand}”不在首版支持的7个品牌范围内"
+            f"品牌“{brand}”不在当前支持的6个品牌范围内"
             + (f"；{issue_reason}" if issue_reason else "")
         )
         recommendation = "人工补充 AI:AN 的价格、链接和截图，并反馈新增品牌规则"

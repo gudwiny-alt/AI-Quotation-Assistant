@@ -777,10 +777,12 @@ def test_exact_query_cache_reuses_completed_technical_failure(
         )
 
 
+@pytest.mark.parametrize("brand", ("其他品牌", "ZTE中兴"))
 def test_unsupported_brand_report_marks_each_channel_unsupported(
     tmp_path: Path,
+    brand: str,
 ) -> None:
-    row = make_quote_row(brand="其他品牌", model_name="其他手机")
+    row = make_quote_row(brand=brand, model_name="其他手机")
 
     fixture = run_web_fixture(tmp_path, (row,), (), ())
 
