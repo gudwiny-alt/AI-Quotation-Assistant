@@ -66,7 +66,7 @@ def test_app_build_label_identifies_apple_official_acceptance_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
     assert APP_BUILD_LABEL == (
-        "苹果官网实际可见四证据修复版（仅官网，荣耀/小米/OPPO/vivo/华为冻结）2026.08.22.115"
+        "苹果官网选中颜色组截图证据修复版（仅官网，荣耀/小米/OPPO/vivo/华为冻结）2026.08.22.117"
     )
     assert "当前受控页" in BETA_NOTICE
 

@@ -890,8 +890,31 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
             title,
             _option_evidence(page, price),
             _option_evidence(page, capacity),
-            _option_evidence(page, color),
+            self._selected_color_capture_evidence(page, color),
         )
+
+    def _selected_color_capture_evidence(self, page: Any, color: Any) -> Any:
+        """Use the exact card when possible, otherwise its verified group.
+
+        Apple's React chooser can leave the selected colour label with a
+        short-lived inconclusive hit-test even while the complete colour
+        fieldset is visibly painted.  Selection still comes exclusively from
+        the exact native radio verified by ``_require_selected`` above.  The
+        containing group is only a visual screenshot proof, and remains
+        subject to the normal strict exposure check and bounded reframing.
+        """
+
+        evidence = _option_evidence(page, color)
+        state = _paint_state(evidence)
+        if state is None or state[2] or not state[1]:
+            return evidence
+        group = self._group(page, "color")
+        if group is None:
+            return evidence
+        group_state = _paint_state(group)
+        if group_state is None or not group_state[0]:
+            return evidence
+        return group
 
     def _reframe_capture_proofs(
         self,

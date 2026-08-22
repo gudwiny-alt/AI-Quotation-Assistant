@@ -1294,7 +1294,7 @@ def test_apple_capture_uses_exposed_blue_label_instead_of_stale_duplicate() -> N
 
 
 def test_apple_capture_rejects_four_proofs_when_hit_test_is_inconclusive() -> None:
-    """The prior baseline must not capture a proof that fails the paint hit-test."""
+    """Capture must fail when neither the selected card nor its group is painted."""
     from quote_app.sites.official_brands.apple import AppleOfficialAdapter
     from quote_app.tasks.retry import LayoutRecognitionError
 
@@ -1306,7 +1306,8 @@ def test_apple_capture_rejects_four_proofs_when_hit_test_is_inconclusive() -> No
           <a data-autom="stickynavHeader"
             style="left:50px;top:10px;width:160px;height:30px">iPhone 17</a>
           <h1 style="left:50px;top:-200px;width:400px;height:45px">购买 iPhone 17</h1>
-          <section data-apple-role="color-group"><h2>颜色 - 黑色</h2>
+          <section data-apple-role="color-group" data-apple-painted="false">
+            <h2>颜色 - 黑色</h2>
             <input id=":r0:" type="radio" name="color" checked hidden>
             <label for=":r0:" data-apple-painted="false"
               style="left:760px;top:80px;width:160px;height:58px">黑色</label>
@@ -1327,6 +1328,104 @@ def test_apple_capture_rejects_four_proofs_when_hit_test_is_inconclusive() -> No
         adapter.capture_rectangles_for_capture(
             task, page, observation.semantic_state
         )
+
+
+def test_apple_capture_accepts_visible_selected_color_group_when_label_hit_test_is_inconclusive() -> None:
+    """A visible selected-colour group is valid when its exact card hit-test flickers.
+
+    The native selected radio remains the semantic authority.  The visible
+    colour group is the screenshot proof only after that exact selection has
+    been verified, so a transient React label hit-test must not reject an
+    otherwise complete blue frame.
+    """
+    from quote_app.sites.official_brands.apple import AppleOfficialAdapter
+
+    page = _ApplePaintAwareScrollPage(
+        """
+        <section data-screen="store"><a class="thumb"
+          href="/shop/buy-iphone/iphone-17/mg734ch/a"><h2>iPhone 17</h2></a></section>
+        <section data-screen="product" hidden><main>
+          <a data-autom="stickynavHeader"
+            style="left:50px;top:10px;width:160px;height:30px">iPhone 17</a>
+          <h1 style="left:50px;top:-200px;width:400px;height:45px">购买 iPhone 17</h1>
+          <section data-apple-role="color-group"
+            style="left:740px;top:60px;width:500px;height:140px">
+            <h2>颜色 - 雾蓝</h2>
+            <input id=":r0:" type="radio" name="color" checked hidden>
+            <label for=":r0:" data-apple-painted="false"
+              style="left:760px;top:80px;width:160px;height:58px">雾蓝</label>
+          </section>
+          <section data-apple-role="storage-group"><h2>存储容量</h2>
+            <input id=":r1:" type="radio" name="capacity" checked hidden>
+            <label for=":r1:"
+              style="left:760px;top:400px;width:440px;height:100px">256GB RMB 5,999</label>
+          </section>
+        </main></section>
+        """
+    )
+    task = replace(_apple_task(), storage="256GB", color="青雾蓝色")
+    adapter = AppleOfficialAdapter(_apple_spec())
+    observation = adapter.observe(task, page)
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    rectangles = adapter.capture_rectangles_for_capture(
+        task, page, observation.semantic_state
+    )
+    final_state = adapter.verified_state_reader(
+        task,
+        page,
+        observation.semantic_state,
+    )()
+
+    by_role = {rectangle.role: rectangle for rectangle in rectangles}
+    final_by_role = {
+        rectangle.role: rectangle for rectangle in final_state.css_rectangles
+    }
+    assert page.capture_scroll_deltas == []
+    assert by_role["color"].y == 60.0
+    assert by_role["color"].height == 140.0
+    assert final_by_role["color"].y == 60.0
+    assert final_by_role["color"].height == 140.0
+
+
+def test_apple_capture_scrolls_visible_color_group_back_before_capacity_only_capture() -> None:
+    """An offscreen colour group must be reframed before formal capture."""
+    from quote_app.sites.official_brands.apple import AppleOfficialAdapter
+
+    page = _ApplePaintAwareScrollPage(
+        """
+        <section data-screen="store"><a class="thumb"
+          href="/shop/buy-iphone/iphone-17/mg734ch/a"><h2>iPhone 17</h2></a></section>
+        <section data-screen="product" hidden><main>
+          <a data-autom="stickynavHeader"
+            style="left:50px;top:10px;width:160px;height:30px">iPhone 17</a>
+          <h1 style="left:50px;top:-200px;width:400px;height:45px">购买 iPhone 17</h1>
+          <section data-apple-role="color-group" data-apple-scroll-proof="true"
+            style="left:740px;top:-20px;width:500px;height:140px">
+            <h2>颜色 - 黑色</h2>
+            <input id=":r0:" type="radio" name="color" checked hidden>
+            <label for=":r0:" data-apple-painted="false"
+              style="left:760px;top:80px;width:160px;height:58px">黑色</label>
+          </section>
+          <section data-apple-role="storage-group"><h2>存储容量</h2>
+            <input id=":r1:" type="radio" name="capacity" checked hidden>
+            <label for=":r1:"
+              style="left:760px;top:400px;width:440px;height:100px">256GB RMB 5,999</label>
+          </section>
+        </main></section>
+        """
+    )
+    task = replace(_apple_task(), storage="256GB", color="黑色")
+    adapter = AppleOfficialAdapter(_apple_spec())
+    observation = adapter.observe(task, page)
+
+    rectangles = adapter.capture_rectangles_for_capture(
+        task, page, observation.semantic_state
+    )
+
+    by_role = {rectangle.role: rectangle for rectangle in rectangles}
+    assert page.capture_scroll_deltas == [-44.0]
+    assert by_role["color"].y == 24.0
 
 
 def test_apple_final_reader_uses_visible_four_proofs_not_full_detail_reread() -> None:
