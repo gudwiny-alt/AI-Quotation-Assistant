@@ -14,8 +14,15 @@ from quote_app.tasks.models import (
 )
 
 _OUTCOME_ROLES = {
-    BusinessOutcome.PRICE_FOUND: frozenset({()}),
-    BusinessOutcome.NO_MODEL: frozenset({("search_keyword", "result_region")}),
+    # Business observations carry no price-found rectangles.  A formal live
+    # capture reader may additionally return the four final on-screen proofs
+    # so semantic stability includes the exact frame that will be captured.
+    BusinessOutcome.PRICE_FOUND: frozenset(
+        {(), ("title", "price", "capacity", "color")}
+    ),
+    BusinessOutcome.NO_MODEL: frozenset(
+        {("search_keyword", "result_region"), ("result_region",)}
+    ),
     BusinessOutcome.CAPACITY_UNAVAILABLE: frozenset(
         {("capacity",), ("title", "capacity_group")}
     ),

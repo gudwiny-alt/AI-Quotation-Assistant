@@ -250,6 +250,35 @@ def test_sheet_tables_resolve_dynamic_month_headers_at_arbitrary_columns() -> No
     assert row.cells["G"] == "已配置"
 
 
+def test_apple_web_query_preserves_the_source_color_for_official_selection() -> None:
+    base = [
+        {
+            "A": "910200000040063",
+            "2026年3月结算报价（元/台）": "无",
+            "2026年7月结算报价（元/台）": "无",
+        }
+    ]
+    marketing = [
+        _complete_marketing(
+            "910200000040063",
+            brand="苹果",
+            color="青雾蓝色",
+        )
+    ]
+    marketing[0].update({"E": "iPhone 17", "AQ": "8GB", "AR": "256GB"})
+
+    [row] = associate_records(base, marketing, [], QuoteMonth(2026, 8))
+
+    assert row.cells["B"] == "苹果"
+    assert row.web_query == WebQuery(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="青雾蓝色",
+    )
+
+
 def _complete_marketing(
     code: Any,
     *,

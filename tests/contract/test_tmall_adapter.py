@@ -2251,6 +2251,25 @@ def test_tmall_detail_scales_before_selection_and_positions_only_for_capture() -
     assert page.scale_restored is True
 
 
+def test_tmall_formal_capture_ensures_80_percent_once_per_retry() -> None:
+    page = _FixturePage()
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale == 0.8
+
+    adapter.restore_capture_view(task, cast(Any, page), observation.semantic_state)
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert page.capture_scales == [0.8, 0.8]
+    assert page.capture_scale == 0.8
+
+
 def test_tmall_detail_observation_failure_restores_early_scale_once() -> None:
     page = _FixturePage(
         price_snapshots=tuple(

@@ -19,7 +19,9 @@ from quote_app.tasks.models import (
 
 _OUTCOME_ROLES = {
     BusinessOutcome.PRICE_FOUND: frozenset({()}),
-    BusinessOutcome.NO_MODEL: frozenset({("search_keyword", "result_region")}),
+    BusinessOutcome.NO_MODEL: frozenset(
+        {("search_keyword", "result_region"), ("result_region",)}
+    ),
     BusinessOutcome.CAPACITY_UNAVAILABLE: frozenset(
         {("capacity",), ("title", "capacity_group")}
     ),

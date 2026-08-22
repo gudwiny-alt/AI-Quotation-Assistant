@@ -142,8 +142,10 @@ class _HuaweiLocator(_OfficialLocator):
     def bounding_box(self) -> dict[str, float] | None:
         return _huawei_page(self.page).dom_rect(self.nodes[0])
 
-    def evaluate(self, _script: str) -> dict[str, object]:
+    def evaluate(self, script: str) -> object:
         node = self.nodes[0]
+        if "VMALL_CONFIG_OPTION_SELECTED" in script:
+            return _huawei_page(self.page).option_is_selected(node)
         return {
             "color": "rgb(207, 10, 44)",
             "effectiveLineThrough": node.tag == "s",
@@ -194,6 +196,7 @@ class _HuaweiPage(_OfficialFixturePage):
         self.light_scrolls: list[float] = []
         self.blocker: tuple[float, float, bool] | None = None
         self.remove_color_geometry = False
+        self.reject_global_detail_div_scan = False
 
     @staticmethod
     def _parse(html: str) -> _OfficialNode:
@@ -229,6 +232,12 @@ class _HuaweiPage(_OfficialFixturePage):
         return None
 
     def locator(self, selector: str) -> _HuaweiLocator:
+        if (
+            self.active == "detail"
+            and selector == "div"
+            and self.reject_global_detail_div_scan
+        ):
+            raise AssertionError("VMALL detail observation must not scan every div")
         return _HuaweiLocator(
             self,
             _official_select(self.active_root().descendants(), selector),
@@ -442,6 +451,19 @@ class _HuaweiPage(_OfficialFixturePage):
             self.light_scrolls.append(delta)
             self.scroll_offset += delta
             return True
+        if "VMALL_CONFIG_OPTION_INDEXES" in script:
+            if not isinstance(argument, dict):
+                raise AssertionError("VMALL option query requires a selector and label")
+            selector = argument.get("selector")
+            label = argument.get("label")
+            if selector != "button" or label not in {"版本", "颜色"}:
+                return []
+            group = "capacity" if label == "版本" else "color"
+            return [
+                index
+                for index, node in enumerate(_official_select(self.detail_root.descendants(), selector))
+                if node in self.options(group) and node.attrs.get("hidden") is None
+            ]
         if not isinstance(argument, dict) or tuple(argument) != (
             "title",
             "price",
@@ -972,6 +994,16 @@ def test_huawei_selects_exact_full_capacity_then_exact_color() -> None:
     assert page.option_clicks == ["capacity", "color"]
     assert page.selected("capacity") == "8GB+256GB"
     assert page.selected("color") == "曜石黑"
+
+
+def test_huawei_reads_configuration_from_its_interactive_area_not_every_detail_div() -> None:
+    """A live VMALL detail page has thousands of divs; global scans stall the run."""
+    page = _HuaweiPage()
+    page.reject_global_detail_div_scan = True
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_huawei_falls_back_to_storage_only_only_when_page_has_no_ram_dimension() -> None:

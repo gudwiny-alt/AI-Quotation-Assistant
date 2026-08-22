@@ -556,6 +556,31 @@ def test_capture_context_failure_retries_on_the_same_observed_page(
     )
 
 
+def test_runner_uses_final_capture_rectangles_from_the_capture_context(
+    runner_case: RunnerCase,
+) -> None:
+    """A site may scroll after observation, so capture geometry is read last."""
+
+    final_rectangles = (
+        CssRect(30, 40, 160, 50, "search_keyword"),
+        CssRect(30, 110, 500, 300, "result_region"),
+    )
+    no_model_observation = _observation(BusinessOutcome.NO_MODEL)
+    adapter = _ObservationAdapter(_xiaomi_jd_spec(), no_model_observation)
+    runner_case.runner.adapter_registry = _registry(adapter)
+    runner_case.runner.capture_context_provider = lambda *_args: CaptureContext(
+        expected_window=BrowserWindowIdentity("fixture", 1, "window-1"),
+        stability_probe=_Probe(),
+        css_rectangles=final_rectangles,
+    )
+    runner_case.task = replace(runner_case.task, channel=WebsiteChannel.JD)
+
+    results = runner_case.runner.run((runner_case.task,))
+
+    assert results[0].state is TaskState.SUCCEEDED
+    assert runner_case.capture.requests[-1].css_rectangles == final_rectangles
+
+
 def test_runner_requires_exactly_one_source_and_scopes_capture_context(
     tmp_path: Path,
 ) -> None:

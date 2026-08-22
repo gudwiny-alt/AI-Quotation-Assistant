@@ -92,3 +92,12 @@ def test_factory_return_protocol_is_resolvable_at_runtime() -> None:
     hints = get_type_hints(create_official_adapter)
 
     assert hints["return"] is RegisteredSiteAdapter
+
+
+def test_factory_routes_apple_to_the_live_adapter() -> None:
+    """A future Apple implementation must not remain on the legacy placeholder."""
+    from quote_app.sites.official_brands.apple import AppleOfficialAdapter as LiveApple
+
+    adapter = create_official_adapter(_official_spec("苹果"))
+
+    assert type(adapter) is LiveApple

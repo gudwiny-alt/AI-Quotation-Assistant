@@ -45,6 +45,10 @@ class RetryableTechnicalError(TechnicalError):
 class NonRetryableTechnicalError(TechnicalError):
     """A technical failure that should be persisted without another attempt."""
 
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(code, message)
+        self.honor_search_trace: list[dict[str, object]] = []
+
 
 _SAFE_LAYOUT_STAGES = frozenset(
     {
@@ -149,7 +153,7 @@ def classify_attempt_error(error: BaseException) -> AttemptError:
     if isinstance(error, LayoutRecognitionError) and error.stage is not None:
         return RetryableTechnicalError(
             "LAYOUT_CHANGED",
-            f"网页结构无法识别（{error.stage}）",
+            _safe_layout_message(error),
         )
     for error_type, code, message in _RETRYABLE_CLASSIFICATIONS:
         if isinstance(error, error_type):
@@ -170,6 +174,18 @@ def credential_free_error_message(code: str, message: str) -> str:
     if not contains_explicit_credentials(message):
         return message
     return _STABLE_ERROR_MESSAGES.get(code, "浏览器任务发生技术错误")
+
+
+def _safe_layout_message(error: LayoutRecognitionError) -> str:
+    """Retain the bounded structural cause without exposing credentials."""
+
+    if error.stage is None:
+        raise ValueError("layout stage is required")
+    base = f"网页结构无法识别（{error.stage}）"
+    detail = " ".join(str(error).split())
+    if not detail or contains_explicit_credentials(detail):
+        return base
+    return f"网页结构无法识别（{error.stage}：{detail[:180]}）"
 
 
 def contains_explicit_credentials(value: str) -> bool:

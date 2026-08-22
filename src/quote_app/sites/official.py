@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urljoin, urlsplit, urlunsplit
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.platform import PlatformEvidenceCapture
@@ -674,36 +674,60 @@ class OfficialSiteAdapter:
             override.search_inputs,
             semantic_name="HONOR store search input",
         )
-        search_action = self._wait_for_honor_visible(
-            page,
-            override.search_actions,
-            semantic_name="HONOR store search action",
-        )
         search_input.fill(task.model_name)
-        search_action.click()
+        page.goto(self._honor_search_url(task), wait_until="domcontentloaded")
+        self._raise_if_blocked(page)
+        search_trace: list[dict[str, object]] = []
         detail_urls = self._wait_for_honor_candidate_detail_urls(page, task)
         if not detail_urls:
-            search_input.press("Enter")
-            detail_urls = self._wait_for_honor_candidate_detail_urls(page, task)
-        if not detail_urls:
-            raise NonRetryableTechnicalError(
+            search_trace.append(
+                self._honor_search_attempt_snapshot(
+                    page,
+                    task,
+                    stage="after_same_page_search",
+                )
+            )
+            error = NonRetryableTechnicalError(
                 "HONOR_PRODUCT_MATCH_MISSING",
                 "荣耀官网搜索后未找到基础机型的正式商品页，请保留当前页面检查后重试",
             )
+            error.honor_search_trace = search_trace
+            raise error
         if len(detail_urls) != 1:
-            raise NonRetryableTechnicalError(
+            error = NonRetryableTechnicalError(
                 "HONOR_PRODUCT_MATCH_AMBIGUOUS",
                 "荣耀官网搜索结果匹配到多个不同基础机型详情页，已停在搜索结果页供检查",
             )
-        page.goto(detail_urls[0], wait_until="domcontentloaded")
-        return self._observe_loaded_honor_detail(task, page, detail_urls[0])
+            error.honor_search_trace = [
+                self._honor_search_attempt_snapshot(
+                    page,
+                    task,
+                    stage="before_thumbnail_click",
+                )
+            ]
+            raise error
+        detail_url = detail_urls[0]
+        page.goto(detail_url, wait_until="domcontentloaded")
+        return self._observe_loaded_honor_detail(task, page, detail_url)
+
+    def _honor_search_url(self, task: WebsiteTask) -> str:
+        """Build the official HONOR search route for the currently controlled page."""
+        return urlunsplit(
+            (
+                "https",
+                _required_entry_host(self.spec.entry_url),
+                "/cn/shop/v/search",
+                f"keyword={quote(task.model_name, safe='')}",
+                "",
+            )
+        )
 
     def _wait_for_honor_candidate_detail_urls(
         self,
         page: Any,
         task: WebsiteTask,
     ) -> tuple[str, ...]:
-        """Wait for verified base-model detail links, not a URL-shaped result page."""
+        """Wait for verified base-model detail links in the controlled page."""
         for attempt in range(_HONOR_RENDER_POLLS + 1):
             self._raise_if_blocked(page)
             detail_urls = self._honor_candidate_detail_urls(page, task)
@@ -722,7 +746,8 @@ class OfficialSiteAdapter:
         if override is None:
             raise AssertionError("HONOR override must be present")
         expected_host = _required_entry_host(self.spec.entry_url)
-        detail_urls: list[str] = []
+        available_detail_urls: list[str] = []
+        unavailable_detail_urls: list[str] = []
         cards = visible_locators(
             page,
             ("#mainSaleList li.grid-items", "li.grid-items"),
@@ -730,26 +755,118 @@ class OfficialSiteAdapter:
         for card in cards:
             if not override.card_matches_model(task.model_name, card.inner_text()):
                 continue
+            detail_urls = (
+                unavailable_detail_urls
+                if override.card_is_temporarily_unavailable(card.inner_text())
+                else available_detail_urls
+            )
             links = visible_locators(card, override.product_links)
-            if len(links) != 1:
+            for link in links:
+                self._append_honor_detail_url(
+                    detail_urls,
+                    link,
+                    page=page,
+                    task=task,
+                    expected_host=expected_host,
+                )
+        for link in visible_locators(page, override.current_product_links):
+            if not override.card_matches_model(task.model_name, link.inner_text()):
                 continue
-            try:
-                detail_url = _approved_product_url(
-                    _canonicalize_honor_product_href(
-                        links[0].get_attribute("href"),
-                        base_url=page.url,
-                        expected_host=expected_host,
-                    ),
+            detail_urls = (
+                unavailable_detail_urls
+                if override.card_is_temporarily_unavailable(link.inner_text())
+                else available_detail_urls
+            )
+            self._append_honor_detail_url(
+                detail_urls,
+                link,
+                page=page,
+                task=task,
+                expected_host=expected_host,
+            )
+        return tuple(available_detail_urls or unavailable_detail_urls)
+
+    def _append_honor_detail_url(
+        self,
+        detail_urls: list[str],
+        link: Any,
+        *,
+        page: Any,
+        task: WebsiteTask,
+        expected_host: str,
+    ) -> None:
+        """Keep one approved product URL found in a visible HONOR search card."""
+        try:
+            detail_url = _approved_product_url(
+                _canonicalize_honor_product_href(
+                    link.get_attribute("href"),
                     base_url=page.url,
                     expected_host=expected_host,
-                    brand=self.spec.brand,
-                    expected_model=task.model_name,
-                )
-            except LayoutRecognitionError:
-                continue
-            if detail_url not in detail_urls:
-                detail_urls.append(detail_url)
-        return tuple(detail_urls)
+                ),
+                base_url=page.url,
+                expected_host=expected_host,
+                brand=self.spec.brand,
+                expected_model=task.model_name,
+            )
+        except LayoutRecognitionError:
+            return
+        if detail_url not in detail_urls:
+            detail_urls.append(detail_url)
+
+    def _honor_search_attempt_snapshot(
+        self,
+        page: Any,
+        task: WebsiteTask,
+        *,
+        stage: str,
+    ) -> dict[str, object]:
+        """Record the live candidate-card state at a search transition."""
+        override = self._honor_override
+        if override is None:
+            raise AssertionError("HONOR override must be present")
+        records: list[dict[str, object]] = []
+        cards = visible_locators(
+            page,
+            ("#mainSaleList li.grid-items", "li.grid-items"),
+        )[:12]
+        for card in cards:
+            text = " ".join(card.inner_text().split())[:240]
+            links = visible_locators(card, override.product_links)
+            hrefs = [
+                value
+                for link in links
+                if isinstance((value := link.get_attribute("href")), str)
+                and value.strip()
+                and not url_contains_credentials(value)
+            ]
+            model_matches = override.card_matches_model(task.model_name, text)
+            records.append(
+                {
+                    "text": text,
+                    "model_matches": model_matches,
+                    "thumb_count": len(links),
+                    "hrefs": hrefs,
+                }
+            )
+        return {
+            "stage": stage,
+            "search_url": (
+                page.url
+                if isinstance(page.url, str) and not url_contains_credentials(page.url)
+                else ""
+            ),
+            "visible_card_count": len(records),
+            "model_card_count": sum(
+                record["model_matches"] is True for record in records
+            ),
+            "ready_card_count": sum(
+                record["model_matches"] is True
+                and record["thumb_count"] == 1
+                and bool(record["hrefs"])
+                for record in records
+            ),
+            "cards": records,
+        }
 
     def _wait_for_honor_search_url(
         self,
@@ -903,8 +1020,7 @@ class OfficialSiteAdapter:
         if override is None:
             raise AssertionError("HONOR override must be present")
         for attempt in range(_HONOR_ADDRESS_HYDRATION_POLLS + 1):
-            address = override.attached_address_root(page)
-            if address.is_visible():
+            if override.offer_context(page) is not None:
                 return
             if attempt == _HONOR_ADDRESS_HYDRATION_POLLS:
                 break
@@ -928,7 +1044,11 @@ class OfficialSiteAdapter:
         ) = None
         for _ in range(_MAX_PRICE_POLLS):
             current_sku = override.selected_sku(page, task)
-            stock = override.stock_snapshot(page)
+            stock = override.offer_context(page)
+            if stock is None:
+                raise LayoutRecognitionError(
+                    "Official HONOR delivery or arrival-notice state is missing"
+                )
             candidates = override.price_candidates(page)
             selected = choose_price(candidates, self.spec.price_policy)
             snapshot = (
@@ -940,7 +1060,11 @@ class OfficialSiteAdapter:
             )
             if selected is not None and snapshot == previous:
                 confirmed_sku = override.selected_sku(page, task)
-                confirmed_stock = override.stock_snapshot(page)
+                confirmed_stock = override.offer_context(page)
+                if confirmed_stock is None:
+                    raise LayoutRecognitionError(
+                        "Official HONOR delivery or arrival-notice state changed"
+                    )
                 confirmed_candidates = override.price_candidates(page)
                 confirmed_selected = choose_price(
                     confirmed_candidates,
@@ -948,7 +1072,11 @@ class OfficialSiteAdapter:
                 )
                 self._raise_if_blocked(page)
                 post_price_sku = override.selected_sku(page, task)
-                post_price_stock = override.stock_snapshot(page)
+                post_price_stock = override.offer_context(page)
+                if post_price_stock is None:
+                    raise LayoutRecognitionError(
+                        "Official HONOR delivery or arrival-notice state changed"
+                    )
                 self._raise_if_blocked(page)
                 if (
                     confirmed_sku != current_sku
@@ -1653,8 +1781,15 @@ class OfficialSiteAdapter:
         detail_url: str,
         model_name: str,
     ) -> None:
+        actual_url: object = page.url
+        if self.spec.brand == "HONOR":
+            actual_url = _canonicalize_honor_product_href(
+                page.url,
+                base_url=page.url,
+                expected_host=_required_entry_host(self.spec.entry_url),
+            )
         if not _url_is_exact_product(
-            page.url,
+            actual_url,
             detail_url=detail_url,
             expected_host=_required_entry_host(self.spec.entry_url),
             brand=self.spec.brand,

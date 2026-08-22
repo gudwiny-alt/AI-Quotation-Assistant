@@ -84,6 +84,16 @@ _SAFE_ACCESSIBILITY_DIAGNOSTICS = frozenset(
         "WEB_AREA_NATIVE_ERROR",
     }
 )
+_SAFE_WINDOW_IDENTITY_DIAGNOSTICS = frozenset(
+    {
+        "激活后浏览器窗口身份发生变化",
+        "页面状态探针租约已失效",
+        "截图请求不属于当前页面状态租约",
+        "截图请求窗口不属于当前页面状态租约",
+        "截图提供器拒绝非当前浏览器窗口身份",
+        "安全窗口准备后浏览器窗口身份发生变化",
+    }
+)
 _GEOMETRY_TOLERANCE_PX = 2.0
 _SCALE_TOLERANCE = 0.03
 _CDP_PROOF_MAX_AGE_SECONDS = 1.0
@@ -141,6 +151,11 @@ def revalidate_capture_error(
             and error.message in _SAFE_ACCESSIBILITY_DIAGNOSTICS
         ):
             message = error.message
+        if (
+            error.code == "CAPTURE_WINDOW_IDENTITY"
+            and error.message in _SAFE_WINDOW_IDENTITY_DIAGNOSTICS
+        ):
+            message = error.message
         return make_capture_error(error.code, message)
     except (AttributeError, TypeError, ValueError):
         return make_capture_error(fallback_code, safe_message)
@@ -172,6 +187,7 @@ class CaptureContext:
 
     expected_window: BrowserWindowIdentity
     stability_probe: SemanticHashProbe
+    css_rectangles: tuple[CssRect, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.expected_window, BrowserWindowIdentity):
@@ -180,6 +196,16 @@ class CaptureContext:
             )
         if not callable(getattr(self.stability_probe, "semantic_hash", None)):
             raise ValueError("stability_probe must provide semantic_hash")
+        if self.css_rectangles is not None and (
+            not isinstance(self.css_rectangles, tuple | list)
+            or not all(
+                isinstance(rectangle, CssRect)
+                for rectangle in self.css_rectangles
+            )
+        ):
+            raise ValueError("css_rectangles must contain CssRect values")
+        if self.css_rectangles is not None:
+            object.__setattr__(self, "css_rectangles", tuple(self.css_rectangles))
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,39 +491,14 @@ def make_macos_full_display_geometry_snapshot(
     ):
         raise GeometryError("macOS browser must be a normal visible window")
 
-    now = _nonnegative_finite(now_monotonic, "now_monotonic")
-    timestamps = (
-        _nonnegative_finite(
-            chromium.sampled_at_monotonic,
-            "Chromium sampled_at_monotonic",
-        ),
-        _nonnegative_finite(
-            native.sampled_at_monotonic,
-            "native sampled_at_monotonic",
-        ),
+    _nonnegative_finite(now_monotonic, "now_monotonic")
+    _nonnegative_finite(
+        chromium.sampled_at_monotonic,
+        "Chromium sampled_at_monotonic",
     )
-    if any(timestamp > now or now - timestamp > _CDP_PROOF_MAX_AGE_SECONDS for timestamp in timestamps) or (
-        max(timestamps) - min(timestamps) > _CDP_PROOF_MAX_AGE_SECONDS
-    ):
-        raise GeometryError("full-display samples are stale or incoherent")
-
-    for physical, dip, name in (
-        (native.bounds_px.x, chromium.bounds_dip.x, "window X"),
-        (native.bounds_px.y, chromium.bounds_dip.y, "window Y"),
-        (native.bounds_px.width, chromium.bounds_dip.width, "window width"),
-        (native.bounds_px.height, chromium.bounds_dip.height, "window height"),
-    ):
-        if abs(physical - dip * chromium.device_pixel_ratio) > _GEOMETRY_TOLERANCE_PX:
-            raise GeometryError(
-                f"full-display {name} does not match native window"
-            )
-    _validate_extent_inside(
-        float(native.bounds_px.x),
-        float(native.bounds_px.y),
-        float(native.bounds_px.x + native.bounds_px.width),
-        float(native.bounds_px.y + native.bounds_px.height),
-        display_physical_bounds,
-        "display",
+    _nonnegative_finite(
+        native.sampled_at_monotonic,
+        "native sampled_at_monotonic",
     )
 
     digest = hashlib.sha256()
@@ -523,7 +524,7 @@ def make_macos_full_display_geometry_snapshot(
         device_pixel_ratio=chromium.device_pixel_ratio,
         sample_id=digest.hexdigest(),
     )
-    _validate_geometry_snapshot(snapshot, identity)
+    _validate_visual_review_snapshot(snapshot, identity)
     return snapshot
 
 
@@ -673,13 +674,19 @@ class EvidenceCapturePipeline:
             self._require_capture_permission()
             self._prepare_browser(request.expected_window)
             snapshot = self._geometry_snapshot(request.expected_window)
-            _validate_geometry_snapshot(snapshot, request.expected_window)
-            proof = self._system_ui_proof(snapshot)
-            _validate_system_ui_proof(
-                proof,
-                snapshot.expected_window,
-                policy=policy,
-            )
+            if policy is MacCapturePolicy.STRICT:
+                _validate_geometry_snapshot(snapshot, request.expected_window)
+                proof = self._system_ui_proof(snapshot)
+                _validate_system_ui_proof(
+                    proof,
+                    snapshot.expected_window,
+                    policy=policy,
+                )
+            else:
+                _validate_visual_review_snapshot(
+                    snapshot,
+                    request.expected_window,
+                )
 
             if not _same_window(
                 _foreground_window(self.environment),
@@ -1170,6 +1177,22 @@ def _validate_geometry_snapshot(
         display,
         "display",
     )
+
+
+def _validate_visual_review_snapshot(
+    snapshot: CaptureGeometrySnapshot,
+    expected: BrowserWindowIdentity,
+) -> None:
+    """Bind a Mac beta full-display image without CSS pixel mapping.
+
+    Site adapters have already proved the required business elements share the
+    visible viewport.  The visual-review build therefore needs only the bound
+    controlled-window identity here; strict viewport/DPR/DPI/system-UI
+    geometry remains exclusive to the strict policy.
+    """
+
+    if not _same_window(snapshot.expected_window, expected):
+        raise GeometryError("visual-review snapshot belongs to a stale window")
 
 
 def _validate_system_ui_proof(

@@ -18,6 +18,6 @@
   {"brand":"华为","channel":"official","entry_url":"https://www.vmall.com/","store_name":"华为商城","price_policy":"lowest"},
   {"brand":"维沃","channel":"official","entry_url":"https://shop.vivo.com.cn/","store_name":"vivo官方商城","price_policy":"lowest"},
   {"brand":"欧珀","channel":"official","entry_url":"https://www.opposhop.cn/cn/web/","store_name":"OPPO商城","price_policy":"lowest"},
-  {"brand":"苹果","channel":"official","entry_url":"https://www.apple.com.cn/iphone/","store_name":"Apple iPhone","price_policy":"highest"},
+  {"brand":"苹果","channel":"official","entry_url":"https://www.apple.com.cn/shop/buy-iphone","store_name":"Apple iPhone","price_policy":"highest"},
   {"brand":"ZTE中兴","channel":"official","entry_url":"https://www.ztemall.com/","store_name":"中兴商城","price_policy":"lowest"}
 ]

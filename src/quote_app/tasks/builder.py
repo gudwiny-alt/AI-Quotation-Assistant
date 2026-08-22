@@ -45,6 +45,7 @@ _WEB_QUERY_FIELD_LABELS = {
     "storage": "存储容量",
     "color": "颜色",
 }
+_PRODUCT_NAME_OUTPUT_COLUMN = "D"
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +187,7 @@ def build_website_tasks(
                     storage=query_values["storage"],
                     color=query_values["color"],
                     channel=channel,
+                    requires_ai_package=_requires_ai_package(row),
                 )
             )
 
@@ -316,6 +318,12 @@ def _normalized_query(query: WebQuery) -> dict[str, str]:
         "storage": normalize_text(query.storage),
         "color": normalize_text(query.color),
     }
+
+
+def _requires_ai_package(row: QuoteRow) -> bool:
+    """Use the associated full product name, never the shortened web query."""
+    product_name = normalize_text(row.cells.get(_PRODUCT_NAME_OUTPUT_COLUMN))
+    return "AI" in product_name.upper()
 
 
 def _task_id(

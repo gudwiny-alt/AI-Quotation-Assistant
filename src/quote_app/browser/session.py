@@ -64,6 +64,14 @@ def _process_exists(process_id: int) -> bool:
     return True
 
 
+def _is_closed_browser_error(error: BaseException) -> bool:
+    message = str(error).lower()
+    return (
+        "target page, context or browser has been closed" in message
+        or "browser has been closed" in message
+    )
+
+
 def prepare_dedicated_profile(profile_dir: Path) -> Path:
     """Create or validate the application-owned browser profile before Chrome opens it."""
     normalized = Path(profile_dir).expanduser().resolve()
@@ -172,8 +180,30 @@ class PersistentBrowserSession:
         return page
 
     def automation_page(self) -> Any:
-        """Return the one page owned by automatic quotation work."""
-        return self.page_for(AUTOMATION_PAGE_KEY)
+        """Return a fresh, dedicated page for automatic quotation work."""
+        self._require_started_on_owner_thread()
+        try:
+            return self._usable_automation_page()
+        except Exception as error:
+            if not _is_closed_browser_error(error):
+                raise
+            self._close_resources(suppress_errors=True)
+            self.start()
+            return self._usable_automation_page()
+
+    def _usable_automation_page(self) -> Any:
+        context = self._context
+        if context is None:
+            raise RuntimeError("browser session has not been started")
+        page = self._pages.get(AUTOMATION_PAGE_KEY)
+        if page is None or page.is_closed():
+            page = context.new_page()
+            self._pages[AUTOMATION_PAGE_KEY] = page
+        # A page can look open locally after its Chromium context exits.  A
+        # harmless title read detects that stale Playwright handle before an
+        # adapter starts a marketplace recovery navigation.
+        page.title()
+        return page
 
     def close_unassigned_pages(self) -> int:
         """Close popups so automatic work cannot accidentally switch tabs."""

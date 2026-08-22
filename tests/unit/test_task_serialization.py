@@ -190,6 +190,7 @@ def test_all_contract_types_round_trip(tmp_path: Path) -> None:
             storage="256GB",
             color="黑色",
             channel=WebsiteChannel.JD,
+            requires_ai_package=True,
         ),
     )
 

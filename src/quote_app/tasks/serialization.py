@@ -239,26 +239,27 @@ def _task_to_data(value: WebsiteTask) -> dict[str, JsonValue]:
         "storage": value.storage,
         "color": value.color,
         "channel": value.channel.value,
+        "requires_ai_package": value.requires_ai_package,
     }
 
 
 def _task_from_data(data: dict[str, Any]) -> WebsiteTask:
-    _require_keys(
-        data,
-        {
-            "task_id",
-            "run_id",
-            "source_row_number",
-            "output_row_number",
-            "material_code",
-            "brand",
-            "model_name",
-            "ram",
-            "storage",
-            "color",
-            "channel",
-        },
-    )
+    required = {
+        "task_id",
+        "run_id",
+        "source_row_number",
+        "output_row_number",
+        "material_code",
+        "brand",
+        "model_name",
+        "ram",
+        "storage",
+        "color",
+        "channel",
+    }
+    optional = "requires_ai_package"
+    if set(data) not in (required, required | {optional}):
+        raise PayloadError("malformed payload")
     return WebsiteTask(
         task_id=_string(data["task_id"]),
         run_id=_string(data["run_id"]),
@@ -271,6 +272,7 @@ def _task_from_data(data: dict[str, Any]) -> WebsiteTask:
         storage=_string(data["storage"]),
         color=_string(data["color"]),
         channel=WebsiteChannel(_string(data["channel"])),
+        requires_ai_package=_boolean(data.get(optional, False)),
     )
 
 
@@ -479,6 +481,12 @@ def _optional_string(value: object) -> str | None:
 
 def _integer(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
+        raise PayloadError("malformed payload")
+    return value
+
+
+def _boolean(value: object) -> bool:
+    if type(value) is not bool:
         raise PayloadError("malformed payload")
     return value
 

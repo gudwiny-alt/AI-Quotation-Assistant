@@ -227,6 +227,19 @@ def test_eligible_row_builds_three_channels_from_web_query_only(
         assert task.color == "雪山粉"
 
 
+def test_ai_marker_in_associated_product_name_requires_ai_package_for_each_channel(
+    input_paths: dict[str, Path],
+) -> None:
+    row = _eligible_row(brand="荣耀")
+    row.cells["D"] = "HONOR_NLA-AN00_荣耀畅玩80_6GB+128GB_碧空蓝_AI定制合作型_标准版"
+    run = _run(input_paths, [row])
+
+    result = build_website_tasks(run, [row])
+
+    assert result.issues == ()
+    assert all(task.requires_ai_package for task in result.tasks)
+
+
 def test_sparse_source_row_does_not_shift_output_row(input_paths: dict[str, Path]) -> None:
     rows = [_eligible_row(source_row_number=27)]
     run = _run(input_paths, rows)

@@ -176,6 +176,14 @@ class _OfficialLocator:
                 self.page.search_waiting_for_enter = True
             else:
                 self.page.activate_results()
+        if (
+            node.tag == "a"
+            and "thumb" in node.attrs.get("class", "").split()
+            and node.attrs.get("href")
+        ):
+            href = urljoin(self.page.url, node.attrs["href"])
+            self.page.thumb_clicks.append(href)
+            self.page.goto(href)
         option_kind = node.attrs.get("data-option-kind")
         if option_kind is not None:
             if option_kind.startswith("honor-"):
@@ -200,8 +208,22 @@ class _OfficialLocator:
             "height": _official_pixels(styles.get("height"), 30),
         }
 
-    def evaluate(self, _script: str) -> dict[str, object]:
+    def evaluate(self, _script: str) -> object:
         node = self.nodes[0]
+        # Apple China's live configurator uses native radio inputs whose
+        # business text lives in their associated <label>.  Model that DOM
+        # relationship here so contract tests do not accidentally require the
+        # production adapter to rely on fixture-only aria labels.
+        if "element.labels" in _script:
+            labels = [
+                candidate.text
+                for candidate in self.page.root.descendants()
+                if candidate.tag == "label"
+                and candidate.attrs.get("for") == node.attrs.get("id")
+            ]
+            return " ".join(piece for piece in labels if piece and piece.strip())
+        if "Boolean(element.checked)" in _script:
+            return node.attrs.get("checked") is not None
         if (
             any(
                 name.endswith("-price")
@@ -244,6 +266,7 @@ class _OfficialFixturePage:
         self._url = "about:blank"
         self._active = "store"
         self.goto_calls: list[str] = []
+        self.thumb_clicks: list[str] = []
         self.option_clicks: list[str] = []
         self.option_scrolls: list[str] = []
         self.option_labels: list[str] = []
@@ -267,6 +290,9 @@ class _OfficialFixturePage:
         self._url = url
         if url in self._product_urls:
             self.activate("product")
+            self._url = url
+        elif urlsplit(url).path == "/cn/shop/v/search":
+            self.activate("results")
             self._url = url
         else:
             self.activate("store")

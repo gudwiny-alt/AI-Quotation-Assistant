@@ -200,6 +200,7 @@ class WebsiteTask:
     storage: str
     color: str
     channel: WebsiteChannel
+    requires_ai_package: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -226,6 +227,8 @@ class WebsiteTask:
             raise ValueError("task row numbers must be integers")
         if not isinstance(self.channel, WebsiteChannel):
             raise ValueError("channel must be a WebsiteChannel")
+        if type(self.requires_ai_package) is not bool:
+            raise ValueError("requires_ai_package must be a boolean")
         if self.source_row_number < 2:
             raise ValueError("source_row_number must be at least 2")
         if self.output_row_number < 2:

@@ -49,14 +49,16 @@ def test_browser_failures_receive_stable_retryable_codes(
     assert classified.retry_cost == 1
 
 
-def test_layout_error_with_safe_stage_keeps_stable_code_and_stage_message() -> None:
+def test_layout_error_with_safe_stage_keeps_its_safe_structural_detail() -> None:
     classified = classify_attempt_error(
         LayoutRecognitionError("store controls are missing", stage="京东店铺页")
     )
 
     assert isinstance(classified, RetryableTechnicalError)
     assert classified.code == "LAYOUT_CHANGED"
-    assert classified.message == "网页结构无法识别（京东店铺页）"
+    assert classified.message == (
+        "网页结构无法识别（京东店铺页：store controls are missing）"
+    )
 
 
 def test_explicit_non_retryable_error_keeps_its_stable_code() -> None:

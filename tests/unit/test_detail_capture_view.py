@@ -4,6 +4,7 @@ import pytest
 
 from quote_app.sites.detail_capture_view import (
     apply_capture_scale,
+    ensure_capture_scale,
     position_detail_for_capture,
     position_result_cards_for_capture,
     restore_capture_scale,
@@ -131,6 +132,19 @@ def test_applies_one_fixed_capture_scale_and_waits_for_layout() -> None:
     assert proof.sample_count == 2
     assert page.capture_scales == [0.9]
     assert page.waits == [300]
+
+
+def test_ensure_capture_scale_does_not_reapply_an_active_scale() -> None:
+    page = _Page()
+    page.current_scale = 0.8
+
+    proof = ensure_capture_scale(page, scale=0.8)
+
+    assert proof.inline_zoom == 0.8
+    assert proof.computed_zoom == 0.8
+    assert proof.sample_count == 1
+    assert page.capture_scales == []
+    assert page.waits == []
 
 
 def test_rejects_capture_scale_when_computed_zoom_does_not_match_inline_zoom() -> None:

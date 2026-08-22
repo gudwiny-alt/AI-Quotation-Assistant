@@ -8,10 +8,10 @@ from quote_app.tasks.models import BusinessOutcome
 from tests.contract.test_official_honor_live import _live_case, _live_honor_html
 
 
-def test_honor_official_baseline_recovers_one_enter_then_enters_detail(
+def test_honor_official_baseline_uses_same_page_search_then_enters_detail(
     official_case: Any,
 ) -> None:
-    """A click-only search may recover once through the same input's Enter."""
+    """The baseline never delegates a search transition to the site submit button."""
     adapter, task, page = _live_case(
         official_case,
         html=_live_honor_html().replace(
@@ -23,7 +23,7 @@ def test_honor_official_baseline_recovers_one_enter_then_enters_detail(
     observation = adapter.observe(task, cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert page.presses == ["Enter"]
+    assert page.presses == []
     assert observation.url.endswith(".html")
 
 

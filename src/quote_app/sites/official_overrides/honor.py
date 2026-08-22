@@ -32,6 +32,7 @@ _IMMEDIATE_MODEL_VARIANTS = (
     "MINI",
     "GT",
     "NEO",
+    "RSR",
     "AIR",
     "EDGE",
     "FE",
@@ -39,6 +40,22 @@ _IMMEDIATE_MODEL_VARIANTS = (
     "活力版",
     "竞速版",
     "至尊版",
+)
+_GENERIC_COLOR_NAMES = frozenset(
+    {
+        "黑色",
+        "白色",
+        "蓝色",
+        "绿色",
+        "红色",
+        "紫色",
+        "灰色",
+        "银色",
+        "金色",
+        "橙色",
+        "粉色",
+        "黄色",
+    }
 )
 _MAX_CONTEXT_LENGTH = 1000
 _PRICE_STYLE_SCRIPT = """
@@ -75,6 +92,7 @@ class HonorOfficialOverride:
     result_regions = ("#mainSaleList",)
     product_cards = ("#mainSaleList li.grid-items",)
     product_links = ("a.thumb",)
+    current_product_links = ('a[href*="/cn/shop/product/"]',)
     detail_titles = ("h1#pro-name",)
     address_roots = ("#pro-predict.product-address",)
     color_options = (
@@ -85,6 +103,10 @@ class HonorOfficialOverride:
         '#pro-skus dl.product-choose li[data-attrname="版本"]'
         "[data-attrcode][data-skuid]",
     )
+    package_options = (
+        '#pro-skus dl.product-choose li[data-attrname="套餐"][data-skuid]',
+    )
+    ai_package_name = "官方标配(AI版)"
 
     @classmethod
     def uses_live_contract(cls, page: Any) -> bool:
@@ -111,6 +133,10 @@ class HonorOfficialOverride:
                 return True
             search_from = index + len(model)
         return False
+
+    @staticmethod
+    def card_is_temporarily_unavailable(card_text: str) -> bool:
+        return "暂时缺货" in normalize_product_text(card_text)
 
     @staticmethod
     def _card_model_remainder_is_allowed(raw_remainder: str) -> bool:
@@ -152,8 +178,37 @@ class HonorOfficialOverride:
         cls._select_unique_option(
             page,
             cls.color_options,
-            lambda text: color_matches(task.color, text),
+            lambda text: cls.color_option_matches(task.color, text),
             semantic_name="HONOR exact color option",
+        )
+        if task.requires_ai_package:
+            cls._select_unique_option(
+                page,
+                cls.package_options,
+                lambda text: normalize_product_text(text) == cls.ai_package_name,
+                semantic_name="HONOR official AI package option",
+            )
+
+    @staticmethod
+    def color_option_matches(target: str, candidate: str) -> bool:
+        """Match an exact HONOR colour, or one unique generic base colour.
+
+        The base table sometimes gives a basic colour (for example ``黑色``),
+        while HONOR displays a marketing colour name (for example ``幻夜黑``).
+        This deliberately applies only to a small, explicit set of base colours;
+        the caller still requires exactly one matching visible option.
+        """
+        if color_matches(target, candidate):
+            return True
+        normalized_target = normalize_product_text(target)
+        normalized_candidate = normalize_product_text(candidate)
+        if normalized_target not in _GENERIC_COLOR_NAMES:
+            return False
+        base_color = normalized_target.removesuffix("色")
+        return bool(
+            base_color
+            and normalized_candidate.endswith(base_color)
+            and "/" not in normalized_candidate
         )
 
     @staticmethod
@@ -218,7 +273,7 @@ class HonorOfficialOverride:
             ),
             semantic_name="selected version",
         )
-        if not color_matches(task.color, color.inner_text()):
+        if not cls.color_option_matches(task.color, color.inner_text()):
             raise LayoutRecognitionError(
                 "Official HONOR selected color does not match the task"
             )
@@ -241,6 +296,32 @@ class HonorOfficialOverride:
             semantic_name="selected version",
         )
         intersection = color_skus & version_skus
+        if len(intersection) > 1 or task.requires_ai_package:
+            selected_packages = tuple(
+                option
+                for option in visible_locators(
+                    page,
+                    ('#pro-skus dl.product-choose '
+                     'li.selected[data-attrname="套餐"][data-skuid]',),
+                )
+            )
+            if len(selected_packages) == 1:
+                if (
+                    task.requires_ai_package
+                    and normalize_product_text(selected_packages[0].inner_text())
+                    != cls.ai_package_name
+                ):
+                    raise LayoutRecognitionError(
+                        "Official HONOR selected package is not the AI package"
+                    )
+                intersection &= _required_sku_set(
+                    selected_packages[0],
+                    semantic_name="selected package",
+                )
+            elif task.requires_ai_package:
+                raise LayoutRecognitionError(
+                    "Official HONOR selected AI package is missing or ambiguous"
+                )
         if len(intersection) != 1:
             raise LayoutRecognitionError(
                 "Official HONOR selected SKU intersection is not unique"
@@ -293,6 +374,43 @@ class HonorOfficialOverride:
         )
 
     @classmethod
+    def offer_context(
+        cls,
+        page: Any,
+    ) -> HonorStockSnapshot | None:
+        """Read either live delivery data or a visible arrival-notice state."""
+        address = cls.attached_address_root(page)
+        if address.is_visible():
+            return cls.stock_snapshot(page)
+        notifications = tuple(
+            option
+            for option in visible_locators(page, ("a.product-button02",))
+            if normalize_product_text(option.inner_text()) == "到货通知"
+        )
+        if not notifications:
+            return None
+        if len(notifications) != 1:
+            raise LayoutRecognitionError(
+                "Official HONOR arrival notification is ambiguous"
+            )
+        region = _unique_attached(
+            address,
+            ("a.product-pulldown-btn",),
+            semantic_name="delivery region for sold-out product",
+        )
+        region_text = normalize_product_text(region.inner_text())
+        if not region_text or len(region_text) > _MAX_CONTEXT_LENGTH:
+            raise LayoutRecognitionError(
+                "Official HONOR arrival-notice delivery region is invalid"
+            )
+        return HonorStockSnapshot(
+            state_text="到货通知",
+            bounded_context="到货通知",
+            region_text=region_text,
+            locator=notifications[0],
+        )
+
+    @classmethod
     def attached_address_root(cls, page: Any) -> Any:
         address = page.locator(cls.address_roots[0])
         if address.count() != 1:
@@ -308,21 +426,26 @@ class HonorOfficialOverride:
             ("div.product-price-info",),
             semantic_name="price context",
         )
-        hand = _unique_visible(
-            region,
-            ("span#pro-price-hand.hand",),
-            semantic_name="hand price",
-        )
-        old = _unique_visible(
-            region,
-            ("s#pro-price-old",),
-            semantic_name="old price",
-        )
         context = normalize_product_text(region.inner_text())
         if not context or len(context) > _MAX_CONTEXT_LENGTH:
             raise LayoutRecognitionError(
                 "Official HONOR price context is invalid"
             )
+        hands = visible_locators(region, ("span#pro-price-hand.hand",))
+        olds = visible_locators(region, ("s#pro-price-old",))
+        if not hands and not olds:
+            candidate = _price_candidate(region, context)
+            if candidate.effective_line_through:
+                raise LayoutRecognitionError(
+                    "Official HONOR single price is struck through"
+                )
+            return (candidate,)
+        if len(hands) != 1 or len(olds) != 1:
+            raise LayoutRecognitionError(
+                "Official HONOR price roles are missing or ambiguous"
+            )
+        hand = hands[0]
+        old = olds[0]
         hand_text = normalize_product_text(hand.inner_text())
         hand_prefix = "预估到手价 "
         if not hand_text.startswith(hand_prefix):
@@ -410,6 +533,24 @@ def _unique_visible(
     semantic_name: str,
 ) -> Any:
     matches = visible_locators(scope, selectors)
+    if len(matches) != 1:
+        raise LayoutRecognitionError(
+            f"Official HONOR {semantic_name} is missing or ambiguous"
+        )
+    return matches[0]
+
+
+def _unique_attached(
+    scope: Any,
+    selectors: tuple[str, ...],
+    *,
+    semantic_name: str,
+) -> Any:
+    matches: list[Any] = []
+    for selector in selectors:
+        locator = scope.locator(selector)
+        count = locator.count()
+        matches.extend(locator.nth(index) for index in range(count))
     if len(matches) != 1:
         raise LayoutRecognitionError(
             f"Official HONOR {semantic_name} is missing or ambiguous"

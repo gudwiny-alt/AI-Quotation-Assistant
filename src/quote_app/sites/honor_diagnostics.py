@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from quote_app.sites.locators import visible_locators
+from quote_app.sites.official_overrides.honor import HonorOfficialOverride
 from quote_app.tasks.models import (
     WebsiteChannel,
     WebsiteTask,
@@ -45,14 +46,16 @@ def capture_honor_search_diagnostic(
     if not target.is_file():
         return None
     try:
-        cards = _visible_cards(page)
+        cards = _visible_cards(page, task)
     except Exception:
         cards = []
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_name": task.model_name,
         "search_url": _safe_url(getattr(page, "url", "")),
         "cards": cards,
+        "summary": _summary(cards),
+        "attempt_trace": _attempt_trace(error),
         "screenshot_path": str(target),
     }
     target.with_suffix(f"{target.suffix}.json").write_text(
@@ -74,22 +77,78 @@ def _is_honor_match_failure(
     )
 
 
-def _visible_cards(page: Any) -> list[dict[str, str | None]]:
+def _visible_cards(
+    page: Any,
+    task: WebsiteTask,
+) -> list[dict[str, object]]:
     regions = visible_locators(page, ("#mainSaleList",))
-    if len(regions) != 1:
-        return []
-    cards = visible_locators(regions[0], ("li.grid-items",))[:_MAX_CARDS]
-    return [_card_record(card) for card in cards]
+    cards = (
+        visible_locators(regions[0], ("li.grid-items",))
+        if len(regions) == 1
+        else ()
+    )
+    if not cards:
+        cards = visible_locators(
+            page,
+            HonorOfficialOverride.current_product_links,
+        )
+    cards = cards[:_MAX_CARDS]
+    return [_card_record(task, card) for card in cards]
 
 
-def _card_record(card: Any) -> dict[str, str | None]:
+def _card_record(task: WebsiteTask, card: Any) -> dict[str, object]:
     text = _bounded_text(_safe_inner_text(card))
     href: str | None = None
     links = visible_locators(card, ("a.thumb",))
+    if not links:
+        value = card.get_attribute("href")
+        if isinstance(value, str) and value.strip():
+            links = (card,)
+    model_matches = HonorOfficialOverride.card_matches_model(
+        task.model_name,
+        text,
+    )
     if len(links) == 1:
         value = links[0].get_attribute("href")
         href = _safe_url(value) if isinstance(value, str) else None
-    return {"text": text, "href": href}
+    if not model_matches:
+        candidate_status = "model_not_matched"
+    elif not links:
+        candidate_status = "thumbnail_link_missing"
+    elif len(links) != 1:
+        candidate_status = "thumbnail_link_ambiguous"
+    elif not href:
+        candidate_status = "thumbnail_href_missing"
+    else:
+        candidate_status = "ready_to_click"
+    return {
+        "text": text,
+        "href": href,
+        "model_matches": model_matches,
+        "thumb_count": len(links),
+        "candidate_status": candidate_status,
+    }
+
+
+def _summary(cards: list[dict[str, object]]) -> dict[str, int]:
+    return {
+        "visible_card_count": len(cards),
+        "model_card_count": sum(
+            record["model_matches"] is True
+            for record in cards
+        ),
+        "ready_card_count": sum(
+            record["candidate_status"] == "ready_to_click"
+            for record in cards
+        ),
+    }
+
+
+def _attempt_trace(error: BaseException) -> list[dict[str, object]]:
+    value = getattr(error, "honor_search_trace", ())
+    if not isinstance(value, list):
+        return []
+    return [record for record in value if isinstance(record, dict)]
 
 
 def _safe_inner_text(locator: Any) -> str:

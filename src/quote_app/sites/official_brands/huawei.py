@@ -100,6 +100,7 @@ _PRICE_CANDIDATE = (
 )
 _CAPTURE_PRICE = _PRICE_CANDIDATE
 _SELECTED_CANDIDATE = "[style]"
+_OPTION_SOURCES = ('div[tabindex="0"]', "button")
 _RISK_MARKERS = (
     '[id*="captcha"]',
     '[class*="captcha"]',
@@ -167,6 +168,50 @@ _PRICE_STYLE = """
   return {effectiveLineThrough: lineThrough, contextText, ancestorClasses};
 }
 """
+_OPTION_INDEXES = r"""
+(spec) => {
+  // VMALL_CONFIG_OPTION_INDEXES: resolve only the requested configuration area.
+  const selector = String(spec?.selector || '');
+  const label = String(spec?.label || '');
+  if (!selector || !label) return [];
+  const visible = (element) => {
+    const style = window.getComputedStyle(element);
+    const box = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+      box.width > 0 && box.height > 0;
+  };
+  const belongsToGroup = (element) => {
+    let current = element.parentElement;
+    while (current) {
+      const hasDirectLabel = Array.from(current.children).some(child =>
+        (child.textContent || '').trim() === label
+      );
+      if (hasDirectLabel) return true;
+      current = current.parentElement;
+    }
+    return false;
+  };
+  return Array.from(document.querySelectorAll(selector))
+    .map((element, index) => ({element, index}))
+    .filter(({element}) => visible(element) && belongsToGroup(element))
+    .map(({index}) => index);
+}
+"""
+_OPTION_SELECTED = r"""
+(element) => {
+  // VMALL_CONFIG_OPTION_SELECTED: the red state is split between tile and text.
+  const nodes = [element, ...element.querySelectorAll('*')];
+  const red = (value) => String(value || '').replace(/\s/g, '').toLowerCase() ===
+    'rgb(207,10,44)';
+  const hasBorder = nodes.some(node => {
+    const style = window.getComputedStyle(node);
+    return red(style.borderTopColor) || red(style.borderRightColor) ||
+      red(style.borderBottomColor) || red(style.borderLeftColor);
+  });
+  const hasTextColor = nodes.some(node => red(window.getComputedStyle(node).color));
+  return hasBorder && hasTextColor;
+}
+"""
 _FIT = r"""
 (proofs) => {
   const resolve = (proof) => {
@@ -178,9 +223,16 @@ _FIT = r"""
       return exact.length === 1 ? exact[0] : null;
     }
     const selected = candidates.filter(element => {
-      const style = (element.getAttribute('style') || '').replace(/\s/g, '').toLowerCase();
-      if (!style.includes('border-color:rgb(207,10,44)') ||
-          !style.includes('color:rgb(207,10,44)')) return false;
+      const nodes = [element, ...element.querySelectorAll('*')];
+      const red = (value) => String(value || '').replace(/\s/g, '').toLowerCase() ===
+        'rgb(207,10,44)';
+      const hasBorder = nodes.some(node => {
+        const style = window.getComputedStyle(node);
+        return red(style.borderTopColor) || red(style.borderRightColor) ||
+          red(style.borderBottomColor) || red(style.borderLeftColor);
+      });
+      const hasTextColor = nodes.some(node => red(window.getComputedStyle(node).color));
+      if (!hasBorder || !hasTextColor) return false;
       if ((element.textContent || '').trim() !== proof.expected_text) return false;
       let current = element.parentElement;
       while (current) {
@@ -213,9 +265,16 @@ _GEOMETRY = r"""
       return exact.length === 1 ? exact[0] : null;
     }
     const selected = candidates.filter(element => {
-      const style = (element.getAttribute('style') || '').replace(/\s/g, '').toLowerCase();
-      if (!style.includes('border-color:rgb(207,10,44)') ||
-          !style.includes('color:rgb(207,10,44)')) return false;
+      const nodes = [element, ...element.querySelectorAll('*')];
+      const red = (value) => String(value || '').replace(/\s/g, '').toLowerCase() ===
+        'rgb(207,10,44)';
+      const hasBorder = nodes.some(node => {
+        const style = window.getComputedStyle(node);
+        return red(style.borderTopColor) || red(style.borderRightColor) ||
+          red(style.borderBottomColor) || red(style.borderLeftColor);
+      });
+      const hasTextColor = nodes.some(node => red(window.getComputedStyle(node).color));
+      if (!hasBorder || !hasTextColor) return false;
       if ((element.textContent || '').trim() !== proof.expected_text) return false;
       let current = element.parentElement;
       while (current) {
@@ -499,8 +558,26 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         return None
 
     def _options(self, page: Any, kind: str) -> tuple[Any, ...]:
-        group = self._group(page, kind)
-        return _visible(group, ("button",)) if group is not None else ()
+        """Read VMALL options with one DOM-side query, never a root-level div scan."""
+        label = "版本" if kind == "capacity" else "颜色"
+        for selector in _OPTION_SOURCES:
+            try:
+                candidates = page.locator(selector)
+                if candidates.count() == 0:
+                    continue
+                indexes = page.evaluate(
+                    _OPTION_INDEXES,
+                    {"selector": selector, "label": label},
+                )
+            except (AttributeError, RuntimeError):
+                continue
+            if not isinstance(indexes, list) or any(
+                not isinstance(index, int) or isinstance(index, bool) or index < 0
+                for index in indexes
+            ):
+                raise LayoutRecognitionError("VMALL configuration area is invalid")
+            return tuple(candidates.nth(index) for index in indexes)
+        return ()
 
     def _storage_only(self, page: Any) -> bool:
         values = tuple(_normalize_capacity(option.inner_text()) for option in self._options(page, "capacity"))
@@ -930,6 +1007,12 @@ def _disabled(locator: Any) -> bool:
 
 
 def _selected(locator: Any) -> bool:
+    try:
+        result = locator.evaluate(_OPTION_SELECTED)
+    except (AttributeError, RuntimeError):
+        result = None
+    if result is True:
+        return True
     style = str(locator.get_attribute("style") or "").replace(" ", "").lower()
     return (
         "border-color:rgb(207,10,44)" in style

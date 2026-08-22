@@ -160,7 +160,7 @@ _APPROVED_RECORDS: tuple[tuple[str, WebsiteChannel, str, str, PricePolicy], ...]
     (
         "苹果",
         WebsiteChannel.OFFICIAL,
-        "https://www.apple.com.cn/iphone/",
+        "https://www.apple.com.cn/shop/buy-iphone",
         "Apple iPhone",
         PricePolicy.HIGHEST,
     ),

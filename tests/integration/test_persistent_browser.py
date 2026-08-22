@@ -78,12 +78,18 @@ class _FakeContext:
 class _FakePage:
     def __init__(self) -> None:
         self.closed = False
+        self.raise_closed_on_title = False
 
     def is_closed(self) -> bool:
         return self.closed
 
     def close(self) -> None:
         self.closed = True
+
+    def title(self) -> str:
+        if self.raise_closed_on_title:
+            raise RuntimeError("Target page, context or browser has been closed")
+        return "fixture"
 
 
 class _FakeChromium:
@@ -508,7 +514,23 @@ def test_page_for_reuses_family_isolates_families_and_replaces_closed_page(
         session.close()
 
 
-def test_automation_page_is_reused_and_unassigned_popup_is_closed(
+def test_automation_page_uses_a_fresh_tab_instead_of_a_restored_profile_tab(
+    tmp_path: Path,
+) -> None:
+    session, _, context = _fake_session(tmp_path)
+    session.start()
+    try:
+        restored = context.pages[0]
+        automation = session.automation_page()
+
+        assert automation is not restored
+        assert context.new_page_calls == 1
+        assert session.automation_page() is automation
+    finally:
+        session.close()
+
+
+def test_automation_page_is_reused_and_unassigned_pages_are_closed(
     tmp_path: Path,
 ) -> None:
     session, _, context = _fake_session(tmp_path)
@@ -519,9 +541,28 @@ def test_automation_page_is_reused_and_unassigned_popup_is_closed(
 
         closed = session.close_unassigned_pages()
 
-        assert closed == 1
+        assert closed == 2
         assert session.automation_page() is original
+        assert context.pages[0].is_closed()
         assert popup.is_closed()
+    finally:
+        session.close()
+
+
+def test_automation_page_restarts_the_persistent_session_when_browser_is_closed(
+    tmp_path: Path,
+) -> None:
+    session, manager, context = _fake_session(tmp_path)
+    session.start()
+    try:
+        original = session.automation_page()
+        original.raise_closed_on_title = True
+
+        replacement = session.automation_page()
+
+        assert replacement is not original
+        assert manager.start_calls == 2
+        assert context.new_page_calls == 2
     finally:
         session.close()
 

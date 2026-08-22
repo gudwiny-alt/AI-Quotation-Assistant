@@ -33,6 +33,7 @@ from quote_app.evidence.platform import (
     RetryableEvidenceCaptureError,
     SystemUIProof,
     make_capture_error,
+    revalidate_capture_error,
 )
 from quote_app.evidence.quality import (
     CaptureQualityError,
@@ -88,6 +89,38 @@ def test_mac_runtime_errors_are_non_retryable_environment_failures(
 
     assert isinstance(error, NonRetryableEvidenceCaptureError)
     assert error.code == code
+
+
+def test_revalidation_retains_approved_window_identity_stage() -> None:
+    original = make_capture_error(
+        "CAPTURE_WINDOW_IDENTITY",
+        "激活后浏览器窗口身份发生变化",
+    )
+
+    revalidated = revalidate_capture_error(
+        original,
+        fallback_code="CAPTURE_ENVIRONMENT",
+        safe_message="macOS 正式截图上下文组合失败",
+    )
+
+    assert revalidated.code == "CAPTURE_WINDOW_IDENTITY"
+    assert revalidated.message == "激活后浏览器窗口身份发生变化"
+
+
+def test_revalidation_does_not_retain_unapproved_window_identity_detail() -> None:
+    original = make_capture_error(
+        "CAPTURE_WINDOW_IDENTITY",
+        "untrusted native window id=123",
+    )
+
+    revalidated = revalidate_capture_error(
+        original,
+        fallback_code="CAPTURE_ENVIRONMENT",
+        safe_message="macOS 正式截图上下文组合失败",
+    )
+
+    assert revalidated.code == "CAPTURE_WINDOW_IDENTITY"
+    assert revalidated.message == "macOS 正式截图上下文组合失败"
 
 
 class _Probe:
@@ -238,6 +271,7 @@ class _Environment:
         self.snapshot_error = snapshot_error
         self.captured_paths: list[Path] = []
         self.prepared: list[BrowserWindowIdentity] = []
+        self.system_ui_calls = 0
         self.snapshot = snapshot or CaptureGeometrySnapshot(
             expected_window=self.expected,
             display_physical_bounds=DisplayBounds(0, 0, 400, 300),
@@ -285,6 +319,7 @@ class _Environment:
         self,
         snapshot: CaptureGeometrySnapshot,
     ) -> SystemUIProof:
+        self.system_ui_calls += 1
         assert snapshot is self.snapshot
         return self.proof  # type: ignore[return-value]
 
@@ -355,7 +390,7 @@ def test_macos_visual_review_beta_allows_only_missing_date_time(
     assert record.validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
 
 
-def test_macos_visual_review_beta_still_requires_visual_review_flag(
+def test_macos_visual_review_beta_does_not_require_system_ui_geometry_proof(
     tmp_path: Path,
 ) -> None:
     environment = _Environment(
@@ -371,15 +406,15 @@ def test_macos_visual_review_beta_still_requires_visual_review_flag(
         ),
     )
 
-    with pytest.raises(EvidenceCaptureError) as captured:
-        EvidenceCapturePipeline(
-            environment,
-            sleeper=lambda _seconds: None,
-            now=lambda: NOW,
-            policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
-        ).capture(_request(tmp_path / "no-visual-review.png", environment))
+    record = EvidenceCapturePipeline(
+        environment,
+        sleeper=lambda _seconds: None,
+        now=lambda: NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    ).capture(_request(tmp_path / "no-system-ui-proof.png", environment))
 
-    assert captured.value.code == "CAPTURE_ENVIRONMENT"
+    assert record.validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
+    assert environment.system_ui_calls == 0
 
 
 def test_pipeline_policy_cannot_be_reassigned_after_construction(
@@ -420,7 +455,7 @@ def test_pipeline_fails_closed_when_its_policy_storage_is_tampered(
         },
     ],
 )
-def test_macos_visual_review_beta_keeps_all_non_date_time_proof_requirements(
+def test_strict_capture_keeps_all_system_ui_proof_requirements(
     tmp_path: Path,
     proof_change: dict[str, object],
 ) -> None:
@@ -444,12 +479,9 @@ def test_macos_visual_review_beta_keeps_all_non_date_time_proof_requirements(
     )
 
     with pytest.raises(EvidenceCaptureError) as captured:
-        EvidenceCapturePipeline(
-            environment,
-            sleeper=lambda _seconds: None,
-            now=lambda: NOW,
-            policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
-        ).capture(_request(tmp_path / "incomplete-beta-proof.png", environment))
+        _pipeline(environment).capture(
+            _request(tmp_path / "incomplete-strict-proof.png", environment)
+        )
 
     assert captured.value.code == "CAPTURE_ENVIRONMENT"
 
@@ -950,8 +982,8 @@ def test_strict_capture_rejects_the_same_unmappable_request_data(
     assert captured.value.code == "CAPTURE_GEOMETRY"
 
 
-@pytest.mark.parametrize("failure", ["foreground", "system-ui", "semantic"])
-def test_beta_capture_keeps_foreground_system_ui_and_semantic_checks(
+@pytest.mark.parametrize("failure", ["foreground", "semantic"])
+def test_beta_capture_keeps_foreground_and_semantic_checks(
     tmp_path: Path,
     failure: str,
 ) -> None:
@@ -972,19 +1004,7 @@ def test_beta_capture_keeps_foreground_system_ui_and_semantic_checks(
             if failure == "foreground"
             else None
         ),
-        proof=(
-            SystemUIProof(
-                expected_window=expected,
-                system_bar_visible=False,
-                date_time_visible=True,
-                intersects_primary_display=True,
-                authoritative=True,
-                source="hidden-system-ui",
-                visual_review_required=True,
-            )
-            if failure == "system-ui"
-            else beta_proof
-        ),
+        proof=beta_proof,
     )
     probe = (
         _Probe("one", "two", "three")
@@ -1002,9 +1022,29 @@ def test_beta_capture_keeps_foreground_system_ui_and_semantic_checks(
 
     assert captured.value.code == {
         "foreground": "CAPTURE_OBSCURED",
-        "system-ui": "CAPTURE_ENVIRONMENT",
         "semantic": "CAPTURE_UNSTABLE",
     }[failure]
+
+
+def test_beta_capture_ignores_css_to_native_geometry_mapping(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(tmp_path)
+    environment.snapshot = replace(
+        environment.snapshot,
+        device_pixel_ratio=2,
+        viewport_height_css=900,
+    )
+
+    record = EvidenceCapturePipeline(
+        environment,
+        sleeper=lambda _seconds: None,
+        now=lambda: NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    ).capture(_request(tmp_path / "beta-minimal-gate.png", environment))
+
+    assert record.validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
+    assert record.annotations == ()
 
 
 def test_unstable_probe_and_geometry_failure_leave_no_formal_file(

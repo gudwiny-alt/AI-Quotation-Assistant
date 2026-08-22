@@ -88,6 +88,10 @@ class ManualLoginError(RuntimeError):
 class BrowserTaskScheduler:
     """Serial scheduler around the crash-safe repository attempt boundary."""
 
+    _MANUAL_VERIFICATION_EXHAUSTED_CODE = (
+        "MANUAL_VERIFICATION_RETRIES_EXHAUSTED"
+    )
+
     def __init__(
         self,
         repository: SQLiteTaskRepository,
@@ -101,6 +105,7 @@ class BrowserTaskScheduler:
         task_sort_key: TaskSortKey | None = None,
         task_site_resolver: TaskSiteResolver | None = None,
         stop_after_brand_issue: bool = False,
+        max_manual_verification_retries: int = 2,
     ) -> None:
         if not isinstance(repository, SQLiteTaskRepository):
             raise ValueError("repository must be a SQLiteTaskRepository")
@@ -116,6 +121,13 @@ class BrowserTaskScheduler:
             raise ValueError("task_site_resolver must be callable")
         if type(stop_after_brand_issue) is not bool:
             raise ValueError("stop_after_brand_issue must be a bool")
+        if (
+            type(max_manual_verification_retries) is not int
+            or max_manual_verification_retries < 0
+        ):
+            raise ValueError(
+                "max_manual_verification_retries must be a non-negative integer"
+            )
         self.repository = repository
         self.run_id = run_id.strip()
         self.attempt_callback = attempt_callback
@@ -127,6 +139,7 @@ class BrowserTaskScheduler:
         self.task_sort_key = task_sort_key
         self.task_site_resolver = task_site_resolver
         self.stop_after_brand_issue = stop_after_brand_issue
+        self.max_manual_verification_retries = max_manual_verification_retries
         self._run_lock = threading.Lock()
         self._manual_lock = threading.Lock()
         self._waiting_action: ManualActionEvent | None = None
@@ -344,6 +357,21 @@ class BrowserTaskScheduler:
             except Exception as error:
                 classified = classify_attempt_error(error)
                 if isinstance(classified, LoginRequired):
+                    if self._manual_verification_retries_exhausted(
+                        task,
+                        classified,
+                    ):
+                        self._save_technical_failure(
+                            task,
+                            token,
+                            self._MANUAL_VERIFICATION_EXHAUSTED_CODE,
+                            self._manual_verification_exhausted_message(
+                                classified.site
+                            ),
+                            retryable=False,
+                            completed_technical_attempts=completed_technical_attempts,
+                        )
+                        return True
                     self._park_for_login(task, token, classified)
                     return True
                 if not isinstance(classified, TechnicalError):
@@ -440,6 +468,10 @@ class BrowserTaskScheduler:
             task.task_id,
             token=token,
             site=error.site,
+            security_verification=isinstance(
+                error,
+                SecurityVerificationRequired,
+            ),
         )
         self.control.enter_manual_login(error.site)
         with self._manual_lock:
@@ -463,6 +495,26 @@ class BrowserTaskScheduler:
                 "site": error.site,
                 "condition": condition,
             },
+        )
+
+    def _manual_verification_retries_exhausted(
+        self,
+        task: WebsiteTask,
+        error: LoginRequired,
+    ) -> bool:
+        if not isinstance(error, SecurityVerificationRequired):
+            return False
+        retries_already_used = sum(
+            attempt.error_code == "SECURITY_VERIFICATION_REQUIRED"
+            for attempt in self.repository.list_attempts(task.task_id)
+        )
+        return retries_already_used >= self.max_manual_verification_retries
+
+    def _manual_verification_exhausted_message(self, site: str) -> str:
+        return (
+            f"{site}人工安全验证连续重试"
+            f"{self.max_manual_verification_retries}次仍未通过，"
+            "已跳过该站并继续后续网站；请在执行报告中人工补充该渠道"
         )
 
     def _save_technical_failure(

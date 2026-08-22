@@ -115,7 +115,7 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         browser.goto(self.spec.entry_url, wait_until="domcontentloaded")
         browser.wait_for_load_state("domcontentloaded")
         self.require_approved_url(browser.url)
-        search = _first_visible(browser, (_SEARCH_INPUT,))
+        search = self._wait_for_search_input(browser)
         if search is None:
             raise LayoutRecognitionError("vivo homepage search input is unavailable")
         search.fill(task.model_name)
@@ -132,6 +132,15 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         if _detail_identity(browser.url).product_key != _detail_identity(target_url).product_key:
             raise LayoutRecognitionError("vivo final detail URL identity changed")
         return self._observe_detail(task, browser)
+
+    def _wait_for_search_input(self, page: Any) -> Any | None:
+        for tick in range(41):
+            search = _first_visible(page, (_SEARCH_INPUT,))
+            if search is not None:
+                return search
+            if tick < 40:
+                page.wait_for_timeout(250)
+        return None
 
     def _resume_validated(
         self, task: WebsiteTask, page: BrowserPage, checkpoint: WebsiteObservationCheckpoint
@@ -152,6 +161,13 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         return self._observe_detail(task, browser)
 
     def _observe_detail(self, task: WebsiteTask, page: Any) -> AdapterObservation:
+        try:
+            ensure_capture_scale(page, scale=0.8)
+            return self._observe_scaled_detail(task, page)
+        finally:
+            restore_capture_scale(page)
+
+    def _observe_scaled_detail(self, task: WebsiteTask, page: Any) -> AdapterObservation:
         identity = _detail_identity(page.url)
         self._require_detail_title(page, task.model_name)
         capacity = self._wait_for_target_option(page, "capacity", task)
@@ -195,7 +211,7 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
             snapshot.brand == task.brand
             and model_matches(task.model_name, snapshot.model_name)
             and capacity_matches(snapshot.capacity, task.ram, task.storage)
-            and color_matches(task.color, snapshot.color)
+            and _vivo_color_matches(task.color, snapshot.color)
             and _is_detail(snapshot.identity.canonical_url)
             and snapshot.identity.product_key.isdigit()
         )
@@ -266,7 +282,7 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
             if kind == "capacity"
         ] if kind == "capacity" else [
             option for option in self._options(page, kind)
-            if color_matches(task.color, option.inner_text())
+            if _vivo_color_matches(task.color, option.inner_text())
         ]
         if len(options) > 1:
             raise LayoutRecognitionError(f"vivo exact {kind} option is ambiguous")
@@ -286,7 +302,7 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         if len(selected) != 1:
             raise LayoutRecognitionError(f"vivo selected {kind} option is not unique")
         option = selected[0]
-        matches = capacity_matches(option.inner_text(), task.ram, task.storage) if kind == "capacity" else color_matches(task.color, option.inner_text())
+        matches = capacity_matches(option.inner_text(), task.ram, task.storage) if kind == "capacity" else _vivo_color_matches(task.color, option.inner_text())
         if not matches or _disabled(option):
             raise LayoutRecognitionError(f"vivo selected {kind} option is unavailable")
         return option
@@ -402,21 +418,39 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         key = (id(browser), task.task_id, expected.current_sku)
         if key in self._prepared:
             return
+        if expected.outcome is BusinessOutcome.NO_MODEL:
+            self._prepared.add(key)
+            return
         if expected.outcome is not BusinessOutcome.PRICE_FOUND:
+            try:
+                ensure_capture_scale(browser, scale=0.8)
+            except Exception:
+                self._restore_scale(browser)
+                raise
             self._prepared.add(key)
             return
         selectors = _capture_selectors()
         try:
+            ensure_capture_scale(browser, scale=0.8)
             if not _proofs_fit(browser, selectors):
-                ensure_capture_scale(browser, scale=0.8)
-                if not _proofs_fit(browser, selectors):
-                    geometry = browser.evaluate(_GEOMETRY, selectors)
-                    delta = _scroll_delta(geometry)
-                    if delta is None:
-                        raise LayoutRecognitionError("vivo capture proofs cannot fit one viewport")
-                    browser.evaluate(_SCROLL, {"delta": delta, "proofs": selectors})
+                geometry = browser.evaluate(_GEOMETRY, selectors)
+                delta = _scroll_delta(geometry)
+                if delta is None and _has_large_inherited_scroll(geometry):
+                    if browser.evaluate(_RESET_SCROLL, {"top": 0}) is not True:
+                        raise LayoutRecognitionError("vivo capture scroll reset failed")
+                    browser.wait_for_timeout(300)
+                    if _proofs_fit(browser, selectors):
+                        delta = None
+                    else:
+                        geometry = browser.evaluate(_GEOMETRY, selectors)
+                        delta = _scroll_delta(geometry)
+                if delta is None:
                     if not _proofs_fit(browser, selectors):
-                        raise LayoutRecognitionError("vivo capture proofs remain obscured")
+                        raise LayoutRecognitionError("vivo capture proofs cannot fit one viewport")
+                else:
+                    browser.evaluate(_SCROLL, {"delta": delta, "proofs": selectors})
+                if not _proofs_fit(browser, selectors):
+                    raise LayoutRecognitionError("vivo capture proofs remain obscured")
             self._require_detail_title(browser, task.model_name)
             self._require_selected(browser, "capacity", task)
             self._require_selected(browser, "color", task)
@@ -573,6 +607,15 @@ def _capacity(task: WebsiteTask) -> str:
     return f"{task.ram}+{task.storage}"
 
 
+def _vivo_color_matches(target: str, candidate: str) -> bool:
+    """Ignore only vivo's descriptive trailing ``配色`` suffix."""
+
+    def without_suffix(value: str) -> str:
+        return re.sub(r"\s*配色\s*$", "", value, count=1)
+
+    return color_matches(without_suffix(target), without_suffix(candidate))
+
+
 def _money_values(text: str) -> tuple[Decimal, ...]:
     values: list[Decimal] = []
     for matched in _MONEY.finditer(text):
@@ -666,6 +709,13 @@ _SCROLL = """
   return true;
 }
 """
+_RESET_SCROLL = """
+(state) => {
+  if (!state || state.top !== 0) return false;
+  window.scrollTo({top: 0, left: window.scrollX, behavior: 'instant'});
+  return true;
+}
+"""
 _PRICE_STYLE = """
 (element) => ({
   effectiveLineThrough: (
@@ -720,3 +770,12 @@ def _scroll_delta(geometry: object) -> float | None:
     if delta > 0 and top - delta < margin:
         return None
     return delta
+
+
+def _has_large_inherited_scroll(geometry: object) -> bool:
+    if not isinstance(geometry, dict):
+        return False
+    try:
+        return float(geometry["scrollY"]) > 0 and float(geometry["unionTop"]) < 8
+    except (KeyError, TypeError, ValueError):
+        return False

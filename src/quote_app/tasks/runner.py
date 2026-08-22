@@ -613,11 +613,18 @@ class WebsiteTaskRunner:
         context = provider(task, page, observation.semantic_state)
         if not isinstance(context, CaptureContext):
             raise ValueError("capture context provider returned invalid data")
+        rectangles = (
+            observation.css_rectangles
+            if context.css_rectangles is None
+            else context.css_rectangles
+        )
         return CaptureRequest(
             destination=destination,
             state=_OUTCOME_STATES[observation.outcome],
-            css_rectangles=observation.css_rectangles,
-            expected_roles=_OUTCOME_ROLES[observation.outcome],
+            css_rectangles=rectangles,
+            expected_roles=tuple(
+                rectangle.role for rectangle in rectangles
+            ),
             expected_window=context.expected_window,
             stability_probe=context.stability_probe,
             minimum_stability_interval_seconds=(

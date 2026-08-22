@@ -315,15 +315,19 @@ def test_brand_gate_finishes_the_current_brand_then_stops_before_next_brand(
 
 
 @pytest.mark.parametrize(
-    "login_error",
+    ("login_error", "expected_waiting_code"),
     [
-        LoginRequired("天猫", "登录后才能查看价格"),
-        SecurityVerificationRequired("天猫", "需要人工完成安全验证"),
+        (LoginRequired("天猫", "登录后才能查看价格"), "LOGIN_REQUIRED"),
+        (
+            SecurityVerificationRequired("天猫", "需要人工完成安全验证"),
+            "SECURITY_VERIFICATION_REQUIRED",
+        ),
     ],
 )
 def test_login_attempt_is_parked_without_using_three_attempt_technical_budget(
     repository: SQLiteTaskRepository,
     login_error: BaseException,
+    expected_waiting_code: str,
 ) -> None:
     task = _task("tmall-1", channel=WebsiteChannel.TMALL, output_row=2)
     _seed(repository, task)
@@ -349,7 +353,7 @@ def test_login_attempt_is_parked_without_using_three_attempt_technical_budget(
 
     attempts = repository.list_attempts(task.task_id)
     assert len(attempts) == 4
-    assert attempts[0].error_code == "LOGIN_REQUIRED"
+    assert attempts[0].error_code == expected_waiting_code
     assert [attempt.error_code for attempt in attempts[1:]] == [
         "NETWORK_ERROR",
         "NETWORK_ERROR",
@@ -438,6 +442,51 @@ def test_continue_current_task_retries_waiting_task_before_later_tasks(
     assert scheduler.waiting_action is None
     assert repository.task_state("tmall") is TaskState.SUCCEEDED
     assert repository.task_state("jd") is TaskState.SUCCEEDED
+
+
+def test_security_verification_retries_are_bounded_then_later_sites_continue(
+    repository: SQLiteTaskRepository,
+    tmp_path: Path,
+) -> None:
+    """A repeatedly blocked JD task must not permanently prevent Tmall work."""
+
+    jd = _task("jd", channel=WebsiteChannel.JD, output_row=2)
+    tmall = _task("tmall", channel=WebsiteChannel.TMALL, output_row=2)
+    _seed(repository, jd, tmall)
+    attempted: list[str] = []
+
+    def attempt(task, _token, _control):
+        attempted.append(task.task_id)
+        if task.task_id == "jd":
+            raise SecurityVerificationRequired("京东", "需要人工完成安全验证")
+        return _success(tmp_path, task)
+
+    scheduler = BrowserTaskScheduler(
+        repository,
+        "run-1",
+        attempt,
+        max_manual_verification_retries=2,
+    )
+
+    scheduler.run_until_idle()
+    assert scheduler.waiting_action is not None
+    assert repository.task_state("tmall") is TaskState.PENDING
+
+    scheduler.continue_current_task()
+    scheduler.run_until_idle()
+    assert scheduler.waiting_action is not None
+
+    scheduler.continue_current_task()
+    scheduler.run_until_idle()
+
+    result = repository.load_result("jd")
+    assert attempted == ["jd", "jd", "jd", "tmall"]
+    assert scheduler.waiting_action is None
+    assert repository.task_state("jd") is TaskState.TECHNICAL_FAILURE
+    assert result is not None
+    assert result.error_code == "MANUAL_VERIFICATION_RETRIES_EXHAUSTED"
+    assert "已跳过该站" in str(result.error_message)
+    assert repository.task_state("tmall") is TaskState.SUCCEEDED
 
 
 def test_manual_login_mode_globally_pauses_attempts_and_requeues_only_its_site(

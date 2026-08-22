@@ -1211,8 +1211,6 @@ def test_non_darwin_beta_keeps_existing_prepare_call_order(
 @pytest.mark.parametrize(
     "change",
     [
-        "system-ui-overlap",
-        "dock-overlap",
         "minimized",
         "layer-changed",
         "identity-changed",
@@ -1241,6 +1239,41 @@ def test_darwin_beta_capture_revalidates_native_window_before_screenshot(
             _capture_request(context)
         )
     ) in {"CAPTURE_SYSTEM_UI", "CAPTURE_GEOMETRY"}
+    assert calls.count("window-bounds") == 1
+
+
+@pytest.mark.parametrize("change", ["system-ui-overlap", "dock-overlap"])
+def test_darwin_beta_full_display_does_not_reject_system_ui_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    change: str,
+) -> None:
+    runtime, context, bridge, calls = _darwin_beta_capture_context(
+        monkeypatch
+    )
+    bridge.window_bounds_samples = [_capture_changed_native(change)]
+    monkeypatch.setattr(
+        "quote_app.evidence.macos._macos_main_display_physical_size",
+        lambda: (_DISPLAY.width, _DISPLAY.height),
+    )
+
+    def capture_display(destination: Path, **_kwargs: object) -> None:
+        Image.new("RGB", (_DISPLAY.width, _DISPLAY.height)).save(destination)
+
+    monkeypatch.setattr(
+        "quote_app.evidence.macos.capture_macos_primary_display",
+        capture_display,
+    )
+    monkeypatch.setattr(
+        "quote_app.evidence.platform.assess_capture_quality",
+        lambda *_args, **_kwargs: None,
+    )
+
+    evidence = runtime.evidence_capture().capture(
+        _capture_request(context)
+    )
+
+    assert evidence.validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
     assert calls.count("window-bounds") == 1
 
 

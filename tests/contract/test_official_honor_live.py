@@ -24,6 +24,7 @@ def _live_honor_html(
     result_keyword: str = "荣耀Magic8",
     selected_color_skus: str = f"{_CURRENT_SKU},{_OTHER_COLOR_SKU}",
     selected_version_skus: str = f"{_CURRENT_SKU},{_OTHER_VERSION_SKU}",
+    selected_package_skus: str | None = None,
     selected_sku_switch_after_evaluations: int | None = None,
     stock_text: str = "现货",
     region_text: str | None = "福建 > 福州 > 台江",
@@ -36,6 +37,8 @@ def _live_honor_html(
     address_initially_hidden: bool = False,
     address_hydrate_after_waits: int | None = None,
     risk_after_waits: int | None = None,
+    arrival_notice: bool = False,
+    static_current_price: bool = False,
 ) -> str:
     switch_attrs = ""
     if hand_price_switch_after_evaluations is not None:
@@ -69,6 +72,11 @@ def _live_honor_html(
             '<s id="pro-price-old" '
             'style="color:rgb(164,164,164);text-decoration:line-through">'
             "¥ 4999.00</s></div>"
+        )
+    if static_current_price:
+        price_context = (
+            '<div class="product-price-info" '
+            'style="color:rgb(0,0,0)">¥1799.00</div>'
         )
     region_attrs = ""
     if cycling_region:
@@ -115,6 +123,11 @@ def _live_honor_html(
         '<div data-official-role="risk-control" hidden '
         f'data-show-after-waits="{risk_after_waits}">安全验证</div>'
         if risk_after_waits is not None
+        else ""
+    )
+    arrival_notice_markup = (
+        '<a class="product-button02">到货通知</a>'
+        if arrival_notice
         else ""
     )
     return f"""<!doctype html>
@@ -164,10 +177,17 @@ def _live_honor_html(
                 data-attrcode="733605"
                 data-skuid="{_OTHER_COLOR_SKU}">5G全网通 12GB+512GB</li>
           </dl>
+          {"" if selected_package_skus is None else f'''<dl class="product-choose">
+            <label class="custom-label">选择套餐</label>
+            <li class="attr3 selected" data-attrname="套餐"
+                data-attrcode="733606"
+                data-skuid="{selected_package_skus}">官方标配</li>
+          </dl>'''}
         </div>
       </div>
       {address_markup}
       {risk_markup}
+      {arrival_notice_markup}
       {price_context}
     </main>
   </body>
@@ -223,6 +243,198 @@ def test_honor_live_default_selection_returns_bound_hand_price(
     assert observation.semantic_state.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.semantic_state.css_rectangles == ()
     assert page.option_clicks == []
+
+
+def test_honor_live_accepts_a_unique_marketing_color_for_a_base_color(
+    official_case: Any,
+) -> None:
+    """A base-table colour may be a generic colour name used by one SKU."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html().replace("绒黑色", "幻夜黑"),
+    )
+    task = replace(task, color="黑色")
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4499.00")
+    assert observation.semantic_state.color == "黑色"
+
+
+def test_honor_live_prices_and_captures_an_arrival_notice_product(
+    official_case: Any,
+) -> None:
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(
+            address_initially_hidden=True,
+            arrival_notice=True,
+        ),
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4499.00")
+    assert observation.semantic_state.current_sku == _CURRENT_SKU
+    assert observation.semantic_state.region == "福建 > 福州 > 台江"
+    assert observation.semantic_state.stock_state == "到货通知"
+    assert observation.css_rectangles == ()
+
+    reader = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    assert reader() == observation.semantic_state
+
+
+def test_honor_live_reads_a_single_visible_price_when_arrival_notice_is_shown(
+    official_case: Any,
+) -> None:
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(
+            address_initially_hidden=True,
+            arrival_notice=True,
+            static_current_price=True,
+        ),
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("1799.00")
+    assert observation.semantic_state.stock_state == "到货通知"
+    reader = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    assert reader() == observation.semantic_state
+
+
+def test_honor_live_uses_the_selected_package_to_disambiguate_matching_skus(
+    official_case: Any,
+) -> None:
+    """A selected package must not block an otherwise matching device quote."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(
+            selected_color_skus=f"{_CURRENT_SKU},{_OTHER_COLOR_SKU}",
+            selected_version_skus=f"{_CURRENT_SKU},{_OTHER_COLOR_SKU}",
+            selected_package_skus=_CURRENT_SKU,
+            address_initially_hidden=True,
+            arrival_notice=True,
+            static_current_price=True,
+        ),
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("1799.00")
+    assert observation.semantic_state.current_sku == _CURRENT_SKU
+
+
+def test_honor_live_selects_official_ai_package_when_the_task_requires_it(
+    official_case: Any,
+) -> None:
+    package_options = f'''<dl class="product-choose">
+            <label class="custom-label">选择套餐</label>
+            <li class="attr3 selected" data-option-kind="honor-package"
+                data-attrname="套餐" data-attrcode="733606"
+                data-skuid="{_CURRENT_SKU}">官方标配</li>
+            <li class="attr4" data-option-kind="honor-package"
+                data-attrname="套餐" data-attrcode="733606"
+                data-skuid="{_CURRENT_SKU}">官方标配(AI版)</li>
+          </dl>'''
+    html = _live_honor_html(
+        selected_color_skus=_CURRENT_SKU,
+        selected_version_skus=_CURRENT_SKU,
+    ).replace(
+        "          \n        </div>",
+        f"          {package_options}\n        </div>",
+    )
+    adapter, task, page = _live_case(official_case, html=html)
+    task = replace(task, requires_ai_package=True)
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.option_labels == ["官方标配(AI版)"]
+
+
+def test_honor_live_opens_the_verified_product_in_the_controlled_page(
+    official_case: Any,
+) -> None:
+    """The visible matching card drives same-page detail navigation."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(),
+    )
+
+    adapter.observe(task, cast(Any, page))
+
+    assert page.thumb_clicks == []
+    assert page.goto_calls[-1] == (
+        f"https://www.honor.com/cn/shop/product/{_PRODUCT_ID}.html"
+    )
+
+
+def test_honor_live_keeps_search_on_the_controlled_page(
+    official_case: Any,
+) -> None:
+    """The HONOR search must not depend on a site-created browser tab."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(),
+    )
+
+    adapter.observe(task, cast(Any, page))
+
+    assert page.goto_calls[1] == (
+        "https://www.honor.com/cn/shop/v/search?keyword=%E8%8D%A3%E8%80%80Magic8"
+    )
+    assert page.presses == []
+
+
+def test_honor_live_enters_detail_from_current_product_link_card(
+    official_case: Any,
+) -> None:
+    """Current HONOR search cards are product links, not grid-items thumbnails."""
+    modern_card = f"""
+      <div class="pro-panels">
+        <a href="/cn/shop/product/{_PRODUCT_ID}.html">
+          荣耀Power2 预估到手价 ¥2699 起 ¥3299 多款可选
+        </a>
+      </div>
+    """
+    html = _live_honor_html(
+        card_model="荣耀Power2",
+        detail_model="荣耀Power2",
+        result_keyword="荣耀Power2",
+    ).replace(
+        f'''      <ul id="mainSaleList">
+        <li class="grid-items">
+          <a class="thumb" href="/cn/shop/product/{_PRODUCT_ID}.html">
+            荣耀Power2 第五代骁龙8至尊版 预估到手价¥ 4499 ¥ 4999
+          </a>
+        </li>
+      </ul>''',
+        modern_card,
+    )
+    adapter, task, page = _live_case(
+        official_case,
+        task_model="荣耀Power2",
+        html=html,
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url.endswith(f"/product/{_PRODUCT_ID}.html")
 
 
 def test_honor_live_uses_the_baseline_contract_before_any_new_readiness_gate(
@@ -287,10 +499,10 @@ def test_honor_live_waits_for_search_results_to_render(
     assert 500 in page.wait_timeout_milliseconds
 
 
-def test_honor_live_submits_enter_once_when_click_does_not_render_results(
+def test_honor_live_uses_same_page_search_when_store_submit_requires_enter(
     official_case: Any,
 ) -> None:
-    """A live HONOR search can require the same search box to submit Enter."""
+    """The official route removes the site submit button's tab-opening behavior."""
     adapter, task, page = _live_case(
         official_case,
         html=_live_honor_html().replace(
@@ -302,8 +514,10 @@ def test_honor_live_submits_enter_once_when_click_does_not_render_results(
     observation = adapter.observe(task, cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert page.presses == ["Enter"]
-    assert page.goto_calls.count(adapter.spec.entry_url) == 1
+    assert page.presses == []
+    assert page.goto_calls[1].startswith(
+        "https://www.honor.com/cn/shop/v/search?keyword="
+    )
 
 
 def test_honor_live_uses_verified_matching_card_without_search_url(
@@ -711,8 +925,9 @@ def test_honor_live_skips_non_numeric_product_route(
     with pytest.raises(NonRetryableTechnicalError, match="正式商品页"):
         adapter.observe(task, cast(Any, page))
 
-    assert page.goto_calls == [adapter.spec.entry_url]
-    assert page.presses == ["Enter"]
+    assert page.thumb_clicks == []
+    assert len(page.goto_calls) == 2
+    assert page.presses == []
 
 
 def test_honor_live_rejects_variant_card_for_base_model(
@@ -730,6 +945,20 @@ def test_honor_live_rejects_variant_card_for_base_model(
         adapter.observe(task, cast(Any, page))
 
     assert failure.value.code == "HONOR_PRODUCT_MATCH_MISSING"
+    trace = getattr(failure.value, "honor_search_trace")
+    assert [record["stage"] for record in trace] == ["after_same_page_search"]
+    assert all(record["search_url"] == page.url for record in trace)
+    assert all(record["visible_card_count"] == 1 for record in trace)
+    assert all(record["model_card_count"] == 0 for record in trace)
+    assert all(record["ready_card_count"] == 0 for record in trace)
+    assert trace[0]["cards"] == [
+        {
+            "text": "荣耀Magic8 Pro 第五代骁龙8至尊版 预估到手价¥ 4499 ¥ 4999",
+            "model_matches": False,
+            "thumb_count": 1,
+            "hrefs": [f"/cn/shop/product/{_PRODUCT_ID}.html"],
+        }
+    ]
     assert "/cn/shop/v/search?keyword=" in page.url
 
 
@@ -757,11 +986,57 @@ def test_honor_live_stops_once_when_multiple_cards_match_base_model(
     assert "/cn/shop/v/search?keyword=" in page.url
 
 
+def test_honor_live_prefers_an_available_exact_model_card_over_temporary_unavailable(
+    official_case: Any,
+) -> None:
+    """A temporary-unavailable duplicate must not block an available base model."""
+    html = _live_honor_html().replace(
+        "</ul>",
+        """
+        <li class="grid-items">
+          <a class="thumb" href="/cn/shop/product/10086164863191.html">
+            暂时缺货 荣耀Magic8 ¥6299 起 多款可选
+          </a>
+        </li>
+        <li class="grid-items">
+          <a class="thumb" href="/cn/shop/product/10086164863192.html">
+            荣耀Magic8 RSR 保时捷设计 ¥7999 起 多款可选
+          </a>
+        </li>
+      </ul>""",
+    )
+    adapter, task, page = _live_case(official_case, html=html)
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url.endswith(f"/product/{_PRODUCT_ID}.html")
+
+
+def test_honor_live_enters_a_temporarily_unavailable_card_when_it_is_the_only_match(
+    official_case: Any,
+) -> None:
+    """A sole temporary-unavailable model remains eligible for price evidence."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html().replace(
+            "荣耀Magic8 第五代骁龙8至尊版 预估到手价¥ 4499 ¥ 4999",
+            "暂时缺货 荣耀Magic8 ¥6299 起 多款可选",
+        ),
+    )
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url.endswith(f"/product/{_PRODUCT_ID}.html")
+
+
 @pytest.mark.parametrize(
     ("task_model", "card_model"),
     [
         ("荣耀Magic8", "荣耀Magic8-Pro"),
         ("荣耀Magic8 Pro", "荣耀Magic8 Pro+"),
+        ("荣耀Magic8", "荣耀Magic8 RSR 保时捷设计"),
     ],
 )
 def test_honor_live_rejects_immediate_variant_delimiters_at_card_stage(

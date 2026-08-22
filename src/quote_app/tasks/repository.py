@@ -35,6 +35,8 @@ _INTERRUPTION_CODE = "PROCESS_INTERRUPTED"
 _INTERRUPTION_MESSAGE = "上次程序在任务执行过程中中断，已恢复为待处理"
 _LOGIN_CODE = "LOGIN_REQUIRED"
 _LOGIN_MESSAGE = "网站要求登录或安全验证，任务已暂停等待人工处理"
+_SECURITY_VERIFICATION_CODE = "SECURITY_VERIFICATION_REQUIRED"
+_SECURITY_VERIFICATION_MESSAGE = "网站触发安全验证，任务已暂停等待人工处理"
 _EVIDENCE_MESSAGES = {
     "EVIDENCE_MISSING": "正式证据文件不存在，任务已转为技术失败",
     "EVIDENCE_HASH_MISMATCH": "正式证据文件校验值不一致，任务已转为技术失败",
@@ -482,12 +484,25 @@ class SQLiteTaskRepository:
         *,
         token: AttemptToken,
         site: str,
+        security_verification: bool = False,
         updated_at: datetime | None = None,
     ) -> None:
         if not isinstance(site, str) or not site.strip():
             raise ValueError("site must not be blank")
         if not isinstance(token, AttemptToken) or token.task_id != task_id:
             raise RepositoryError("尝试令牌与等待登录任务不匹配")
+        if type(security_verification) is not bool:
+            raise ValueError("security_verification must be a bool")
+        error_code = (
+            _SECURITY_VERIFICATION_CODE
+            if security_verification
+            else _LOGIN_CODE
+        )
+        error_message = (
+            _SECURITY_VERIFICATION_MESSAGE
+            if security_verification
+            else _LOGIN_MESSAGE
+        )
         timestamp = _timestamp(updated_at)
         with self._transaction() as connection:
             self._require_current_attempt(
@@ -504,8 +519,8 @@ class SQLiteTaskRepository:
                 """,
                 (
                     timestamp,
-                    _LOGIN_CODE,
-                    _LOGIN_MESSAGE,
+                    error_code,
+                    error_message,
                     token.task_id,
                     token.generation,
                     token.attempt_number,

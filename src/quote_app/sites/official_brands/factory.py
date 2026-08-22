@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 
 from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.official import OfficialSiteAdapter
+from quote_app.sites.official_brands.apple import AppleOfficialAdapter
 from quote_app.sites.official_brands.huawei import HuaweiOfficialAdapter
 from quote_app.sites.official_brands.oppo import OppoOfficialAdapter
 from quote_app.sites.registry import RegisteredSiteAdapter
@@ -12,10 +13,6 @@ from quote_app.sites.official_brands.xiaomi import XiaomiOfficialAdapter
 from quote_app.tasks.models import WebsiteChannel
 
 OfficialAdapterFactory = Callable[[SiteSpec], RegisteredSiteAdapter]
-
-
-class AppleOfficialAdapter(OfficialSiteAdapter):
-    """Routing placeholder for the future Apple live adapter."""
 
 
 _BRAND_ADAPTER_FACTORIES: Mapping[str, OfficialAdapterFactory] = {

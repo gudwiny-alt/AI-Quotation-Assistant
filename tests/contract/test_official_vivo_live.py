@@ -136,6 +136,8 @@ class _VivoPage(_OfficialFixturePage):
         self.active = "blank"
         self.fill_calls: list[str] = []
         self.search_submissions = 0
+        self.home_waits = 0
+        self.home_search_visible_after_waits: int | None = None
         self.search_result_url_override: str | None = None
         self.events: list[str] = []
         self.waits = 0
@@ -156,9 +158,12 @@ class _VivoPage(_OfficialFixturePage):
         self.capture_scale_original: float | None = None
         self.capture_scale_marker = False
         self.capture_scales: list[float] = []
+        self.detail_requires_eighty_percent = False
+        self.detail_business_read_scales: list[float] = []
         self.capture_selector_arguments: list[dict[str, object]] = []
         self.scroll_offset = 0.0
         self.light_scrolls: list[float] = []
+        self.reset_scrolls: list[float] = []
         self.viewport_height = 800.0
         self.blocker: tuple[float, float, bool] | None = None
         self.remove_color_on_refresh = False
@@ -195,10 +200,30 @@ class _VivoPage(_OfficialFixturePage):
         self._url, self.active = url, "results"
 
     def locator(self, selector: str) -> _VivoLocator:
+        if self.active == "detail" and selector == "section.base-info h1.name":
+            self.detail_business_read_scales.append(self.capture_scale)
+            if self.detail_requires_eighty_percent and self.capture_scale != 0.8:
+                return _VivoLocator(self, [])
         return _VivoLocator(self, _official_select(self.active_root().descendants(), selector))
 
     def wait_for_timeout(self, milliseconds: float) -> None:
         self.wait_timeout_milliseconds.append(milliseconds)
+        if self.active == "detail" and milliseconds == 300:
+            # The shared scale helper waits for visual reflow.  It must not
+            # advance vivo's independent 250 ms option/price settlement clock.
+            return
+        if self.active == "home":
+            self.home_waits += 1
+            if (
+                self.home_search_visible_after_waits is not None
+                and self.home_waits >= self.home_search_visible_after_waits
+            ):
+                next(
+                    node
+                    for node in self.home_root.descendants()
+                    if node.tag == "input" and node.attrs.get("placeholder") == "请输入搜索内容"
+                ).attrs.pop("hidden", None)
+            return
         if self.active == "detail":
             if self.pending_selection:
                 group, (node, reveal_after) = next(iter(self.pending_selection.items()))
@@ -385,6 +410,12 @@ class _VivoPage(_OfficialFixturePage):
             self.light_scrolls.append(delta)
             self.scroll_offset += delta
             return True
+        if "window.scrollTo" in script:
+            if not isinstance(argument, dict) or argument.get("top") != 0:
+                raise AssertionError("capture reset requires the document top")
+            self.reset_scrolls.append(self.scroll_offset)
+            self.scroll_offset = 0.0
+            return True
         if not isinstance(argument, dict) or tuple(argument) != (
             "title",
             "price",
@@ -494,7 +525,7 @@ class _VivoPage(_OfficialFixturePage):
         return self.blocker_top_at_center(box) is None
 
 
-def _task(model: str = "vivo X200") -> WebsiteTask:
+def _task(model: str = "vivo X200", *, color: str = "辰夜黑") -> WebsiteTask:
     return WebsiteTask(
         task_id="vivo",
         run_id="vivo-contract",
@@ -505,7 +536,7 @@ def _task(model: str = "vivo X200") -> WebsiteTask:
         model_name=model,
         ram="12GB",
         storage="256GB",
-        color="辰夜黑",
+        color=color,
         channel=WebsiteChannel.OFFICIAL,
     )
 
@@ -684,6 +715,66 @@ def test_vivo_searches_once_then_quotes_final_stable_selected_offer() -> None:
         and observation.url == page.url
         and page.option_clicks == ["capacity", "color"]
     )
+
+
+def test_vivo_accepts_task_color_with_trailing_peise_suffix() -> None:
+    page = _VivoPage()
+
+    result = _adapter().observe(_task(color="辰夜黑配色"), page)
+
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert result.price == Decimal("4399")
+    assert result.semantic_state.color == "辰夜黑配色"
+
+
+def test_vivo_scales_detail_before_first_business_read_and_restores_after_observation() -> None:
+    page = _VivoPage()
+    page.detail_requires_eighty_percent = True
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.detail_business_read_scales[0] == 0.8
+    assert page.capture_scales == [0.8]
+    assert page.capture_scale == 1.0
+    assert page.capture_scale_marker is False
+
+
+def test_vivo_configuration_no_capture_reenters_eighty_percent_before_evidence_read() -> None:
+    page = _VivoPage()
+    _remove_detail_option(page, "capacity", "12GB+256GB")
+    adapter = _adapter()
+    observation = adapter.observe(_task(), page)
+    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+    assert page.capture_scale == 1.0
+
+    adapter.prepare_capture_view(_task(), page, observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        _task(), page, observation.semantic_state
+    )
+
+    assert page.capture_scale == 0.8
+    assert rectangles
+    adapter.restore_capture_view(_task(), page, observation.semantic_state)
+    assert page.capture_scale == 1.0
+
+
+def test_vivo_waits_for_late_home_search_input_before_submitting() -> None:
+    page = _VivoPage()
+    search = next(
+        node
+        for node in page.home_root.descendants()
+        if node.tag == "input" and node.attrs.get("placeholder") == "请输入搜索内容"
+    )
+    search.attrs["hidden"] = ""
+    page.home_search_visible_after_waits = 3
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.home_waits == 3
+    assert page.fill_calls == ["vivo X200"]
+    assert page.search_submissions == 1
 
 
 def test_vivo_waits_multiple_rounds_for_late_exact_card_instead_of_no_model() -> None:
@@ -1011,7 +1102,7 @@ def test_vivo_sale_price_scope_chooses_lower_current_value_only() -> None:
 
 @pytest.mark.parametrize(
     ("viewport", "scale", "needs_scroll"),
-    [(800.0, [], False), (340.0, [0.8], False), (280.0, [0.8], True)],
+    [(800.0, [0.8, 0.8], False), (340.0, [0.8, 0.8], False), (280.0, [0.8, 0.8], True)],
 )
 def test_vivo_capture_reads_real_four_proofs_from_scaled_domrects(
     viewport: float, scale: list[float], needs_scroll: bool
@@ -1032,6 +1123,22 @@ def test_vivo_capture_reads_real_four_proofs_from_scaled_domrects(
         selectors == _capture_selector_specs() for selectors in page.capture_selector_arguments
     )
     assert page.light_scrolls == ([expected_delta] if needs_scroll else [])
+
+
+def test_vivo_capture_enters_eighty_percent_before_proof_read_and_skips_unneeded_scroll() -> None:
+    page = _VivoPage()
+    adapter = _adapter()
+    observation = adapter.observe(_task(), page)
+    assert page.capture_scale == 1.0
+
+    adapter.prepare_capture_view(_task(), page, observation.semantic_state)
+
+    assert page.capture_scale == 0.8
+    assert page.capture_scales == [0.8, 0.8]
+    assert page.light_scrolls == []
+
+    adapter.restore_capture_view(_task(), page, observation.semantic_state)
+    assert page.capture_scale == 1.0
 
 
 def test_vivo_capture_fixed_overlay_uses_each_proof_hit_test_and_clears_after_one_scroll() -> None:
@@ -1059,7 +1166,7 @@ def test_vivo_capture_persistent_overlay_or_disappearing_proof_fails_closed() ->
     page.blocker = (280, 330, False)
     with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
         adapter.prepare_capture_view(_task(), page, observation.semantic_state)
-    assert page.capture_scales == [0.8] and len(page.light_scrolls) == 1
+    assert page.capture_scales == [0.8, 0.8] and len(page.light_scrolls) == 1
     gone = _VivoPage()
     second = _adapter()
     state = second.observe(_task(), gone)
@@ -1077,8 +1184,30 @@ def test_vivo_capture_can_scroll_up_once_from_real_union_geometry() -> None:
 
     adapter.prepare_capture_view(_task(), page, observation.semantic_state)
 
-    assert page.capture_scales == [0.8]
+    assert page.capture_scales == [0.8, 0.8]
     assert page.light_scrolls == [-40.0]
+
+
+def test_vivo_capture_clears_large_option_click_scroll_before_framing() -> None:
+    page = _VivoPage()
+    adapter = _adapter()
+    observation = adapter.observe(_task(), page)
+    page.viewport_height = 340
+    # Playwright may auto-scroll the lower SKU options into view while clicking
+    # them.  This leaves the product title far above the viewport even though
+    # all four proofs fit together from the top at 80%.
+    page.scroll_offset = 260
+
+    adapter.prepare_capture_view(_task(), page, observation.semantic_state)
+
+    assert page.capture_scale == 0.8
+    assert page.scroll_offset == 0
+    assert page.reset_scrolls == [260.0]
+    assert page.light_scrolls == []
+    assert all(
+        page.visible_and_unobscured(node)
+        for node in page.proofs_from_selectors(_capture_selector_specs()).values()
+    )
 
 
 def test_vivo_capture_rejects_a_proof_union_taller_than_safe_viewport() -> None:
@@ -1103,7 +1232,7 @@ def test_vivo_capture_does_not_rewrite_an_existing_eighty_percent_scale() -> Non
     adapter.prepare_capture_view(_task(), page, observation.semantic_state)
 
     assert page.capture_scale == 0.8
-    assert page.capture_scales == []
+    assert page.capture_scales == [0.8]
 
     adapter.restore_capture_view(_task(), page, observation.semantic_state)
 

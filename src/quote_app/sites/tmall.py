@@ -15,6 +15,7 @@ from quote_app.evidence.semantic_state import VerifiedSemanticState
 from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.detail_capture_view import (
     apply_capture_scale,
+    ensure_capture_scale,
     position_detail_for_capture,
     position_result_cards_for_capture,
     restore_capture_scale,
@@ -479,8 +480,7 @@ class TmallAdapter:
         self._validate_task(task)
         browser_page = _playwright_page(page)
         try:
-            if expected.outcome is BusinessOutcome.NO_MODEL:
-                apply_capture_scale(browser_page, scale=0.8)
+            ensure_capture_scale(browser_page, scale=0.8)
             self._prepare_capture_view_at_scale(task, browser_page, expected)
         except BaseException:
             try:

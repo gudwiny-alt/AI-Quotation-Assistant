@@ -154,7 +154,7 @@ EXPECTED_RECORDS = (
     (
         "苹果",
         WebsiteChannel.OFFICIAL,
-        "https://www.apple.com.cn/iphone/",
+        "https://www.apple.com.cn/shop/buy-iphone",
         "Apple iPhone",
         PricePolicy.HIGHEST,
     ),
