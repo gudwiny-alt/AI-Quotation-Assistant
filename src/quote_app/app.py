@@ -42,7 +42,7 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "六品牌分阶段全站版（官网天猫先行·京东独立收尾）2026.08.23.120"
+APP_BUILD_LABEL = "六品牌分阶段任务登记修复版（官网天猫先行·京东独立收尾）2026.08.23.121"
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：选中品牌依次执行全部官网、全部天猫，最后执行全部京东；"
     "京东独立登录状态会持久保留，首次使用无需预先登录；"

@@ -819,6 +819,64 @@ def test_service_finishes_official_and_tmall_before_isolated_jd_session(
     }
 
 
+def test_checkpoint_snapshot_allows_jd_tasks_to_be_registered_in_later_phase(
+    tmp_path: Path,
+) -> None:
+    """Catches a regular-phase checkpoint reading JD before JD is registered."""
+    from quote_app.domain.models import QuoteMonth
+    from quote_app.services.web_run import _WebsiteRunSnapshotIndex
+    from quote_app.tasks.models import (
+        SCHEMA_VERSION,
+        InputFingerprint,
+        RunRecord,
+        RunState,
+    )
+    from quote_app.tasks.repository import SQLiteTaskRepository
+
+    run = RunRecord(
+        run_id="run-1",
+        schema_version=SCHEMA_VERSION,
+        quote_month=QuoteMonth(2026, 8),
+        input_fingerprints=tuple(
+            InputFingerprint(
+                source_role=role,
+                path=tmp_path / f"{role}.xlsx",
+                sha256=str(index) * 64,
+                byte_size=index,
+                modified_ns=index,
+            )
+            for index, role in enumerate(("base", "marketing", "bop"), start=1)
+        ),
+        output_dir=tmp_path / "output",
+        browser_profile_dir=tmp_path / "profile",
+        associated_rows_snapshot="[]",
+        associated_rows_snapshot_path=None,
+        associated_rows_snapshot_sha256=hashlib.sha256(b"[]").hexdigest(),
+        quote_path=None,
+        report_path=None,
+        state=RunState.CREATED,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    official = _task(
+        "official",
+        channel=WebsiteChannel.OFFICIAL,
+        output_row=2,
+    )
+    jd = _task("jd", channel=WebsiteChannel.JD, output_row=2)
+
+    with SQLiteTaskRepository(tmp_path / "tasks.sqlite3") as repository:
+        repository.create_run(run)
+        repository.upsert_task(official)
+        snapshot = _WebsiteRunSnapshotIndex((official, jd), repository).update(
+            official.task_id
+        )
+
+    assert snapshot.observations == ()
+    assert snapshot.results == ()
+    assert snapshot.waiting_task_ids == frozenset()
+
+
 def test_service_darwin_beta_uses_manual_window_session_defaults(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

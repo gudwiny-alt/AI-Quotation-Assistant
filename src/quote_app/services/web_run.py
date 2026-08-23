@@ -30,7 +30,7 @@ from quote_app.tasks.models import (
     WebsiteResult,
     WebsiteTask,
 )
-from quote_app.tasks.repository import SQLiteTaskRepository
+from quote_app.tasks.repository import RepositoryError, SQLiteTaskRepository
 from quote_app.tasks.runner import WebsiteTaskRunner, task_sort_key
 from quote_app.tasks.scheduler import EventSink, ManualActionEvent
 
@@ -501,6 +501,11 @@ class _WebsiteRunSnapshotIndex:
         self._tasks = tuple(tasks)
         self._repository = repository
         self._task_ids = frozenset(task.task_id for task in self._tasks)
+        self._deferred_task_ids = frozenset(
+            task.task_id
+            for task in self._tasks
+            if task.channel is WebsiteChannel.JD
+        )
         self._observations: dict[str, WebsiteObservationCheckpoint] = {}
         self._results: dict[str, WebsiteResult] = {}
         self._waiting: set[str] = set()
@@ -540,7 +545,14 @@ class _WebsiteRunSnapshotIndex:
             self._results.pop(task_id, None)
         else:
             self._results[task_id] = result
-        if self._repository.task_state(task_id) is TaskState.WAITING_FOR_LOGIN:
+        try:
+            state = self._repository.task_state(task_id)
+        except RepositoryError:
+            if task_id not in self._deferred_task_ids:
+                raise
+            self._waiting.discard(task_id)
+            return
+        if state is TaskState.WAITING_FOR_LOGIN:
             self._waiting.add(task_id)
         else:
             self._waiting.discard(task_id)

@@ -312,6 +312,7 @@ class JDAdapter:
             task,
             browser_page,
         )
+        detail_url: str | None
         if current_search_result is not None:
             stage[0] = "京东搜索页"
             if isinstance(current_search_result, AdapterObservation):
@@ -1556,7 +1557,9 @@ class JDAdapter:
             # when none of those visible cards matches the requested model,
             # the grid itself is the required no-quotation evidence.
             _validate_store_search_url(page.url, expected_model=task.model_name)
-            rectangles = (_css_rect(result_region, "result_region"),)
+            rectangles: tuple[CssRect, ...] = (
+                _css_rect(result_region, "result_region"),
+            )
         else:
             rectangles = (
                 _css_rect(result_search_input, "search_keyword"),
