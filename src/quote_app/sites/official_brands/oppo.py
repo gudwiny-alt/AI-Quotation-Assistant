@@ -62,6 +62,13 @@ _SEARCH_INPUTS = (
     ".v-combobox input",
     ".official-oppo-search-input",
 )
+_SEARCH_QUERY_EVIDENCE = (
+    '[data-oppo-role="search-query"]',
+    ".v-combobox__selection",
+    ".v-autocomplete__selection",
+    ".v-select__selection",
+    '[class*="search-keyword"]',
+)
 _RESULT_REGIONS = (
     '[data-oppo-role="results"]',
     ".five-warp",
@@ -367,12 +374,19 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                 restore_capture_scale(browser_page)
                 raise
         else:
-            current_business = self._read_business_state(task, browser_page)
-            current_state = self.build_observation(
-                task, current_business
-            ).semantic_state
-            if not self._same_legal_no_business_state(current_state, expected):
-                raise LayoutRecognitionError("OPPO legal-no capture view changed")
+            try:
+                if expected.outcome is BusinessOutcome.NO_MODEL:
+                    ensure_capture_scale(browser_page, scale=0.8)
+                current_business = self._read_business_state(task, browser_page)
+                current_state = self.build_observation(
+                    task, current_business
+                ).semantic_state
+                if not self._same_legal_no_business_state(current_state, expected):
+                    raise LayoutRecognitionError("OPPO legal-no capture view changed")
+            except Exception:
+                if expected.outcome is BusinessOutcome.NO_MODEL:
+                    restore_capture_scale(browser_page)
+                raise
         self._prepared.add(key)
 
     def restore_capture_view(
@@ -383,7 +397,10 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
     ) -> None:
         browser_page = _playwright_page(page)
         self._prepared.discard((id(browser_page), task.task_id, expected.current_sku))
-        if expected.outcome is not BusinessOutcome.NO_MODEL:
+        if expected.outcome in {
+            BusinessOutcome.PRICE_FOUND,
+            BusinessOutcome.NO_MODEL,
+        }:
             restore_capture_scale(browser_page)
 
     def capture_rectangles_for_capture(
@@ -433,7 +450,7 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             self.raise_if_manual_action(page)
             scope = self._search_scope(page)
             keyword = (
-                self._search_keyword(scope, task.model_name)
+                self._search_query_evidence(scope, task.model_name)
                 if scope is not None
                 else None
             )
@@ -449,11 +466,14 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                 else None
             )
             explicit_empty = self._explicit_empty_result(scope)
+            result_complete = self._result_list_complete(scope)
             if stable_reads >= 3 and region is not None:
                 if self._preferred_exact_result_link(page, task) is not None:
                     return
                 if keyword is not None:
                     if explicit_empty:
+                        return
+                    if result_complete and signature:
                         return
                     if elapsed >= 40 and signature:
                         return
@@ -686,7 +706,8 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
         region = _first_visible(scope, _RESULT_REGIONS)
         links = _visible(scope, _PRODUCT_LINKS)
         explicit_empty = self._explicit_empty_result(scope)
-        if region is None or (not links and not explicit_empty):
+        result_complete = self._result_list_complete(scope)
+        if region is None or (not links and not explicit_empty and not result_complete):
             raise LayoutRecognitionError("OPPO no-model evidence is incomplete")
         if self._preferred_exact_result_link(page, task) is not None:
             raise LayoutRecognitionError("OPPO exact model exists on no-model page")
@@ -705,10 +726,28 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
 
     def _require_search_keyword(self, page: Any, model_name: str) -> Any:
         scope = self._search_scope(page)
-        keyword = self._search_keyword(scope, model_name) if scope is not None else None
+        keyword = (
+            self._search_query_evidence(scope, model_name)
+            if scope is not None
+            else None
+        )
         if keyword is not None:
             return keyword
         raise LayoutRecognitionError("OPPO search keyword does not match the task")
+
+    def _search_query_evidence(self, scope: Any, model_name: str) -> Any | None:
+        keyword = self._search_keyword(scope, model_name)
+        if keyword is not None:
+            return keyword
+        wanted = normalize_product_text(model_name)
+        return next(
+            (
+                candidate
+                for candidate in _visible(scope, _SEARCH_QUERY_EVIDENCE)
+                if normalize_product_text(candidate.inner_text()) == wanted
+            ),
+            None,
+        )
 
     def _search_keyword(self, scope: Any, model_name: str) -> Any | None:
         return next(
@@ -725,6 +764,14 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             return False
         return any(
             "未找到相关商品" in marker.inner_text().strip()
+            for marker in _visible(scope, _EMPTY_RESULTS)
+        )
+
+    def _result_list_complete(self, scope: Any | None) -> bool:
+        if scope is None:
+            return False
+        return any(
+            "没有更多了" in marker.inner_text().strip()
             for marker in _visible(scope, _EMPTY_RESULTS)
         )
 

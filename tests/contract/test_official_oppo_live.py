@@ -207,6 +207,39 @@ class _OppoResultPageWithClearedSearchInput(_OppoFixturePage):
                 node.attrs["value"] = ""
 
 
+class _OppoNoModelPageWithVisibleQuery(
+    _OppoResultPageWithClearedSearchInput
+):
+    def __init__(self) -> None:
+        super().__init__("no_model.html")
+        results = next(
+            node
+            for node in self.root.descendants()
+            if node.attrs.get("data-screen") == "results"
+        )
+        dialog = next(
+            node
+            for node in results.descendants()
+            if node.attrs.get("data-oppo-role") == "search-dialog"
+        )
+        query = _OfficialNode(
+            "div",
+            {
+                "data-oppo-role": "search-query",
+                "style": "left:20px;top:20px;width:280px;height:36px",
+            },
+            dialog,
+        )
+        query.text_parts = ["OPPO A6 5G"]
+        dialog.children.insert(1, query)
+        empty_result = next(
+            node
+            for node in results.descendants()
+            if node.attrs.get("data-oppo-role") == "empty-results"
+        )
+        empty_result.text_parts = ["没有更多了"]
+
+
 def _spec() -> Any:
     return next(
         spec
@@ -674,6 +707,49 @@ def test_oppo_emits_formal_no_model_evidence_after_stable_search_results() -> No
         "search_keyword",
         "result_region",
     )
+
+
+def test_oppo_accepts_visible_search_query_when_result_input_value_is_cleared() -> None:
+    page = _OppoNoModelPageWithVisibleQuery()
+    _set_result_cards(
+        page,
+        (
+            ("OPPO A6i+ 8GB+256GB 冰川蓝", "/cn/web/products/40101.html"),
+            ("OPPO A6 Pro 12GB+256GB 流光白", "/cn/web/products/40102.html"),
+            ("OPPO A6x 8GB+256GB 冰川蓝", "/cn/web/products/40103.html"),
+        ),
+    )
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert observation.price is None
+    assert tuple(rect.role for rect in observation.css_rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    assert len(page.wait_timeout_milliseconds) <= 4
+
+
+def test_oppo_no_model_capture_uses_80_percent_and_restores_after_capture() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoNoModelPageWithVisibleQuery()
+    observation = adapter.observe(task, page)
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert page.capture_scale == 0.8
+    assert tuple(
+        rect.role
+        for rect in adapter.capture_rectangles_for_capture(
+            task, page, observation.semantic_state
+        )
+    ) == ("search_keyword", "result_region")
+
+    adapter.restore_capture_view(task, page, observation.semantic_state)
+
+    assert page.capture_scale == 1.0
 
 
 def test_oppo_homepage_product_links_do_not_bypass_the_real_search_submission() -> None:
