@@ -107,9 +107,15 @@ class _HuaweiLocator(_OfficialLocator):
         )
         page.active = "results"
 
-    def click(self) -> None:
+    def click(self, **_kwargs: object) -> None:
         page = _huawei_page(self.page)
         node = self.nodes[0]
+        card_only_detail = node.attrs.get("data-card-only-detail")
+        if card_only_detail is not None:
+            if page.active != "results":
+                raise AssertionError("current VMALL card click must start from results")
+            page.goto(card_only_detail)
+            return
         current: _OfficialNode | None = node
         modern_detail = None
         while current is not None and modern_detail is None:
@@ -194,6 +200,7 @@ class _HuaweiPage(_OfficialFixturePage):
         self.ambiguous_capacity_after_price_waits: int | None = None
         self.unstable_prices = False
         self.price_poll = 0
+        self.price_missing_polls: set[int] = set()
         self.title_override: str | None = None
         self.redirect_url: str | None = None
         self.capture_scale = 1.0
@@ -400,7 +407,14 @@ class _HuaweiPage(_OfficialFixturePage):
     def next_current_price(self, node: _OfficialNode) -> str:
         if node.attrs.get("hidden") is not None:
             return ""
-        if not self.unstable_prices or node is not self.price_nodes()[0]:
+        if node is not self.price_nodes()[0]:
+            return node.text
+        if self.price_poll in self.price_missing_polls:
+            self.price_poll += 1
+            return ""
+        if not self.unstable_prices:
+            if self.price_missing_polls:
+                self.price_poll += 1
             return node.text
         values = ("¥4999", "¥5099", "¥4899", "¥5099")
         value = values[self.price_poll % len(values)]
@@ -881,6 +895,37 @@ def test_huawei_current_exact_text_card_enters_numeric_detail_without_legacy_sel
     assert result.url == DETAIL
 
 
+def test_huawei_current_portal_card_enters_detail_by_clicking_the_whole_card() -> None:
+    """The live React grid binds navigation to the card, not the title child."""
+
+    page = _HuaweiPage()
+    _set_huawei_cards(page, ())
+    react_root = _OfficialNode("main", {"id": "react-root"}, page.results_root)
+    card = _OfficialNode(
+        "div",
+        {
+            "data-testid": "0-searchProduct",
+            "data-card-only-detail": DETAIL,
+        },
+        react_root,
+    )
+    title = _OfficialNode(
+        "div",
+        {"data-testid": "vui_text_container"},
+        card,
+    )
+    title.text_parts = ["HUAWEI Mate 70 Pro"]
+    card.children.append(title)
+    react_root.children.append(card)
+    page.results_root.children.append(react_root)
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert result.price == Decimal("4999")
+    assert result.url == DETAIL
+
+
 def test_huawei_current_exact_anchor_title_enters_detail_without_legacy_card_classes() -> None:
     """The current VMALL grid exposes the exact title on its clickable anchor."""
 
@@ -1314,6 +1359,19 @@ def test_huawei_requires_three_seconds_of_continuous_price_stability() -> None:
     result = _adapter().observe(_task(), page)
     assert result.price == Decimal("4999")
     assert page.price_waits >= 12
+
+
+def test_huawei_same_price_stabilizes_across_transient_react_price_gaps() -> None:
+    """A re-rendered price node may disappear briefly without changing the offer."""
+
+    page = _HuaweiPage()
+    page.price_missing_polls = {2, 5, 8, 11}
+    for node in page.price_nodes()[1:]:
+        node.attrs["hidden"] = ""
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.price == Decimal("4999")
 
 
 @pytest.mark.parametrize("drift", ["identity", "configuration"])

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from time import monotonic
+from typing import Any, Literal
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 from quote_app.evidence.geometry import CssRect
@@ -93,6 +95,11 @@ _RESULT_REGION = ".search-result"
 _RESULT_CARD = "li[data-product-id]"
 _RESULT_TITLE = ".product-name"
 _RESULT_LINK = "a.product-link"
+_PORTAL_RESULT_REGIONS = ("#react-root", 'main[data-testid="search-result-root"]', "main")
+_PORTAL_RESULT_CARD = '[data-testid$="-searchProduct"]'
+_PORTAL_TEXT = '[data-testid="vui_text_container"]'
+_PORTAL_CONFIRMATION_TICKS = 40
+_PORTAL_CONFIRMATION_WAIT_MS = 250
 _CURRENT_RESULT_TITLES = (
     "a",
     "button",
@@ -330,6 +337,13 @@ class _PriceUnavailable(LayoutRecognitionError):
     """The approved current-price region has not completed yet."""
 
 
+@dataclass(frozen=True, slots=True)
+class _ExactSearchTarget:
+    locator: Any
+    source: Literal["legacy_link", "portal_card", "current_text"]
+    prevalidated_url: str | None
+
+
 class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
     """Independent VMALL adapter for canonical Huawei official tasks."""
 
@@ -387,20 +401,84 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self.require_approved_url(browser.url)
         if not _is_search_url(browser.url):
             raise LayoutRecognitionError("VMALL direct search did not reach search results")
-        exact_link = self._wait_for_exact_result(browser, task)
-        if exact_link is None:
+        target = self._wait_for_exact_result(browser, task)
+        if target is None:
             return self.build_observation(task, self._no_model_state(task, browser))
-        raw_href = exact_link.get_attribute("href")
-        target_url = _approved_product_url(raw_href) if raw_href else None
-        exact_link.click()
+        before_url = str(browser.url)
+        controlled_pages = _context_pages(browser)
+        if target.source == "portal_card":
+            _press_portal_card(browser, target.locator)
+            self._wait_for_portal_detail(
+                browser,
+                before_url=before_url,
+                controlled_pages=controlled_pages,
+            )
+            return self._observe_detail(task, browser)
+        target.locator.click()
         browser.wait_for_load_state("domcontentloaded")
         self.raise_if_manual_action(browser)
-        if target_url is not None:
-            if _detail_identity(browser.url).product_key != _detail_identity(target_url).product_key:
+        if target.prevalidated_url is not None:
+            if (
+                _detail_identity(browser.url).product_key
+                != _detail_identity(target.prevalidated_url).product_key
+            ):
                 raise LayoutRecognitionError("VMALL final detail identity changed")
         elif not _is_detail_url(browser.url):
             raise LayoutRecognitionError("VMALL exact-model card did not open a detail page")
         return self._observe_detail(task, browser)
+
+    def _wait_for_portal_detail(
+        self,
+        page: Any,
+        *,
+        before_url: str,
+        controlled_pages: tuple[Any, ...] | None,
+    ) -> None:
+        opened_pages: tuple[Any, ...] = ()
+        deadline = monotonic() + (
+            _PORTAL_CONFIRMATION_TICKS * _PORTAL_CONFIRMATION_WAIT_MS / 1000
+        )
+        try:
+            for tick in range(_PORTAL_CONFIRMATION_TICKS + 1):
+                self.raise_if_manual_action(page)
+                opened_pages = _merge_pages(
+                    opened_pages,
+                    _new_context_pages(controlled_pages, _context_pages(page)),
+                )
+                if len(opened_pages) > 1:
+                    raise LayoutRecognitionError(
+                        "VMALL portal card opened multiple new pages"
+                    )
+                current_url = str(getattr(page, "url", ""))
+                if current_url != before_url:
+                    if not _is_detail_url(current_url):
+                        raise LayoutRecognitionError(
+                            "VMALL portal card did not reach approved numeric detail"
+                        )
+                    page.wait_for_load_state("domcontentloaded")
+                    self.raise_if_manual_action(page)
+                    return
+                if len(opened_pages) == 1:
+                    popup = opened_pages[0]
+                    popup_url = str(getattr(popup, "url", ""))
+                    if popup_url != "about:blank":
+                        if not _is_detail_url(popup_url):
+                            raise LayoutRecognitionError(
+                                "VMALL portal popup did not reach approved detail"
+                            )
+                        page.goto(popup_url, wait_until="domcontentloaded")
+                        page.wait_for_load_state("domcontentloaded")
+                        self.raise_if_manual_action(page)
+                        return
+                if tick < _PORTAL_CONFIRMATION_TICKS:
+                    remaining_ms = _remaining_portal_wait_ms(deadline)
+                    if remaining_ms > 0:
+                        page.wait_for_timeout(remaining_ms)
+            raise LayoutRecognitionError(
+                "VMALL portal card bounded detail confirmation timed out"
+            )
+        finally:
+            _close_pages(opened_pages)
 
     def _resume_validated(
         self,
@@ -513,14 +591,16 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             and snapshot.identity.product_key.isdigit()
         )
 
-    def _wait_for_exact_result(self, page: Any, task: WebsiteTask) -> Any | None:
+    def _wait_for_exact_result(
+        self, page: Any, task: WebsiteTask
+    ) -> _ExactSearchTarget | None:
         saw_invalid_exact = False
         for tick in range(41):
             self.raise_if_manual_action(page)
-            link, invalid = self._first_approved_exact_card(page, task.model_name)
+            target, invalid = self._first_approved_exact_card(page, task.model_name)
             saw_invalid_exact = saw_invalid_exact or invalid
-            if link is not None:
-                return link
+            if target is not None:
+                return target
             if tick < 40:
                 page.wait_for_timeout(250)
         if saw_invalid_exact:
@@ -531,7 +611,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self,
         page: Any,
         model_name: str,
-    ) -> tuple[Any | None, bool]:
+    ) -> tuple[_ExactSearchTarget | None, bool]:
         region = _first_visible(page, (_RESULT_REGION,))
         saw_invalid = False
         legacy_cards = _visible(region, (_RESULT_CARD,)) if region is not None else ()
@@ -548,10 +628,25 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             except ValueError:
                 saw_invalid = True
                 continue
-            return link, saw_invalid
+            return (
+                _ExactSearchTarget(
+                    link,
+                    "legacy_link",
+                    _approved_product_url(link.get_attribute("href")),
+                ),
+                saw_invalid,
+            )
+        portal_region = _first_visible(page, _PORTAL_RESULT_REGIONS)
+        if portal_region is not None:
+            for card in _portal_cards(portal_region):
+                if any(
+                    _title_matches(model_name, title.inner_text())
+                    for title in _visible(card, (_PORTAL_TEXT,))
+                ):
+                    return _ExactSearchTarget(card, "portal_card", None), saw_invalid
         exact_text = _current_exact_text_target(page, model_name)
         if exact_text is not None:
-            return exact_text, saw_invalid
+            return _ExactSearchTarget(exact_text, "current_text", None), saw_invalid
         # VMALL's current grid can be rendered beside, rather than inside,
         # the legacy ``.search-result`` shell.  Search visible title nodes on
         # the whole approved search page after the strict legacy-card pass;
@@ -561,7 +656,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         for selector in _CURRENT_RESULT_TITLES:
             for title in _visible(scope, (selector,)):
                 if _title_matches(model_name, title.inner_text()):
-                    return title, saw_invalid
+                    return _ExactSearchTarget(title, "current_text", None), saw_invalid
         return None, saw_invalid
 
     def _require_detail_title(self, page: Any, model_name: str) -> Any:
@@ -709,8 +804,11 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             try:
                 current = self._instant_offer(task, page, identity)
             except _PriceUnavailable:
-                previous = None
-                stable_intervals = 0
+                # React may replace the visible price node for a single render
+                # tick even though the selected SKU and numeric price do not
+                # change. Preserve the last verified offer across that empty
+                # tick; any different valid offer still resets stability below.
+                pass
             else:
                 stable_intervals = stable_intervals + 1 if current == previous else 0
                 previous = current
@@ -890,6 +988,57 @@ def _page(page: BrowserPage) -> Any:
     return page
 
 
+def _context_pages(page: Any) -> tuple[Any, ...] | None:
+    try:
+        context_value = getattr(page, "context", None)
+        context = context_value() if callable(context_value) else context_value
+        pages_value = getattr(context, "pages", None)
+        pages = pages_value() if callable(pages_value) else pages_value
+    except (AttributeError, RuntimeError):
+        return None
+    return tuple(pages) if isinstance(pages, (list, tuple)) else None
+
+
+def _remaining_portal_wait_ms(deadline: float) -> int:
+    remaining_ms = int((deadline - monotonic()) * 1000)
+    return max(0, min(_PORTAL_CONFIRMATION_WAIT_MS, remaining_ms))
+
+
+def _new_context_pages(
+    before: tuple[Any, ...] | None,
+    current: tuple[Any, ...] | None,
+) -> tuple[Any, ...]:
+    if before is None or current is None:
+        return ()
+    before_ids = {id(candidate) for candidate in before}
+    return tuple(candidate for candidate in current if id(candidate) not in before_ids)
+
+
+def _merge_pages(*groups: tuple[Any, ...]) -> tuple[Any, ...]:
+    merged: list[Any] = []
+    seen: set[int] = set()
+    for group in groups:
+        for candidate in group:
+            if id(candidate) not in seen:
+                merged.append(candidate)
+                seen.add(id(candidate))
+    return tuple(merged)
+
+
+def _close_pages(pages: tuple[Any, ...]) -> None:
+    for candidate in pages:
+        try:
+            closed = (
+                candidate.is_closed()
+                if callable(getattr(candidate, "is_closed", None))
+                else False
+            )
+            if not closed and callable(getattr(candidate, "close", None)):
+                candidate.close()
+        except (AttributeError, RuntimeError):
+            continue
+
+
 def _visible(scope: Any, selectors: tuple[str, ...]) -> tuple[Any, ...]:
     if scope is None:
         return ()
@@ -911,6 +1060,42 @@ def _visible(scope: Any, selectors: tuple[str, ...]) -> tuple[Any, ...]:
 def _first_visible(scope: Any, selectors: tuple[str, ...]) -> Any | None:
     found = _visible(scope, selectors)
     return found[0] if found else None
+
+
+def _portal_cards(scope: Any) -> tuple[Any, ...]:
+    return tuple(
+        card
+        for card in _visible(scope, (_PORTAL_RESULT_CARD,))
+        if str(card.get_attribute("data-testid") or "").endswith("-searchProduct")
+    )
+
+
+def _press_portal_card(page: Any, card: Any) -> None:
+    try:
+        scroll_into_view = getattr(card, "scroll_into_view_if_needed", None)
+        if callable(scroll_into_view):
+            scroll_into_view()
+        box = card.bounding_box()
+        mouse = getattr(page, "mouse", None)
+        mouse_click = getattr(mouse, "click", None)
+        if (
+            isinstance(box, dict)
+            and all(
+                isinstance(box.get(key), int | float)
+                for key in ("x", "y", "width", "height")
+            )
+            and float(box["width"]) > 0
+            and float(box["height"]) > 0
+            and callable(mouse_click)
+        ):
+            mouse_click(
+                float(box["x"]) + float(box["width"]) / 2,
+                float(box["y"]) + float(box["height"]) / 2,
+            )
+            return
+    except (AttributeError, RuntimeError):
+        pass
+    card.click(force=True)
 
 
 def _approved_product_url(value: str | None) -> str:
