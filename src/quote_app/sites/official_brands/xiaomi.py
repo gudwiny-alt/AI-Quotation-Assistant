@@ -84,6 +84,7 @@ _EMPTY_RESULTS = (
 _PRODUCT_LINKS = (
     '[data-xiaomi-role="product-link"]',
     'a[href*="/shop/buy?product_id="]',
+    'a[href*="/shop/buy?"][href*="product_id="]',
     'a[href*="/shop/buy/detail"][href*="product_id="]',
 )
 _PRODUCT_TITLES = (

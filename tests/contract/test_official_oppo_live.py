@@ -848,6 +848,28 @@ def test_oppo_no_model_capture_uses_80_percent_and_restores_after_capture() -> N
     assert page.capture_scale == 1.0
 
 
+def test_oppo_no_model_capture_positions_query_and_complete_results_after_scale() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoNoModelPageWithVisibleQuery()
+    observation = adapter.observe(task, page)
+    page.proofs_fit = False
+    page.proofs_fit_after_scale = False
+    page.proofs_fit_after_position = True
+    page.proof_union_bottom = 830.0
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert page.capture_scale == 0.8
+    assert page.position_attempts == 1
+    assert tuple(
+        rect.role
+        for rect in adapter.capture_rectangles_for_capture(
+            task, page, observation.semantic_state
+        )
+    ) == ("search_keyword", "result_region")
+
+
 def test_oppo_homepage_product_links_do_not_bypass_the_real_search_submission() -> None:
     page = _OppoFixturePage("normal.html")
     store = next(

@@ -380,6 +380,29 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             try:
                 if expected.outcome is BusinessOutcome.NO_MODEL:
                     ensure_capture_scale(browser_page, scale=0.8)
+                    proofs = self._no_model_capture_proof_locators(
+                        task, browser_page
+                    )
+                    if not _proof_group_fits_current_viewport(
+                        browser_page, proofs
+                    ):
+                        if not _scroll_proof_group_into_view(
+                            browser_page, proofs
+                        ):
+                            raise LayoutRecognitionError(
+                                "OPPO search keyword and complete result region "
+                                "must fit the same viewport"
+                            )
+                        proofs = self._no_model_capture_proof_locators(
+                            task, browser_page
+                        )
+                        if not _proof_group_fits_current_viewport(
+                            browser_page, proofs
+                        ):
+                            raise LayoutRecognitionError(
+                                "OPPO search keyword and complete result region "
+                                "must fit the same viewport"
+                            )
                 current_business = self._read_business_state(task, browser_page)
                 current_state = self.build_observation(
                     task, current_business
@@ -432,6 +455,18 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
         if title is None:
             raise LayoutRecognitionError("OPPO product title is unavailable")
         return (title, price, capacity, color)
+
+    def _no_model_capture_proof_locators(
+        self, task: WebsiteTask, page: Any
+    ) -> tuple[Any, Any]:
+        keyword = self._require_search_keyword(page, task.model_name)
+        scope = self._search_scope(page)
+        region = _first_visible(scope, _RESULT_REGIONS) if scope is not None else None
+        if region is None:
+            raise LayoutRecognitionError(
+                "OPPO complete no-model result region is unavailable"
+            )
+        return keyword, region
 
     def _search_scope(self, page: Any) -> Any | None:
         return _first_visible(page, _SEARCH_DIALOGS)

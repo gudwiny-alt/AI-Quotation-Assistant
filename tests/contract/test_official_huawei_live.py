@@ -890,6 +890,40 @@ def test_huawei_current_exact_anchor_title_enters_detail_without_legacy_card_cla
     assert result.url == DETAIL
 
 
+def test_huawei_current_card_outside_legacy_region_ignores_stale_top_search_text() -> None:
+    """The visible exact card is authoritative even when VMALL's header is stale."""
+
+    class _CurrentGridPage(_HuaweiPage):
+        def goto(self, url: str, **kwargs: object) -> None:
+            super().goto(url, **kwargs)
+            if self.active != "results":
+                return
+            search = next(
+                node
+                for node in self.results_root.descendants()
+                if node.attrs.get("id") == "search-kw"
+            )
+            search.attrs["value"] = "WATCH GT 7"
+
+    page = _CurrentGridPage()
+    _set_huawei_cards(page, ())
+    current_grid = _OfficialNode("section", {"class": "goods-grid-current"}, page.results_root)
+    exact_title = _OfficialNode(
+        "h2",
+        {"data-current-vmall-detail": DETAIL},
+        current_grid,
+    )
+    exact_title.text_parts = ["HUAWEI Mate 70 Pro"]
+    current_grid.children.append(exact_title)
+    page.results_root.children.append(current_grid)
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert result.price == Decimal("4999")
+    assert result.url == DETAIL
+
+
 @pytest.mark.parametrize("reveal_after", [18, 39])
 def test_huawei_waits_for_late_exact_card_through_full_search_window(reveal_after: int) -> None:
     page = _HuaweiPage()

@@ -549,13 +549,15 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 saw_invalid = True
                 continue
             return link, saw_invalid
-        if legacy_cards:
-            return None, saw_invalid
-        scope = region if region is not None else page
-        wanted = normalize_product_text(model_name)
+        # VMALL's current grid can be rendered beside, rather than inside,
+        # the legacy ``.search-result`` shell.  Search visible title nodes on
+        # the whole approved search page after the strict legacy-card pass;
+        # clicking the exact title itself bubbles through the current card.
+        # The header search input is deliberately not part of this evidence.
+        scope = page
         for selector in _CURRENT_RESULT_TITLES:
             for title in _visible(scope, (selector,)):
-                if normalize_product_text(title.inner_text()) == wanted:
+                if _title_matches(model_name, title.inner_text()):
                     return title, saw_invalid
         return None, saw_invalid
 

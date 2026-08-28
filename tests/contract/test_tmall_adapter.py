@@ -205,8 +205,12 @@ class _Locator:
             option_kind = self.page.option_kind(node)
             if option_kind is not None:
                 self.page.capture_view_positions.append(option_kind)
+                if option_kind == "capacity":
+                    self.page.capture_centered = True
             return ""
         if "getBoundingClientRect" in script:
+            if self.page.capture_position_mode == "ready_then_center_breaks":
+                return not self.page.capture_centered
             return True
         color = "rgb(0, 0, 0)"
         effective_line_through = False
@@ -266,6 +270,7 @@ class _FixturePage:
         detail_ready_after: int | None = None,
         risk_control_ready_after: int | None = None,
         capture_scale_samples: tuple[tuple[float, float], ...] | None = None,
+        capture_position_mode: str = "normal",
     ) -> None:
         parser = _DocumentParser()
         source = (
@@ -308,6 +313,8 @@ class _FixturePage:
         self.capture_scale_restore_count = 0
         self.capture_scale_samples = capture_scale_samples
         self.capture_scale_sample_index = 0
+        self.capture_position_mode = capture_position_mode
+        self.capture_centered = False
         self.scale_restored = False
         self.window_scroll_offsets: list[int] = []
         self.wait_timeout_milliseconds: list[float] = []
@@ -569,6 +576,22 @@ class _FixturePage:
             and self.option_click_counts[option_kind] == 1
         ):
             return
+        if (
+            self.selection_mode == "capacity_dom_rebuild"
+            and option_kind == "capacity"
+            and self.option_click_counts[option_kind] == 1
+        ):
+            assert node.parent is not None
+            replacement = _Node(node.tag, dict(node.attrs), node.parent)
+            replacement.attrs["aria-selected"] = "true"
+            replacement.text_parts = list(node.text_parts)
+            replacement.children = list(node.children)
+            for child in replacement.children:
+                child.parent = replacement
+            node.attrs["aria-selected"] = "false"
+            index = node.parent.children.index(node)
+            node.parent.children[index] = replacement
+            return
         if self.selection_mode == "async":
             self.pending_selections[node] = 2
             return
@@ -726,6 +749,14 @@ def _huawei_spec() -> SiteSpec:
         spec
         for spec in load_site_catalog()
         if spec.brand == "华为" and spec.channel is WebsiteChannel.TMALL
+    )
+
+
+def _apple_spec() -> SiteSpec:
+    return next(
+        spec
+        for spec in load_site_catalog()
+        if spec.brand == "苹果" and spec.channel is WebsiteChannel.TMALL
     )
 
 
@@ -1032,6 +1063,26 @@ def test_oppo_re_resolves_and_retries_capacity_after_ignored_hydration_click() -
     observation = TmallAdapter(_oppo_spec()).observe(task, cast(Any, page))
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.option_click_counts["capacity"] == 2
+
+
+def test_honor_re_resolves_capacity_after_sku_dom_rebuild() -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    task = _task(brand="HONOR", model_name="荣耀Power2")
+    page = _FixturePage(
+        html=html,
+        after_search_url=_honor_power2_result_url(),
+        selection_mode="capacity_dom_rebuild",
+    )
+
+    observation = TmallAdapter(_honor_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
     assert page.option_click_counts["capacity"] == 2
 
 
@@ -2155,6 +2206,16 @@ def test_detail_requires_one_exact_approved_seller(seller_html: str) -> None:
         _observe(html=html)
 
 
+def test_apple_detail_accepts_bounded_alias_of_same_official_flagship_store() -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "Apple官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "apple.tmall.com")
+    page = _FixturePage(html=html)
+    page.activate("product")
+
+    TmallAdapter(_apple_spec())._require_approved_detail_seller(cast(Any, page))
+
+
 def test_detail_model_is_revalidated() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         '<h1 class="tmall-detail-title">小米 15</h1>',
@@ -2447,6 +2508,32 @@ def test_tmall_price_and_capture_do_not_require_stock_or_delivery_region() -> No
     assert observation.price == Decimal("4399")
     assert page.capture_scales == [0.8]
     assert page.capture_view_positions == ["capacity"]
+
+
+def test_huawei_tmall_keeps_an_already_complete_four_proof_capture_frame() -> None:
+    task = _task(
+        brand="华为",
+        model_name="华为畅享 90 Pro Max",
+        ram="8GB",
+        storage="256GB",
+        color="白色",
+    )
+    page = _FixturePage(
+        html=_huawei_storage_only_html(),
+        after_search_url=(
+            "https://huaweistore.tmall.com/"
+            "?q=%E5%8D%8E%E4%B8%BA%E7%95%85%E4%BA%AB%2090%20Pro%20Max"
+            + _LIVE_RESULTS_STATIC_QUERY
+        ),
+        capture_position_mode="ready_then_center_breaks",
+    )
+    adapter = TmallAdapter(_huawei_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.capture_view_positions == []
 
 
 def test_tmall_detail_scales_before_selection_and_positions_only_for_capture() -> None:

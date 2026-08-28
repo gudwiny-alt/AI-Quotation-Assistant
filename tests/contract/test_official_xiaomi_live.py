@@ -400,6 +400,14 @@ class _XiaomiFixturePage:
                 and "/shop/buy/detail" in node.get("href", "")
                 and "product_id=" in node.get("href", "")
             ]
+        if selector == 'a[href*="/shop/buy?"][href*="product_id="]':
+            return [
+                node
+                for node in active
+                if node.tag == "a"
+                and "/shop/buy?" in node.get("href", "")
+                and "product_id=" in node.get("href", "")
+            ]
         if selector == "li":
             return [node for node in active if node.tag == "li"]
         if selector == "button":
@@ -577,6 +585,30 @@ def test_xiaomi_accepts_tracked_detail_card_when_product_id_is_not_first_query_p
     )
     assert page.goto_calls[1] == (
         "https://www.mi.com/shop/buy/detail?cfrom=search&product_id=24648"
+    )
+
+
+def test_xiaomi_accepts_tracked_buy_card_when_product_id_is_not_first_query_parameter() -> None:
+    """Current Xiaomi cards may put tracking fields before the numeric product id."""
+    page = _XiaomiFixturePage("normal.html")
+    exact_link = next(
+        node
+        for node in page.root.iter()
+        if node.get("data-xiaomi-role") == "product-link"
+        and node.get("href") == "/shop/buy?product_id=24648"
+    )
+    exact_link.attrib.pop("data-xiaomi-role")
+    exact_link.set(
+        "href",
+        "/shop/buy?cfrom=search&product_id=24648",
+    )
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == "https://www.mi.com/shop/buy/detail?cfrom=search&product_id=24648"
+    assert page.goto_calls[1] == (
+        "https://www.mi.com/shop/buy?cfrom=search&product_id=24648"
     )
 
 

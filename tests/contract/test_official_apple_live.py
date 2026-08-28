@@ -804,6 +804,54 @@ def test_apple_capture_uses_one_bounded_group_scroll_for_all_four_proofs() -> No
     )
 
 
+def test_apple_capture_scrolls_up_when_color_heading_is_slightly_clipped() -> None:
+    """The selected swatch alone must not hide a clipped ``颜色 - 黑色`` heading."""
+    from quote_app.sites.official_brands.apple import AppleOfficialAdapter
+
+    page = _ApplePaintAwareScrollPage(
+        """
+        <section data-screen="store"><a class="thumb"
+          href="/shop/buy-iphone/iphone-17/mg734ch/a"><h2>iPhone 17</h2></a></section>
+        <section data-screen="product" hidden><main>
+          <a data-autom="stickynavHeader"
+            style="left:50px;top:10px;width:160px;height:30px">iPhone 17</a>
+          <h1 style="left:50px;top:90px;width:400px;height:45px">购买 iPhone 17</h1>
+          <section data-apple-role="color-group" data-apple-scroll-proof="true"
+            style="left:760px;top:-8px;width:440px;height:150px">
+            <h2 data-apple-scroll-proof="true"
+              style="left:760px;top:-8px;width:240px;height:36px">颜色 - 黑色</h2>
+            <input id=":r0:" type="radio" name="color" checked hidden>
+            <label for=":r0:"
+              style="left:780px;top:45px;width:160px;height:58px">黑色</label>
+          </section>
+          <section data-apple-role="storage-group"><h2>存储容量</h2>
+            <input id=":r1:" type="radio" name="capacity" checked hidden>
+            <label for=":r1:" data-apple-scroll-proof="true"
+              style="left:760px;top:330px;width:440px;height:100px">256GB RMB 5,999</label>
+          </section>
+        </main></section>
+        """
+    )
+    task = replace(_apple_task(), storage="256GB", color="黑色")
+    adapter = AppleOfficialAdapter(_apple_spec())
+
+    observation = adapter.observe(task, page)
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task, page, observation.semantic_state
+    )
+
+    assert page.capture_scroll_deltas
+    assert page.capture_scroll_deltas[0] < 0
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "title",
+        "price",
+        "capacity",
+        "color",
+    )
+    assert rectangles[3].y >= 24
+
+
 def test_apple_capture_uses_small_steps_until_compact_title_is_really_visible() -> None:
     """No Apple capture positioning step may exceed the approved 80px bound."""
     from quote_app.sites.official_brands.apple import AppleOfficialAdapter

@@ -413,24 +413,21 @@ class TmallAdapter:
                 (_css_rect(capacity, "capacity"),),
             )
         self._prepare_exact_option(capacity)
-        retry_capacity: Callable[[], Any] | None = None
-        if normalize_product_text(task.brand) == "欧珀":
-            def _retry_capacity() -> Any:
-                current_group = self._sku_option_group(
-                    browser_page,
-                    "存储容量",
-                )
-                return self._exact_option(
+        def retry_capacity() -> Any:
+            current_group = self._sku_option_group(
+                browser_page,
+                "存储容量",
+            )
+            return self._exact_option(
+                current_group,
+                TMALL_SKU_VALUES,
+                lambda label: self._capacity_label_matches(
                     current_group,
-                    TMALL_SKU_VALUES,
-                    lambda label: self._capacity_label_matches(
-                        current_group,
-                        task,
-                        label,
-                    ),
-                    semantic_name="capacity",
-                )
-            retry_capacity = _retry_capacity
+                    task,
+                    label,
+                ),
+                semantic_name="capacity",
+            )
 
         self._wait_for_selected(
             browser_page,
@@ -617,6 +614,12 @@ class TmallAdapter:
             capacity=capacity,
             color=color,
             site_name="Tmall",
+            preserve_ready_position=(
+                normalize_product_text(task.brand) == "华为"
+            ),
+            upward_recovery_steps=(
+                2 if normalize_product_text(task.brand) == "华为" else 0
+            ),
         )
 
     def restore_capture_view(
@@ -1067,7 +1070,11 @@ class TmallAdapter:
         sellers = visible_locators(page, TMALL_DETAIL_SELLER_MARKERS)
         if (
             len(sellers) != 1
-            or sellers[0].inner_text().strip() != self.spec.store_name
+            or not _tmall_detail_seller_name_matches(
+                sellers[0].inner_text(),
+                self.spec.store_name,
+                self.spec.brand,
+            )
         ):
             raise LayoutRecognitionError(
                 "Tmall product detail seller does not match the approved store"
@@ -1656,6 +1663,22 @@ def _tmall_store_name_matches(actual_name: str, expected_name: str) -> bool:
     if actual == expected:
         return True
     return actual.replace("手机", "") == expected.replace("手机", "")
+
+
+def _tmall_detail_seller_name_matches(
+    actual_name: str,
+    expected_name: str,
+    brand: str,
+) -> bool:
+    """Match the same approved seller with an Apple-only bounded alias."""
+
+    if _tmall_store_name_matches(actual_name, expected_name):
+        return True
+    if normalize_product_text(brand) != "苹果":
+        return False
+    actual = _compact_store_name(actual_name).upper().replace("STORE", "")
+    expected = _compact_store_name(expected_name).upper().replace("STORE", "")
+    return bool(actual) and actual == expected
 
 
 def _tmall_store_title_matches(title: str, expected_name: str) -> bool:

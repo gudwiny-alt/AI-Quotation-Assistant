@@ -989,27 +989,45 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
         )
 
     def _selected_color_capture_evidence(self, page: Any, color: Any) -> Any:
-        """Use the exact card when possible, otherwise its verified group.
+        """Frame the selected colour together with its visible group heading.
 
         Apple's React chooser can leave the selected colour label with a
-        short-lived inconclusive hit-test even while the complete colour
-        fieldset is visibly painted.  Selection still comes exclusively from
-        the exact native radio verified by ``_require_selected`` above.  The
-        containing group is only a visual screenshot proof, and remains
-        subject to the normal strict exposure check and bounded reframing.
+        valid rectangle even when the top of ``颜色 - 黑色`` is just outside
+        the viewport.  Selection still comes exclusively from the exact
+        native radio verified by ``_require_selected`` above.  For screenshot
+        framing, prefer the rendered containing group so the bounded reframe
+        moves that heading fully on screen; fall back to the exact card only
+        when the group has no usable rendered geometry.
         """
 
         evidence = _option_evidence(page, color)
-        state = _paint_state(evidence)
-        if state is None or state[2] or not state[1]:
+        evidence_state = _paint_state(evidence)
+        if evidence_state is None:
             return evidence
         group = self._group(page, "color")
         if group is None:
             return evidence
-        group_state = _paint_state(group)
-        if group_state is None or not group_state[0]:
-            return evidence
-        return group
+        if not evidence_state[2]:
+            if not evidence_state[1]:
+                return evidence
+            group_state = _paint_state(group)
+            return (
+                group
+                if group_state is not None and group_state[0]
+                else evidence
+            )
+        for heading in _visible(group, ("h1", "h2", "h3", "legend")):
+            text = normalize_product_text(heading.inner_text())
+            if not any(label in text for label in _GROUP_LABELS["color"]):
+                continue
+            heading_state = _paint_state(heading)
+            if (
+                heading_state is not None
+                and heading_state[0]
+                and not heading_state[2]
+            ):
+                return heading
+        return evidence
 
     def _reframe_capture_proofs(
         self,
