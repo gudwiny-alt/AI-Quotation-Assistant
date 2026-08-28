@@ -1676,8 +1676,18 @@ def _tmall_detail_seller_name_matches(
         return True
     if normalize_product_text(brand) != "苹果":
         return False
-    actual = _compact_store_name(actual_name).upper().replace("STORE", "")
-    expected = _compact_store_name(expected_name).upper().replace("STORE", "")
+    actual = (
+        _compact_store_name(actual_name)
+        .upper()
+        .replace("苹果", "APPLE")
+        .replace("STORE", "")
+    )
+    expected = (
+        _compact_store_name(expected_name)
+        .upper()
+        .replace("苹果", "APPLE")
+        .replace("STORE", "")
+    )
     return bool(actual) and actual == expected
 
 
@@ -1732,9 +1742,34 @@ def _is_approved_selected(locator: Any) -> bool:
     if locator.get_attribute("aria-checked") == "true":
         return True
     classes = set((locator.get_attribute("class") or "").lower().split())
-    return bool(classes & _SELECTED_CLASSES) or any(
+    if bool(classes & _SELECTED_CLASSES) or any(
         class_name.startswith("isselected--") for class_name in classes
-    )
+    ):
+        return True
+    try:
+        return locator.evaluate(
+            """
+            element => {
+              // TMALL_OPTION_SELECTED: the live SKU renderer may put the
+              // selected marker on the immediate value wrapper.
+              let current = element;
+              for (let depth = 0; current && depth < 2; depth += 1) {
+                if (current.getAttribute('aria-selected') === 'true' ||
+                    current.getAttribute('aria-checked') === 'true') return true;
+                const classes = Array.from(current.classList || [])
+                  .map(value => String(value).toLowerCase());
+                if (classes.some(value =>
+                    ['selected', 'checked', 'active'].includes(value) ||
+                    value.startsWith('isselected--') ||
+                    value.startsWith('valueitemselected--'))) return true;
+                current = current.parentElement;
+              }
+              return false;
+            }
+            """
+        ) is True
+    except (AttributeError, RuntimeError):
+        return False
 
 
 def _result_card_is_unavailable(card: Any) -> bool:

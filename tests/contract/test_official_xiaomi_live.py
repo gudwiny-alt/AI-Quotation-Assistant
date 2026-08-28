@@ -131,6 +131,11 @@ class _Locator:
         if href:
             self.page.goto(href)
             return
+        for ancestor in [node, *self.page.ancestors_of(node)]:
+            current_detail = ancestor.get("data-current-xiaomi-detail")
+            if current_detail:
+                self.page.goto(current_detail)
+                return
         role = node.get("data-xiaomi-role", "")
         test_kind = node.get("data-test-kind")
         if role.endswith("-option") or test_kind is not None:
@@ -758,6 +763,49 @@ def test_xiaomi_emits_only_approved_legal_no_states(
     assert observation.outcome is outcome
     assert observation.price is None
     assert tuple(rect.role for rect in observation.css_rectangles) == roles
+
+
+def test_xiaomi_current_non_anchor_exact_card_enters_detail() -> None:
+    page = _XiaomiFixturePage("normal.html")
+    result_region = next(
+        node
+        for node in page.root.iter()
+        if node.get("data-xiaomi-role") == "results"
+    )
+    legacy_exact_title = next(
+        node
+        for node in result_region.iter()
+        if node.get("data-xiaomi-role") == "product-title"
+        and "".join(node.itertext()).strip() == "Xiaomi 17 Max"
+    )
+    legacy_exact_title.text = "Xiaomi 17 Max Pro"
+    card = ET.SubElement(
+        result_region,
+        "article",
+        {"data-current-xiaomi-detail": "/shop/buy/detail?product_id=24651"},
+    )
+    ET.SubElement(card, "span").text = "Xiaomi 17 Max"
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
+
+
+def test_xiaomi_current_no_model_grid_does_not_require_anchor_links() -> None:
+    page = _XiaomiFixturePage("no_model.html")
+    for node in page.root.iter():
+        if node.tag == "a":
+            node.tag = "article"
+            node.attrib.pop("href", None)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rect.role for rect in observation.css_rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
 
 
 def test_xiaomi_reacquires_locators_after_spa_rebuild_and_waits_for_price() -> None:

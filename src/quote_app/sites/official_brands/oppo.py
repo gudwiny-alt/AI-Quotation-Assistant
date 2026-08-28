@@ -179,6 +179,9 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
     def __init__(self, spec: Any) -> None:
         super().__init__(spec)
         self._prepared: set[tuple[int, str, str]] = set()
+        self._prepared_rectangles: dict[
+            tuple[int, str, str], tuple[CssRect, ...]
+        ] = {}
 
     def _manual_action(self, page: BrowserPage) -> OfficialManualAction | None:
         browser_page = _playwright_page(page)
@@ -409,6 +412,9 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                 ).semantic_state
                 if not self._same_legal_no_business_state(current_state, expected):
                     raise LayoutRecognitionError("OPPO legal-no capture view changed")
+                self._prepared_rectangles[key] = tuple(
+                    current_business.capture_view.css_rectangles
+                )
             except Exception:
                 if expected.outcome is BusinessOutcome.NO_MODEL:
                     restore_capture_scale(browser_page)
@@ -423,6 +429,9 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
     ) -> None:
         browser_page = _playwright_page(page)
         self._prepared.discard((id(browser_page), task.task_id, expected.current_sku))
+        self._prepared_rectangles.pop(
+            (id(browser_page), task.task_id, expected.current_sku), None
+        )
         if expected.outcome in {
             BusinessOutcome.PRICE_FOUND,
             BusinessOutcome.NO_MODEL,
@@ -437,6 +446,10 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
     ) -> tuple[CssRect, ...]:
         self._validate_task(task)
         self._validate_expected_state(task, expected)
+        key = (id(_playwright_page(page)), task.task_id, expected.current_sku)
+        prepared = self._prepared_rectangles.get(key)
+        if expected.outcome is not BusinessOutcome.PRICE_FOUND and prepared is not None:
+            return prepared
         current = self._read_business_state(task, page)
         current_state = self.build_observation(task, current).semantic_state
         if expected.outcome is BusinessOutcome.PRICE_FOUND:

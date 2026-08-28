@@ -110,7 +110,11 @@ class _HuaweiLocator(_OfficialLocator):
     def click(self) -> None:
         page = _huawei_page(self.page)
         node = self.nodes[0]
-        modern_detail = node.attrs.get("data-current-vmall-detail")
+        current: _OfficialNode | None = node
+        modern_detail = None
+        while current is not None and modern_detail is None:
+            modern_detail = current.attrs.get("data-current-vmall-detail")
+            current = current.parent
         if modern_detail is not None:
             if page.active != "results":
                 raise AssertionError("current VMALL card click must start from results")
@@ -217,6 +221,14 @@ class _HuaweiPage(_OfficialFixturePage):
     @root.setter
     def root(self, value: _OfficialNode) -> None:
         self._active_root = value
+
+    def get_by_text(self, value: str, *, exact: bool = False) -> _HuaweiLocator:
+        matches = []
+        for node in self.root.descendants():
+            text = node.text.strip()
+            if (text == value) if exact else (value in text):
+                matches.append(node)
+        return _HuaweiLocator(self, matches)
 
     def active_root(self) -> _OfficialNode:
         return {
@@ -921,6 +933,27 @@ def test_huawei_current_card_outside_legacy_region_ignores_stale_top_search_text
 
     assert result.outcome is BusinessOutcome.PRICE_FOUND
     assert result.price == Decimal("4999")
+    assert result.url == DETAIL
+
+
+def test_huawei_current_exact_text_click_bubbles_through_non_anchor_card() -> None:
+    """The current VMALL card is clickable even when its title has no href."""
+
+    page = _HuaweiPage()
+    _set_huawei_cards(page, ())
+    card = _OfficialNode(
+        "article",
+        {"data-current-vmall-detail": DETAIL},
+        page.results_root,
+    )
+    exact_title = _OfficialNode("em", {}, card)
+    exact_title.text_parts = ["HUAWEI Mate 70 Pro"]
+    card.children.append(exact_title)
+    page.results_root.children.append(card)
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
     assert result.url == DETAIL
 
 

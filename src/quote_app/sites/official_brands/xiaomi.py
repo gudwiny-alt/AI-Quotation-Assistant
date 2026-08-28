@@ -218,10 +218,21 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
 
         exact_link = self._exact_result_link(browser_page, task.model_name)
         if exact_link is None:
-            return self.build_observation(
-                task,
-                self._no_model_state(task, browser_page),
+            current_target = self._current_exact_result_target(
+                browser_page, task.model_name
             )
+            if current_target is None:
+                return self.build_observation(
+                    task,
+                    self._no_model_state(task, browser_page),
+                )
+            current_target.click()
+            browser_page.wait_for_load_state("domcontentloaded")
+            if not _is_detail_url(browser_page.url):
+                raise LayoutRecognitionError(
+                    "Xiaomi current product card did not reach a detail URL"
+                )
+            return self._observe_loaded_detail(task, browser_page)
         href = exact_link.get_attribute("href")
         card_url = _approved_product_url(href, allow_card=True)
         # Navigate the controlled page directly so a target=_blank card cannot
@@ -526,6 +537,22 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
         if len(distinct_ids) > 1:
             raise LayoutRecognitionError("Xiaomi exact model result is ambiguous")
         return exact[0][1] if exact else None
+
+    def _current_exact_result_target(
+        self, page: Any, model_name: str
+    ) -> Any | None:
+        getter = getattr(page, "get_by_text", None)
+        if not callable(getter):
+            return None
+        try:
+            candidates = getter(model_name, exact=True)
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                if candidate.is_visible():
+                    return candidate
+        except (AttributeError, RuntimeError):
+            return None
+        return None
 
     def _wait_for_search_results(self, page: Any, task: WebsiteTask) -> None:
         parsed = urlsplit(page.url)

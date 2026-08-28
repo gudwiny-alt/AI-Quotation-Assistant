@@ -870,6 +870,37 @@ def test_oppo_no_model_capture_positions_query_and_complete_results_after_scale(
     ) == ("search_keyword", "result_region")
 
 
+def test_oppo_no_model_capture_reuses_state_validated_during_positioning() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoNoModelPageWithVisibleQuery()
+    observation = adapter.observe(task, page)
+    original_reader = adapter._read_business_state
+    reads = 0
+
+    def guarded_reader(current_task: WebsiteTask, current_page: object) -> object:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise LayoutRecognitionError(
+                "search DOM rebuilt after validated positioning"
+            )
+        return original_reader(current_task, current_page)  # type: ignore[arg-type]
+
+    adapter._read_business_state = guarded_reader  # type: ignore[method-assign]
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task, page, observation.semantic_state
+    )
+
+    assert reads == 1
+    assert tuple(rect.role for rect in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+
+
 def test_oppo_homepage_product_links_do_not_bypass_the_real_search_submission() -> None:
     page = _OppoFixturePage("normal.html")
     store = next(

@@ -549,6 +549,9 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 saw_invalid = True
                 continue
             return link, saw_invalid
+        exact_text = _current_exact_text_target(page, model_name)
+        if exact_text is not None:
+            return exact_text, saw_invalid
         # VMALL's current grid can be rendered beside, rather than inside,
         # the legacy ``.search-result`` shell.  Search visible title nodes on
         # the whole approved search page after the strict legacy-card pass;
@@ -980,6 +983,40 @@ def _detail_identity(url: str) -> OfficialDetailIdentity:
 def _strip_brand_prefix(value: str) -> str:
     normalized = normalize_product_text(value)
     return re.sub(r"^(?:HUAWEI|华为)\s*", "", normalized, count=1)
+
+
+def _current_exact_text_target(page: Any, model_name: str) -> Any | None:
+    """Return a visible current-grid title without requiring a card selector."""
+
+    getter = getattr(page, "get_by_text", None)
+    if not callable(getter):
+        return None
+    normalized = normalize_product_text(model_name)
+    stripped = _strip_brand_prefix(model_name)
+    spellings = tuple(
+        dict.fromkeys(
+            value
+            for value in (
+                model_name.strip(),
+                normalized,
+                f"HUAWEI {stripped}",
+                f"华为{stripped}",
+            )
+            if value
+        )
+    )
+    for spelling in spellings:
+        try:
+            candidates = getter(spelling, exact=True)
+            # Prefer the deepest matching text node; a broad parent can have
+            # the same rendered text but no click handler of its own.
+            for index in reversed(range(candidates.count())):
+                candidate = candidates.nth(index)
+                if candidate.is_visible():
+                    return candidate
+        except (AttributeError, RuntimeError):
+            continue
+    return None
 
 
 def _title_matches(target: str, candidate: str) -> bool:

@@ -201,6 +201,24 @@ class _Locator:
 
     def evaluate(self, script: str) -> dict[str, object] | str | bool:
         node = self.nodes[0]
+        if "TMALL_OPTION_SELECTED" in script:
+            current: _Node | None = node
+            while current is not None:
+                classes = current.attrs.get("class", "").lower().split()
+                if any(
+                    name in {"selected", "checked", "active"}
+                    or name.startswith(
+                        ("isselected--", "valueitemselected--")
+                    )
+                    for name in classes
+                ):
+                    return True
+                if current.attrs.get("aria-selected") == "true":
+                    return True
+                if current.attrs.get("aria-checked") == "true":
+                    return True
+                current = current.parent
+            return False
         if "scrollIntoView" in script:
             option_kind = self.page.option_kind(node)
             if option_kind is not None:
@@ -591,6 +609,14 @@ class _FixturePage:
             node.attrs["aria-selected"] = "false"
             index = node.parent.children.index(node)
             node.parent.children[index] = replacement
+            return
+        if (
+            self.selection_mode == "capacity_generated_selected_class"
+            and option_kind == "capacity"
+        ):
+            node.attrs["class"] = (
+                node.attrs.get("class", "") + " valueItemSelected--live"
+            ).strip()
             return
         if self.selection_mode == "async":
             self.pending_selections[node] = 2
@@ -1084,6 +1110,25 @@ def test_honor_re_resolves_capacity_after_sku_dom_rebuild() -> None:
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.price == Decimal("4399")
     assert page.option_click_counts["capacity"] == 2
+
+
+def test_honor_accepts_capacity_generated_selected_class() -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    page = _FixturePage(
+        html=html,
+        after_search_url=_honor_power2_result_url(),
+        selection_mode="capacity_generated_selected_class",
+    )
+
+    observation = TmallAdapter(_honor_spec()).observe(
+        _task(brand="HONOR", model_name="荣耀Power2"), cast(Any, page)
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_honor_power2_uses_stable_visible_configuration_without_hidden_sku_attributes(
@@ -2209,6 +2254,16 @@ def test_detail_requires_one_exact_approved_seller(seller_html: str) -> None:
 def test_apple_detail_accepts_bounded_alias_of_same_official_flagship_store() -> None:
     html = _live_observed_html()
     html = html.replace("小米官方旗舰店", "Apple官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "apple.tmall.com")
+    page = _FixturePage(html=html)
+    page.activate("product")
+
+    TmallAdapter(_apple_spec())._require_approved_detail_seller(cast(Any, page))
+
+
+def test_apple_detail_accepts_chinese_brand_alias_of_same_official_store() -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "苹果官方旗舰店")
     html = html.replace("xiaomi.tmall.com", "apple.tmall.com")
     page = _FixturePage(html=html)
     page.activate("product")
