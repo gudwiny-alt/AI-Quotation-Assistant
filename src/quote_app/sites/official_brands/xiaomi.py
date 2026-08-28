@@ -84,6 +84,7 @@ _EMPTY_RESULTS = (
 _PRODUCT_LINKS = (
     '[data-xiaomi-role="product-link"]',
     'a[href*="/shop/buy?product_id="]',
+    'a[href*="/shop/buy/detail"][href*="product_id="]',
 )
 _PRODUCT_TITLES = (
     '[data-xiaomi-role="product-title"]',
@@ -509,7 +510,7 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
 
     def _exact_result_link(self, page: Any, model_name: str) -> Any | None:
         exact: list[tuple[str, Any]] = []
-        for link in _visible(page, _PRODUCT_LINKS):
+        for link in _visible_product_links(page):
             title = _link_title(link)
             if model_matches(model_name, title):
                 # An exact visible model with an illegal target is technical
@@ -535,7 +536,7 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
         elapsed_waits = 0
         for _ in range(41):
             self.raise_if_manual_action(page)
-            links = _visible(page, _PRODUCT_LINKS)
+            links = _visible_product_links(page)
             signature = tuple(
                 (_link_title(link), str(link.get_attribute("href") or ""))
                 for link in links
@@ -893,7 +894,7 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
     def _no_model_state(self, task: WebsiteTask, page: Any) -> OfficialBusinessState:
         keyword = self._require_search_keyword(page, task.model_name)
         region = _first_visible(page, _RESULT_REGIONS)
-        links = _visible(page, _PRODUCT_LINKS)
+        links = _visible_product_links(page)
         if region is None or (not links and not self._explicit_empty_result(page)):
             raise LayoutRecognitionError("Xiaomi no-model evidence is incomplete")
         if self._exact_result_link(page, task.model_name) is not None:
@@ -960,6 +961,23 @@ def _visible(scope: Any, selectors: tuple[str, ...]) -> tuple[Any, ...]:
             continue
         if found:
             break
+    return tuple(found)
+
+
+def _visible_product_links(scope: Any) -> tuple[Any, ...]:
+    """Collect mixed legacy and direct-detail card links without duplicates."""
+    found: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for selector in _PRODUCT_LINKS:
+        for link in _visible(scope, (selector,)):
+            key = (
+                str(link.get_attribute("href") or "").strip(),
+                _link_title(link),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(link)
     return tuple(found)
 
 

@@ -15,6 +15,26 @@ _ALIGN_RESULT_CARD_TO_VIEWPORT_BOTTOM = (
 _ALIGN_SEARCH_TO_VIEWPORT_TOP = (
     "(element) => element.scrollIntoView({block: 'start', inline: 'nearest'})"
 )
+_SMALL_UPWARD_NUDGE_IN_NEAREST_SCROLL_AREA = """
+(element) => {
+  const quotationSmallUpwardNudge = 80;
+  let current = element.parentElement;
+  while (current) {
+    const style = getComputedStyle(current);
+    const scrollable = /(auto|scroll|overlay)/.test(style.overflowY)
+      && current.scrollHeight > current.clientHeight;
+    if (scrollable) {
+      const before = current.scrollTop;
+      current.scrollTop = Math.max(0, before - quotationSmallUpwardNudge);
+      return current.scrollTop !== before;
+    }
+    current = current.parentElement;
+  }
+  const before = window.scrollY;
+  window.scrollBy(0, -quotationSmallUpwardNudge);
+  return window.scrollY !== before;
+}
+"""
 _IN_VIEWPORT = """
 (element) => {
   const rect = element.getBoundingClientRect();
@@ -27,6 +47,7 @@ _IN_VIEWPORT = """
 }
 """
 _POSITION_WAIT_MS = 300
+_SMALL_NUDGE_WAIT_MS = 120
 _CAPTURE_SCALE_WAIT_MS = 300
 _CAPTURE_SCALE_ATTRIBUTE = "data-quotation-capture-scale-original"
 _CAPTURE_VIEW_SAFE_STAGES = frozenset(
@@ -151,6 +172,8 @@ def position_detail_for_capture(
     capacity: Any,
     color: Any,
     site_name: str,
+    upward_recovery_steps: int = 0,
+    preserve_ready_position: bool = False,
 ) -> None:
     """Keep one detail page and find a viewport suitable for formal capture.
 
@@ -166,26 +189,122 @@ def position_detail_for_capture(
             safe_stage="结果区域定位",
         )
 
+    if not 0 <= upward_recovery_steps <= 8:
+        raise ValueError("upward recovery steps must be between 0 and 8")
+
+    # A valid frame must never be moved away before capture.  This is
+    # particularly important on JD, whose independently scrollable SKU panel
+    # can already be perfectly positioned by the product page itself.
+    if preserve_ready_position and _detail_capture_ready(
+        title=title,
+        prices=prices,
+        capacity=capacity,
+        color=color,
+    ):
+        return
+
     # Capacity is the lowest required SKU field on the current marketplace
     # layouts.  Center it once: with the fixed tall Mac browser frame this
     # keeps the title, price, colour and capacity together without the former
     # up/down recovery loop that could move a valid view away before capture.
     capacity.evaluate(_CENTER_IN_NEAREST_SCROLL_AREA)
     page.wait_for_timeout(_POSITION_WAIT_MS)
-    if (
-        _in_viewport(title, safe_stage="结果区域定位")
-        and any(
-            _in_viewport(price, safe_stage="结果区域定位")
-            for price in prices
-        )
-        and _in_viewport(capacity, safe_stage="结果区域定位")
-        and _in_viewport(color, safe_stage="结果区域定位")
+    if _detail_capture_ready(
+        title=title,
+        prices=prices,
+        capacity=capacity,
+        color=color,
     ):
         return
+
+    # JD detail pages sometimes centre the capacity correctly but leave the
+    # title just above the viewport.  Recover only by small, bounded upward
+    # nudges in the same scroll area; stop on the first legal frame.
+    for _ in range(upward_recovery_steps):
+        capacity.evaluate(_SMALL_UPWARD_NUDGE_IN_NEAREST_SCROLL_AREA)
+        page.wait_for_timeout(_SMALL_NUDGE_WAIT_MS)
+        if _detail_capture_ready(
+            title=title,
+            prices=prices,
+            capacity=capacity,
+            color=color,
+        ):
+            return
 
     raise CaptureViewGeometryError(
         f"{site_name} detail capture requires title, price, capacity and color "
         "in the same viewport",
+        safe_stage="结果区域定位",
+    )
+
+
+def fit_search_results_for_capture(
+    page: Any,
+    *,
+    search_input: Any | None,
+    result_region: Any,
+    result_targets: Sequence[Any] | None = None,
+    site_name: str,
+    scales: Sequence[float] = (0.8, 0.7, 0.6, 0.5),
+) -> CaptureScaleProof:
+    """Fit a JD no-model search proof without cropping its result region.
+
+    The first scale that contains both the matching search input (when one is
+    available) and the complete result region wins.  A retry starts at the
+    already active scale and only moves smaller, avoiding the former visible
+    zoom oscillation.
+    """
+
+    if not scales:
+        raise ValueError("capture scales must not be empty")
+    ordered = tuple(float(scale) for scale in scales)
+    if any(not 0.5 <= scale <= 1.0 for scale in ordered):
+        raise ValueError("capture scale must be between 0.5 and 1.0")
+    if any(left <= right for left, right in zip(ordered, ordered[1:])):
+        raise ValueError("capture scales must be strictly descending")
+
+    current_inline, current_computed = _capture_scale_sample(
+        page.evaluate(_READ_CAPTURE_SCALE)
+    )
+    candidates = ordered
+    if current_inline == current_computed and current_inline in ordered:
+        start = ordered.index(current_inline)
+        candidates = ordered[start:]
+
+    proof: CaptureScaleProof | None = None
+    proof_targets = tuple(result_targets or (result_region,))
+    anchor = search_input if search_input is not None else proof_targets[0]
+    for scale in candidates:
+        proof = ensure_capture_scale(page, scale=scale)
+        anchor.evaluate(_ALIGN_SEARCH_TO_VIEWPORT_TOP)
+        page.wait_for_timeout(_POSITION_WAIT_MS)
+        search_visible = search_input is None or _in_viewport(
+            search_input,
+            safe_stage="搜索框定位",
+        )
+        result_visible = all(
+            _in_viewport(target, safe_stage="结果区域定位")
+            for target in proof_targets
+        )
+        if search_visible and result_visible:
+            return proof
+        # One transient layout sample must not trigger another zoom.  Give the
+        # same scale one short settling sample before trying a smaller value.
+        page.wait_for_timeout(_SMALL_NUDGE_WAIT_MS)
+        search_visible = search_input is None or _in_viewport(
+            search_input,
+            safe_stage="搜索框定位",
+        )
+        result_visible = all(
+            _in_viewport(target, safe_stage="结果区域定位")
+            for target in proof_targets
+        )
+        if search_visible and result_visible:
+            return proof
+
+    raise CaptureViewGeometryError(
+        f"{site_name} no-model search input and complete result region "
+        "cannot share the capture viewport",
         safe_stage="结果区域定位",
     )
 
@@ -200,6 +319,7 @@ def position_result_cards_for_capture(
     prefer_search_anchor: bool = False,
     product_name_reader: Callable[[], Any | None] | None = None,
     empty_state: Any | None = None,
+    already_positioned: bool = False,
 ) -> None:
     """Place a legal no-model result where its visible card name is readable.
 
@@ -233,13 +353,15 @@ def position_result_cards_for_capture(
         return
     # JD's no-model screenshot must establish the searched keyword first while
     # retaining the visible product title used to rule out the requested model.
-    if prefer_search_anchor and search_input is not None:
+    if already_positioned:
+        pass
+    elif prefer_search_anchor and search_input is not None:
         search_input.evaluate(_ALIGN_SEARCH_TO_VIEWPORT_TOP)
     else:
         # The default result-card framing retains Tmall's existing behavior.
         product_card.evaluate(_ALIGN_RESULT_CARD_TO_VIEWPORT_BOTTOM)
     page.wait_for_timeout(_POSITION_WAIT_MS)
-    if search_input is not None and not _in_viewport(
+    if search_input is not None and not already_positioned and not _in_viewport(
         search_input,
         safe_stage="搜索框定位",
     ):
@@ -267,6 +389,24 @@ def _in_viewport(locator: Any, *, safe_stage: str) -> bool:
             safe_stage=safe_stage,
         )
     return value
+
+
+def _detail_capture_ready(
+    *,
+    title: Any,
+    prices: Sequence[Any],
+    capacity: Any,
+    color: Any,
+) -> bool:
+    return (
+        _in_viewport(title, safe_stage="结果区域定位")
+        and any(
+            _in_viewport(price, safe_stage="结果区域定位")
+            for price in prices
+        )
+        and _in_viewport(capacity, safe_stage="结果区域定位")
+        and _in_viewport(color, safe_stage="结果区域定位")
+    )
 
 
 def _capture_scale_sample(value: Any) -> tuple[float, float]:

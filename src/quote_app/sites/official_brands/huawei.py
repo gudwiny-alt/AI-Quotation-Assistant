@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.quality import CaptureQualityError
@@ -93,6 +93,17 @@ _RESULT_REGION = ".search-result"
 _RESULT_CARD = "li[data-product-id]"
 _RESULT_TITLE = ".product-name"
 _RESULT_LINK = "a.product-link"
+_CURRENT_RESULT_TITLES = (
+    "a",
+    "button",
+    '[role="link"]',
+    "h2",
+    "h3",
+    "h4",
+    "p",
+    "span",
+    "div",
+)
 _DETAIL_TITLE = "div#prd-detail-name[data-testid=prd-detail-name]"
 _PRICE_CANDIDATE = (
     "[data-prdid] .summary-price .current-price "
@@ -366,26 +377,29 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         page: BrowserPage,
     ) -> AdapterObservation:
         browser = _page(page)
-        browser.goto(_ENTRY, wait_until="domcontentloaded")
+        search_url = (
+            "https://www.vmall.com/portal/search/index.html?"
+            f"targetRoute=searchresult&searchWord={quote(task.model_name)}"
+        )
+        browser.goto(search_url, wait_until="domcontentloaded")
         browser.wait_for_load_state("domcontentloaded")
         self.raise_if_manual_action(browser)
         self.require_approved_url(browser.url)
-        search = _first_visible(browser, (_SEARCH_INPUT,))
-        if search is None:
-            raise LayoutRecognitionError("VMALL homepage search input is unavailable")
-        search.fill(task.model_name)
-        search.press("Enter")
         if not _is_search_url(browser.url):
-            raise LayoutRecognitionError("VMALL search submission did not reach search results")
+            raise LayoutRecognitionError("VMALL direct search did not reach search results")
         exact_link = self._wait_for_exact_result(browser, task)
         if exact_link is None:
             return self.build_observation(task, self._no_model_state(task, browser))
-        target_url = _approved_product_url(exact_link.get_attribute("href"))
+        raw_href = exact_link.get_attribute("href")
+        target_url = _approved_product_url(raw_href) if raw_href else None
         exact_link.click()
         browser.wait_for_load_state("domcontentloaded")
         self.raise_if_manual_action(browser)
-        if _detail_identity(browser.url).product_key != _detail_identity(target_url).product_key:
-            raise LayoutRecognitionError("VMALL final detail identity changed")
+        if target_url is not None:
+            if _detail_identity(browser.url).product_key != _detail_identity(target_url).product_key:
+                raise LayoutRecognitionError("VMALL final detail identity changed")
+        elif not _is_detail_url(browser.url):
+            raise LayoutRecognitionError("VMALL exact-model card did not open a detail page")
         return self._observe_detail(task, browser)
 
     def _resume_validated(
@@ -519,10 +533,9 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         model_name: str,
     ) -> tuple[Any | None, bool]:
         region = _first_visible(page, (_RESULT_REGION,))
-        if region is None:
-            return None, False
         saw_invalid = False
-        for card in _visible(region, (_RESULT_CARD,)):
+        legacy_cards = _visible(region, (_RESULT_CARD,)) if region is not None else ()
+        for card in legacy_cards:
             title = _first_visible(card, (_RESULT_TITLE,))
             if title is None or not _title_matches(model_name, title.inner_text()):
                 continue
@@ -536,6 +549,14 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 saw_invalid = True
                 continue
             return link, saw_invalid
+        if legacy_cards:
+            return None, saw_invalid
+        scope = region if region is not None else page
+        wanted = normalize_product_text(model_name)
+        for selector in _CURRENT_RESULT_TITLES:
+            for title in _visible(scope, (selector,)):
+                if normalize_product_text(title.inner_text()) == wanted:
+                    return title, saw_invalid
         return None, saw_invalid
 
     def _require_detail_title(self, page: Any, model_name: str) -> Any:
@@ -922,13 +943,23 @@ def _is_search_url(value: str) -> bool:
         parsed = urlsplit(value)
     except ValueError:
         return False
-    return (
+    if not (
         parsed.scheme == "https"
         and parsed.hostname == "www.vmall.com"
         and parsed.port in {None, 443}
         and parsed.username is None
         and parsed.password is None
-        and parsed.path == "/search"
+    ):
+        return False
+    if parsed.path == "/search":
+        return True
+    if parsed.path != "/portal/search/index.html":
+        return False
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    return (
+        query.get("targetRoute") == ["searchresult"]
+        and len(query.get("searchWord", ())) == 1
+        and bool(query["searchWord"][0].strip())
     )
 
 

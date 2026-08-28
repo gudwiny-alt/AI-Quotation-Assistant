@@ -392,6 +392,14 @@ class _XiaomiFixturePage:
                 for node in active
                 if node.tag == "a" and href_match.group("part") in node.get("href", "")
             ]
+        if selector == 'a[href*="/shop/buy/detail"][href*="product_id="]':
+            return [
+                node
+                for node in active
+                if node.tag == "a"
+                and "/shop/buy/detail" in node.get("href", "")
+                and "product_id=" in node.get("href", "")
+            ]
         if selector == "li":
             return [node for node in active if node.tag == "li"]
         if selector == "button":
@@ -527,6 +535,49 @@ def test_xiaomi_accepts_real_protocol_relative_product_card_url() -> None:
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.url == "https://www.mi.com/shop/buy/detail?product_id=24648"
     assert page.goto_calls[1] == "https://www.mi.com/shop/buy?product_id=24648"
+
+
+def test_xiaomi_accepts_direct_detail_product_card_url_without_legacy_role() -> None:
+    page = _XiaomiFixturePage("normal.html")
+    exact_link = next(
+        node
+        for node in page.root.iter()
+        if node.get("data-xiaomi-role") == "product-link"
+        and node.get("href") == "/shop/buy?product_id=24648"
+    )
+    exact_link.attrib.pop("data-xiaomi-role")
+    exact_link.set("href", "/shop/buy/detail?product_id=24648")
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == "https://www.mi.com/shop/buy/detail?product_id=24648"
+    assert page.goto_calls[1] == "https://www.mi.com/shop/buy/detail?product_id=24648"
+
+
+def test_xiaomi_accepts_tracked_detail_card_when_product_id_is_not_first_query_parameter() -> None:
+    page = _XiaomiFixturePage("normal.html")
+    exact_link = next(
+        node
+        for node in page.root.iter()
+        if node.get("data-xiaomi-role") == "product-link"
+        and node.get("href") == "/shop/buy?product_id=24648"
+    )
+    exact_link.attrib.pop("data-xiaomi-role")
+    exact_link.set(
+        "href",
+        "/shop/buy/detail?cfrom=search&product_id=24648",
+    )
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.url == (
+        "https://www.mi.com/shop/buy/detail?cfrom=search&product_id=24648"
+    )
+    assert page.goto_calls[1] == (
+        "https://www.mi.com/shop/buy/detail?cfrom=search&product_id=24648"
+    )
 
 
 def test_xiaomi_supports_real_heading_anchor_listitem_and_summary_price_semantics() -> None:

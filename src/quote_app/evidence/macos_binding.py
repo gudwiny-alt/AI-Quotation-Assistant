@@ -53,6 +53,14 @@ class BoundMacWindow:
 
 
 class MacWindowBinder:
+    def __init__(self, *, window_coordinate_scale: float | None = None) -> None:
+        if window_coordinate_scale is not None and (
+            not math.isfinite(window_coordinate_scale)
+            or window_coordinate_scale <= 0
+        ):
+            raise ValueError("window_coordinate_scale must be positive and finite")
+        self._window_coordinate_scale = window_coordinate_scale
+
     def bind(
         self,
         chromium: ChromiumWindowSample,
@@ -70,6 +78,11 @@ class MacWindowBinder:
                 "native_windows must be a tuple of NativeWindowSample"
             )
         _validate_chromium(chromium)
+        coordinate_scale = (
+            chromium.device_pixel_ratio
+            if self._window_coordinate_scale is None
+            else self._window_coordinate_scale
+        )
 
         matches = tuple(
             native
@@ -82,7 +95,7 @@ class MacWindowBinder:
                 and _bounds_match_scaled(
                     chromium.bounds_dip,
                     native.bounds_px,
-                    chromium.device_pixel_ratio,
+                    coordinate_scale,
                 )
             )
         )

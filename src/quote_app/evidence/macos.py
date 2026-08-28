@@ -209,7 +209,7 @@ class MacOSCaptureEnvironment:
             snapshot.display_physical_bounds.width,
             snapshot.display_physical_bounds.height,
         )
-        if expected_size != physical_size:
+        if self._validate_capture_scale_dpr and expected_size != physical_size:
             raise GeometryError(
                 "geometry snapshot physical display size is stale"
             )
@@ -380,15 +380,15 @@ def capture_macos_primary_display(
         actual_size = tuple(screenshot.size)
     except (AttributeError, TypeError) as error:
         raise GeometryError("mss screenshot size is unavailable") from error
-    if actual_size != expected_physical_size:
+    if validate_scale_dpr and actual_size != expected_physical_size:
         raise GeometryError(
             "mss screenshot is not the main display physical pixel size"
         )
     logical_width = int(monitor["width"])
     logical_height = int(monitor["height"])
     observed_scale = (
-        expected_physical_size[0] / logical_width,
-        expected_physical_size[1] / logical_height,
+        actual_size[0] / logical_width,
+        actual_size[1] / logical_height,
     )
     if validate_scale_dpr:
         for observed, expected in zip(

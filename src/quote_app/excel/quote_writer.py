@@ -312,6 +312,26 @@ def _insert_evidence_images(
     if len(set(anchors)) != len(anchors):
         raise ValueError("evidence image anchors must be unique")
 
+    if evidence_images:
+        for column_letter in ("AL", "AM", "AN"):
+            current_width = float(
+                sheet.column_dimensions[column_letter].width or 13
+            )
+            sheet.column_dimensions[column_letter].width = max(
+                current_width,
+                26,
+            )
+        for row_number in range(2, sheet.max_row + 1):
+            current_height = float(
+                sheet.row_dimensions[row_number].height
+                or sheet.sheet_format.defaultRowHeight
+                or 15
+            )
+            sheet.row_dimensions[row_number].height = max(
+                current_height,
+                76,
+            )
+
     for evidence in evidence_images:
         image = OpenpyxlImage(BytesIO(evidence.payload))
         column = re.match(r"[A-Z]+", evidence.anchor)

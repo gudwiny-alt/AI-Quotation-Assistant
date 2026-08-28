@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.platform import PlatformEvidenceCapture
@@ -15,6 +15,7 @@ from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.detail_capture_view import (
     CaptureViewGeometryError,
     apply_capture_scale,
+    fit_search_results_for_capture,
     position_detail_for_capture,
     position_result_cards_for_capture,
 )
@@ -127,11 +128,37 @@ _JD_RESULT_ACCESSORY_MARKERS = (
     "适用",
     "支架",
 )
+_JD_FREQUENCY_CONTROL_HOST = "pc-frequent-pro.pf.jd.com"
+_JD_FREQUENCY_RETRY_DELAY_MS = 5000
+_JD_FREQUENCY_MAX_AUTO_RETRIES = 2
+_JD_DETAIL_REDIRECT_SETTLE_MS = 750
+_JD_DOCUMENT_REPLACEMENT_MAX_RETRIES = 3
+
+
+def _is_jd_frequency_control_url(raw_url: object) -> bool:
+    if not isinstance(raw_url, str):
+        return False
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == _JD_FREQUENCY_CONTROL_HOST
+    )
+
+
+def _is_navigation_context_destroyed(error: Exception) -> bool:
+    message = str(error).lower()
+    return "execution context was destroyed" in message or (
+        "most likely because of a navigation" in message
+    )
 _NUMERIC_SKU = re.compile(r"^[0-9]+$")
 _JD_MODERN_CAPACITY_LABEL = re.compile(
     r"^\d+(?:\.\d+)?(?:GB|TB)[+/,|、;；]"
     r"\d+(?:\.\d+)?(?:GB|TB)$"
 )
+_JD_STORAGE_ONLY_CAPACITY_LABEL = re.compile(r"^\d+(?:\.\d+)?(?:GB|TB)$")
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _MAX_SELECTION_POLLS = 5
 _MAX_MODERN_SELECTION_POLLS = 20
@@ -328,16 +355,23 @@ class JDAdapter:
                 task.model_name,
             )
         if detail_url is None:
-            search_input, search_action = self._wait_for_store_search_controls(
-                browser_page,
-            )
             stage[0] = "京东搜索页"
-            search_input.fill(task.model_name)
-            click_and_wait_for_navigation(
-                browser_page,
-                search_action,
-                semantic_name="京东店铺搜索",
-            )
+            try:
+                search_input, search_action = self._wait_for_store_search_controls(
+                    browser_page,
+                )
+            except LayoutRecognitionError:
+                browser_page.goto(
+                    self._direct_store_search_url(task.model_name),
+                    wait_until="domcontentloaded",
+                )
+            else:
+                search_input.fill(task.model_name)
+                click_and_wait_for_navigation(
+                    browser_page,
+                    search_action,
+                    semantic_name="京东店铺搜索",
+                )
             self._ensure_fixed_scale(browser_page)
             self._raise_if_authentication_blocked(browser_page)
             self._wait_for_valid_store_search_url(
@@ -349,7 +383,12 @@ class JDAdapter:
                 return searched
             detail_url = searched
         stage[0] = "京东商品详情页"
-        return self._observe_detail(task, browser_page, detail_url)
+        return self._observe_detail(
+            task,
+            browser_page,
+            detail_url,
+            source_url=browser_page.url,
+        )
 
     def _current_search_result(
         self,
@@ -410,10 +449,15 @@ class JDAdapter:
         task: WebsiteTask,
         browser_page: Any,
         detail_url: str,
+        *,
+        source_url: str | None = None,
     ) -> AdapterObservation:
-        browser_page.goto(detail_url, wait_until="domcontentloaded")
-        browser_page.wait_for_load_state("domcontentloaded")
-        self._ensure_fixed_scale(browser_page)
+        detail_url = self._navigate_detail_with_frequency_recovery(
+            task,
+            browser_page,
+            detail_url,
+            source_url=source_url,
+        )
         self._raise_if_authentication_blocked(browser_page)
         if _approved_item_url(browser_page.url, base_url=detail_url) != detail_url:
             raise LayoutRecognitionError(
@@ -519,6 +563,103 @@ class JDAdapter:
             semantic_state=semantic_state,
         )
 
+    def _navigate_detail_with_frequency_recovery(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        detail_url: str,
+        *,
+        source_url: str | None,
+    ) -> str:
+        """Open a JD item with its search provenance and bounded 403 recovery."""
+
+        referrer_url = source_url or self._direct_store_search_url(task.model_name)
+        recovery_search_url = self._recovery_search_url(
+            task,
+            source_url,
+        )
+        current_detail_url = detail_url
+        for retry_index in range(_JD_FREQUENCY_MAX_AUTO_RETRIES + 1):
+            page.goto(
+                current_detail_url,
+                wait_until="domcontentloaded",
+                referer=referrer_url,
+            )
+            page.wait_for_load_state("domcontentloaded")
+            page.wait_for_timeout(_JD_DETAIL_REDIRECT_SETTLE_MS)
+            if not _is_jd_frequency_control_url(page.url):
+                self._reacquire_detail_after_document_replacement(page)
+                if not _is_jd_frequency_control_url(page.url):
+                    return current_detail_url
+
+            if retry_index >= _JD_FREQUENCY_MAX_AUTO_RETRIES:
+                raise SecurityVerificationRequired(
+                    "jd",
+                    "京东频控自动重试2次仍未恢复，请人工处理",
+                )
+
+            page.wait_for_timeout(_JD_FREQUENCY_RETRY_DELAY_MS)
+            page.goto(
+                recovery_search_url,
+                wait_until="domcontentloaded",
+                referer=self.spec.entry_url,
+            )
+            page.wait_for_load_state("domcontentloaded")
+            self._ensure_fixed_scale(page)
+            self._raise_if_authentication_blocked(page)
+            self._wait_for_valid_store_search_url(page, task.model_name)
+            searched = self._search_result(task, page)
+            if isinstance(searched, AdapterObservation):
+                raise LayoutRecognitionError(
+                    "JD exact product disappeared during frequency-control recovery"
+                )
+            current_detail_url = searched
+            referrer_url = page.url
+
+        raise AssertionError("unreachable JD frequency-control recovery state")
+
+    def _reacquire_detail_after_document_replacement(self, page: Any) -> None:
+        """Wait through JD's in-place item document replacement once navigated.
+
+        Some JD detail pages render a usable item and then replace the document
+        internally.  Playwright invalidates the old execution context during
+        that short transition.  Reacquiring the same controlled page is enough;
+        reopening the product would discard the already-correct navigation.
+        """
+
+        for retry_index in range(_JD_DOCUMENT_REPLACEMENT_MAX_RETRIES):
+            try:
+                self._ensure_fixed_scale(page)
+                return
+            except Exception as error:
+                if not _is_navigation_context_destroyed(error):
+                    raise
+                if retry_index + 1 >= _JD_DOCUMENT_REPLACEMENT_MAX_RETRIES:
+                    raise LayoutRecognitionError(
+                        "JD detail kept replacing its document after navigation"
+                    ) from error
+                page.wait_for_timeout(500)
+                page.wait_for_load_state("domcontentloaded")
+                if _is_jd_frequency_control_url(page.url):
+                    return
+
+    def _recovery_search_url(
+        self,
+        task: WebsiteTask,
+        source_url: str | None,
+    ) -> str:
+        if source_url is not None:
+            try:
+                _validate_store_search_url(
+                    source_url,
+                    expected_model=task.model_name,
+                )
+            except LayoutRecognitionError:
+                pass
+            else:
+                return source_url
+        return self._direct_store_search_url(task.model_name)
+
     def _validate_task(self, task: WebsiteTask) -> None:
         if not isinstance(task, WebsiteTask):
             raise TypeError("task must be a WebsiteTask")
@@ -531,7 +672,8 @@ class JDAdapter:
         hostname = (urlsplit(page.url).hostname or "").lower()
         path = urlsplit(page.url).path.lower()
         if (
-            hostname == "cfe.m.jd.com"
+            _is_jd_frequency_control_url(page.url)
+            or hostname == "cfe.m.jd.com"
             or any(marker in path for marker in ("/captcha", "/risk_", "/risk/"))
             or visible_locators(page, JD_RISK_CONTROL_MARKERS)
             or _jd_visible_risk_text(page)
@@ -550,10 +692,13 @@ class JDAdapter:
     def _require_approved_store(self, page: Any) -> None:
         markers = visible_locators(page, JD_STORE_MARKERS)
         if markers:
-            if len(markers) != 1 or markers[0].inner_text().strip() != self.spec.store_name:
+            if len(markers) != 1 or not _jd_store_name_matches(
+                markers[0].inner_text(),
+                self.spec.store_name,
+            ):
                 raise LayoutRecognitionError("JD visible store identity does not match")
             return
-        if self.spec.store_name not in page.title():
+        if not _jd_store_name_matches(page.title(), self.spec.store_name):
             raise LayoutRecognitionError("JD approved store identity is missing")
 
     def _exact_entry_product_url(
@@ -606,6 +751,17 @@ class JDAdapter:
                     raise
                 page.wait_for_timeout(_STORE_READY_INTERVAL_MS)
         raise AssertionError("JD store readiness loop did not return or raise")
+
+    def _direct_store_search_url(self, model_name: str) -> str:
+        entry_path = urlsplit(self.spec.entry_url).path
+        store_match = re.fullmatch(r"/index-([0-9]+)\.html", entry_path)
+        if store_match is None:
+            raise LayoutRecognitionError("JD approved store identifier is missing")
+        query = urlencode({"keyword": model_name})
+        return (
+            "https://mall.jd.com/"
+            f"view_search-{store_match.group(1)}-99-1-24-1.html?{query}"
+        )
 
     def _wait_for_valid_store_search_url(self, page: Any, model_name: str) -> bool:
         for poll in range(_MAX_SEARCH_URL_POLLS):
@@ -715,46 +871,121 @@ class JDAdapter:
         )
         if not _modern_result_card_matches(task.model_name, title.inner_text()):
             raise LayoutRecognitionError("JD modern product detail model does not match")
+        fixed_apple_configuration = _apple_fixed_sku_title_matches(
+            task,
+            title.inner_text(),
+        )
+        if fixed_apple_configuration:
+            options = visible_locators(
+                page,
+                _modern_sku_option_selectors(task),
+            )
+            fixed_apple_configuration = not (
+                any(
+                    _jd_modern_capacity_matches(
+                        task,
+                        _modern_option_locator_label(option),
+                    )
+                    for option in options
+                )
+                and any(
+                    _jd_color_matches(
+                        task.color,
+                        _modern_option_locator_label(option),
+                    )
+                    for option in options
+                )
+            )
+        if fixed_apple_configuration:
+            canonical_url = _approved_result_item_url(page.url, base_url=detail_url)
+            current_sku = _sku_from_item_url(canonical_url)
+            region = unique_visible_locator(
+                page,
+                JD_MODERN_DELIVERY_REGIONS,
+                semantic_name="modern delivery region",
+            ).inner_text().strip()
+            if not region:
+                raise LayoutRecognitionError("JD modern delivery region is blank")
+            selected_price = self._modern_fixed_sku_price(page)
+            semantic_state = self._semantic_state(
+                task,
+                page,
+                outcome=BusinessOutcome.PRICE_FOUND,
+                price=selected_price,
+                rectangles=(),
+                current_sku=current_sku,
+                region=region,
+                stock_state="JD Apple fixed SKU title configuration",
+                canonical_url=canonical_url,
+            )
+            return AdapterObservation(
+                outcome=BusinessOutcome.PRICE_FOUND,
+                price=selected_price,
+                url=canonical_url,
+                css_rectangles=(),
+                semantic_state=semantic_state,
+            )
         self._wait_for_modern_sku_options(page, task)
-        initial_configuration = self._modern_configuration_snapshot(page)
+        initial_configuration = self._modern_configuration_snapshot(page, task)
         initial_price_fingerprint = self._modern_price_fingerprint(page)
+
+        def capacity_matcher(label: str) -> bool:
+            return _jd_modern_capacity_matches(task, label)
+
+        def color_matcher(label: str) -> bool:
+            return _jd_color_matches(task.color, _modern_option_label(label))
+
+        # JD can rebuild the available capacity set after a color change.
+        # Select color first, then capacity, and finally re-read both selected
+        # nodes so a visually stale/default configuration can never be quoted.
+        color = self._exact_option(
+            page,
+            _modern_sku_option_selectors(task),
+            color_matcher,
+            semantic_name="modern color",
+            label_reader=_modern_option_locator_label,
+            prefer_actionable=_is_apple_task(task),
+        )
+        self._prepare_exact_option(color)
+        color = self._wait_for_modern_selected(
+            page,
+            task,
+            color_matcher,
+            "color",
+        )
+        self._raise_if_authentication_blocked(page)
         capacity = self._exact_option(
             page,
-            JD_MODERN_SKU_OPTIONS,
-            lambda label: capacity_matches(
-                _modern_option_label(label),
-                task.ram,
-                task.storage,
-            ),
+            _modern_sku_option_selectors(task),
+            capacity_matcher,
             semantic_name="modern capacity",
+            label_reader=_modern_option_locator_label,
+            prefer_actionable=_is_apple_task(task),
         )
-        def capacity_matcher(label: str) -> bool:
-            return capacity_matches(
-                _modern_option_label(label),
-                task.ram,
-                task.storage,
-            )
         self._prepare_exact_option(capacity)
         capacity = self._wait_for_modern_selected(
             page,
+            task,
             capacity_matcher,
             "capacity",
         )
         self._raise_if_authentication_blocked(page)
-        color = self._exact_option(
+        final_options = visible_locators(
             page,
-            JD_MODERN_SKU_OPTIONS,
-            lambda label: _jd_color_matches(
-                task.color,
-                _modern_option_label(label),
-            ),
-            semantic_name="modern color",
+            _modern_sku_option_selectors(task),
         )
-        def color_matcher(label: str) -> bool:
-            return _jd_color_matches(task.color, _modern_option_label(label))
-        self._prepare_exact_option(color)
-        color = self._wait_for_modern_selected(page, color_matcher, "color")
-        self._raise_if_authentication_blocked(page)
+        color = self._selected_modern_option(
+            final_options,
+            color_matcher,
+            semantic_name="modern color",
+            prefer_actionable=_is_apple_task(task),
+        )
+        capacity = self._selected_modern_option(
+            final_options,
+            capacity_matcher,
+            semantic_name="modern capacity",
+            prefer_actionable=_is_apple_task(task),
+        )
         target_began_unselected = not (
             self._snapshot_has_selected(initial_configuration, capacity_matcher)
             and self._snapshot_has_selected(initial_configuration, color_matcher)
@@ -803,19 +1034,21 @@ class JDAdapter:
 
         for step in range(_MAX_MODERN_SKU_SCAN_STEPS):
             self._raise_if_authentication_blocked(page)
-            options = visible_locators(page, JD_MODERN_SKU_OPTIONS)
+            options = visible_locators(
+                page,
+                _modern_sku_option_selectors(task),
+            )
             has_capacity = any(
-                capacity_matches(
-                    _modern_option_label(option.inner_text()),
-                    task.ram,
-                    task.storage,
+                _jd_modern_capacity_matches(
+                    task,
+                    _modern_option_locator_label(option),
                 )
                 for option in options
             )
             has_color = any(
                 _jd_color_matches(
                     task.color,
-                    _modern_option_label(option.inner_text()),
+                    _modern_option_locator_label(option),
                 )
                 for option in options
             )
@@ -926,7 +1159,7 @@ class JDAdapter:
                 "JD result region is unavailable for capture",
                 safe_stage="结果区域定位",
             ) from error
-        result_search_input = self._wait_for_capture_search_input(
+        result_search_input = self._capture_search_input(
             browser_page,
             task.model_name,
         )
@@ -935,9 +1168,10 @@ class JDAdapter:
                 "JD no-model search keyword is not visible for capture",
                 safe_stage="搜索框定位",
             )
+        proof_targets = self._no_model_capture_targets(result_region)
         return (
             _capture_css_rect(result_search_input, "search_keyword"),
-            _capture_css_rect(result_region, "result_region"),
+            _capture_css_rect_union(proof_targets, "result_region"),
         )
 
     def prepare_capture_view(
@@ -970,9 +1204,11 @@ class JDAdapter:
                 JD_RESULT_REGIONS,
                 semantic_name="result region",
             )
-            result_search_input = self._wait_for_capture_search_input(
-                browser_page,
-                task.model_name,
+            result_search_input = (
+                self._capture_search_input(
+                    browser_page,
+                    task.model_name,
+                )
             )
             if result_search_input is None:
                 raise CaptureViewGeometryError(
@@ -981,6 +1217,7 @@ class JDAdapter:
                 )
             product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
             empty_states = visible_locators(result_region, JD_EMPTY_RESULTS)
+            proof_targets = product_cards or empty_states or (result_region,)
 
             def positioned_product_name() -> Any | None:
                 current_cards = visible_locators(
@@ -997,17 +1234,25 @@ class JDAdapter:
                     JD_PRODUCT_TITLES,
                 )
 
+            fit_search_results_for_capture(
+                browser_page,
+                search_input=result_search_input,
+                result_region=result_region,
+                result_targets=proof_targets,
+                site_name="JD",
+            )
             position_result_cards_for_capture(
                 browser_page,
                 search_input=result_search_input,
                 product_name=None,
                 product_card=product_cards[0] if product_cards else None,
                 site_name="JD",
-                prefer_search_anchor=True,
+                prefer_search_anchor=result_search_input is not None,
                 product_name_reader=(
                     positioned_product_name if product_cards else None
                 ),
                 empty_state=empty_states[0] if not product_cards else None,
+                already_positioned=True,
             )
             return
         if expected.outcome is not BusinessOutcome.PRICE_FOUND:
@@ -1023,19 +1268,44 @@ class JDAdapter:
                 JD_MODERN_DETAIL_TITLES,
                 semantic_name="modern product detail title",
             )
-            options = visible_locators(browser_page, JD_MODERN_SKU_OPTIONS)
-            capacity = self._selected_modern_option(
-                options,
-                lambda label: capacity_matches(
-                    _modern_option_label(label), task.ram, task.storage
-                ),
-                semantic_name="modern capacity",
+            options = visible_locators(
+                browser_page,
+                _modern_sku_option_selectors(task),
             )
-            color = self._selected_modern_option(
-                options,
-                lambda label: _jd_color_matches(task.color, _modern_option_label(label)),
-                semantic_name="modern color",
-            )
+            if _apple_fixed_sku_title_matches(task, title.inner_text()) and not (
+                any(
+                    _jd_modern_capacity_matches(
+                        task,
+                        _modern_option_locator_label(option),
+                    )
+                    for option in options
+                )
+                and any(
+                    _jd_color_matches(
+                        task.color,
+                        _modern_option_locator_label(option),
+                    )
+                    for option in options
+                )
+            ):
+                capacity = title
+                color = title
+            else:
+                capacity = self._selected_modern_option(
+                    options,
+                    lambda label: _jd_modern_capacity_matches(task, label),
+                    semantic_name="modern capacity",
+                    prefer_actionable=_is_apple_task(task),
+                )
+                color = self._selected_modern_option(
+                    options,
+                    lambda label: _jd_color_matches(
+                        task.color,
+                        _modern_option_label(label),
+                    ),
+                    semantic_name="modern color",
+                    prefer_actionable=_is_apple_task(task),
+                )
             prices = visible_locators(
                 browser_page,
                 JD_MODERN_CURRENT_SKU_SELLING_PRICES,
@@ -1073,6 +1343,8 @@ class JDAdapter:
             capacity=capacity,
             color=color,
             site_name="JD",
+            upward_recovery_steps=6,
+            preserve_ready_position=True,
         )
 
     def restore_capture_view(
@@ -1182,13 +1454,11 @@ class JDAdapter:
             )
         capacity = self._exact_option(
             page,
-            JD_MODERN_SKU_OPTIONS,
-            lambda label: capacity_matches(
-                _modern_option_label(label),
-                task.ram,
-                task.storage,
-            ),
+            _modern_sku_option_selectors(task),
+            lambda label: _jd_modern_capacity_matches(task, label),
             semantic_name="modern capacity",
+            label_reader=_modern_option_locator_label,
+            prefer_actionable=_is_apple_task(task),
         )
         if expected.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE:
             if not _is_modern_unavailable(capacity):
@@ -1207,12 +1477,14 @@ class JDAdapter:
             )
         color = self._exact_option(
             page,
-            JD_MODERN_SKU_OPTIONS,
+            _modern_sku_option_selectors(task),
             lambda label: _jd_color_matches(
                 task.color,
                 _modern_option_label(label),
             ),
             semantic_name="modern color",
+            label_reader=_modern_option_locator_label,
+            prefer_actionable=_is_apple_task(task),
         )
         if (
             expected.outcome is not BusinessOutcome.COLOR_UNAVAILABLE
@@ -1356,11 +1628,38 @@ class JDAdapter:
             raise LayoutRecognitionError(
                 "JD modern delivery region changed before capture"
             )
+        options = visible_locators(
+            page,
+            _modern_sku_option_selectors(task),
+        )
+        fixed_apple_configuration = (
+            _apple_fixed_sku_title_matches(task, title.inner_text())
+            and not (
+                any(
+                    _jd_modern_capacity_matches(
+                        task,
+                        _modern_option_locator_label(option),
+                    )
+                    for option in options
+                )
+                and any(
+                    _jd_color_matches(
+                        task.color,
+                        _modern_option_locator_label(option),
+                    )
+                    for option in options
+                )
+            )
+        )
         return self._semantic_state(
             task,
             page,
             outcome=BusinessOutcome.PRICE_FOUND,
-            price=self._modern_selected_price(page, task),
+            price=(
+                self._modern_fixed_sku_price(page)
+                if fixed_apple_configuration
+                else self._modern_selected_price(page, task)
+            ),
             rectangles=(),
             current_sku=_sku_from_item_url(canonical_url),
             region=region,
@@ -1539,6 +1838,27 @@ class JDAdapter:
                 page.wait_for_timeout(_VERIFIED_STATE_INTERVAL_MS)
         return None
 
+    def _capture_search_input(
+        self,
+        page: Any,
+        model_name: str,
+    ) -> Any | None:
+        """Keep the proven JD query visible without submitting a new search."""
+
+        search_input = self._wait_for_capture_search_input(page, model_name)
+        if search_input is not None:
+            return search_input
+        _validate_store_search_url(page.url, expected_model=model_name)
+        for selector in JD_SEARCH_INPUTS:
+            candidates = page.locator(selector)
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                if not candidate.is_visible() or candidate.input_value().strip():
+                    continue
+                candidate.fill(model_name)
+                return self._validated_result_search_input(page, model_name)
+        return None
+
     def _no_model_observation(
         self,
         task: WebsiteTask,
@@ -1546,8 +1866,11 @@ class JDAdapter:
         result_region: Any,
         result_search_input: Any | None,
     ) -> AdapterObservation:
+        product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
+        empty_states = visible_locators(result_region, JD_EMPTY_RESULTS)
+        proof_targets = product_cards or empty_states or (result_region,)
+        result_rectangle = _css_rect_union(proof_targets, "result_region")
         if result_search_input is None:
-            product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
             if not product_cards and visible_locators(page, JD_SEARCH_INPUTS):
                 raise LayoutRecognitionError(
                     "JD no-model result lacks a visible verified search keyword"
@@ -1558,12 +1881,12 @@ class JDAdapter:
             # the grid itself is the required no-quotation evidence.
             _validate_store_search_url(page.url, expected_model=task.model_name)
             rectangles: tuple[CssRect, ...] = (
-                _css_rect(result_region, "result_region"),
+                result_rectangle,
             )
         else:
             rectangles = (
                 _css_rect(result_search_input, "search_keyword"),
-                _css_rect(result_region, "result_region"),
+                result_rectangle,
             )
         return self._legal_no(
             task,
@@ -1572,6 +1895,14 @@ class JDAdapter:
             rectangles,
         )
 
+    @staticmethod
+    def _no_model_capture_targets(result_region: Any) -> tuple[Any, ...]:
+        product_cards = visible_locators(result_region, JD_PRODUCT_CARDS)
+        if product_cards:
+            return product_cards
+        empty_states = visible_locators(result_region, JD_EMPTY_RESULTS)
+        return empty_states or (result_region,)
+
     def _exact_option(
         self,
         page: Any,
@@ -1579,13 +1910,21 @@ class JDAdapter:
         matches: Any,
         *,
         semantic_name: str,
+        label_reader: Any | None = None,
+        prefer_actionable: bool = False,
     ) -> Any:
         options = visible_locators(page, selectors)
         if not options:
             raise LayoutRecognitionError(
                 f"JD {semantic_name} option structure is missing"
             )
-        exact = tuple(option for option in options if matches(option.inner_text()))
+        read_label = label_reader or (lambda option: option.inner_text())
+        if prefer_actionable:
+            options = _prefer_actionable_modern_sku_options(
+                options,
+                label_reader=read_label,
+            )
+        exact = tuple(option for option in options if matches(read_label(option)))
         if len(exact) != 1:
             raise LayoutRecognitionError(
                 f"JD exact {semantic_name} option is missing or ambiguous"
@@ -1598,12 +1937,18 @@ class JDAdapter:
         matches: Any,
         *,
         semantic_name: str,
+        prefer_actionable: bool = False,
     ) -> Any:
+        if prefer_actionable:
+            options = _prefer_actionable_modern_sku_options(
+                options,
+                label_reader=_modern_option_locator_label,
+            )
         selected = tuple(
             option
             for option in options
             if _is_modern_selected(option)
-            and matches(option.inner_text())
+            and matches(_modern_option_locator_label(option))
         )
         if len(selected) != 1:
             raise LayoutRecognitionError(
@@ -1619,15 +1964,18 @@ class JDAdapter:
     def _wait_for_modern_selected(
         self,
         page: Any,
+        task: WebsiteTask,
         matcher: Any,
         semantic_name: str,
     ) -> Any:
         for _ in range(_MAX_MODERN_SELECTION_POLLS):
             option = self._exact_option(
                 page,
-                JD_MODERN_SKU_OPTIONS,
+                _modern_sku_option_selectors(task),
                 matcher,
                 semantic_name=f"modern {semantic_name}",
+                label_reader=_modern_option_locator_label,
+                prefer_actionable=_is_apple_task(task),
             )
             if _is_modern_selected(option):
                 return option
@@ -1640,13 +1988,23 @@ class JDAdapter:
     @staticmethod
     def _modern_configuration_snapshot(
         page: Any,
+        task: WebsiteTask,
     ) -> tuple[tuple[str, bool], ...]:
+        options = visible_locators(
+            page,
+            _modern_sku_option_selectors(task),
+        )
+        if _is_apple_task(task):
+            options = _prefer_actionable_modern_sku_options(
+                options,
+                label_reader=_modern_option_locator_label,
+            )
         return tuple(
             (
-                _modern_option_label(option.inner_text()),
+                _modern_option_locator_label(option),
                 _is_modern_selected(option),
             )
-            for option in visible_locators(page, JD_MODERN_SKU_OPTIONS)
+            for option in options
         )
 
     @staticmethod
@@ -1664,7 +2022,7 @@ class JDAdapter:
         selected_capacities = tuple(
             label
             for label, selected in snapshot
-            if selected and _is_modern_capacity_label(label)
+            if selected and _is_jd_modern_capacity_label(task, label)
         )
         selected_colours = tuple(
             label
@@ -1673,9 +2031,7 @@ class JDAdapter:
         )
         if (
             len(selected_capacities) != 1
-            or not capacity_matches(
-                selected_capacities[0], task.ram, task.storage
-            )
+            or not _jd_modern_capacity_matches(task, selected_capacities[0])
             or len(selected_colours) != 1
         ):
             raise LayoutRecognitionError(
@@ -1751,7 +2107,7 @@ class JDAdapter:
                         if is_struck_through
                         else SellingPriceEvidence.VERIFIED_CURRENT_SKU_SELLING_NODE
                     ),
-                    effective_line_through=style["effectiveLineThrough"],
+                    effective_line_through=is_struck_through,
                 )
             )
         return tuple(candidates), fingerprint
@@ -1773,7 +2129,7 @@ class JDAdapter:
         previous_exact_configuration: tuple[tuple[str, bool], ...] | None = None
         exact_configuration_streak = 0
         for _ in range(_MAX_PRICE_POLLS):
-            configuration = self._modern_configuration_snapshot(page)
+            configuration = self._modern_configuration_snapshot(page, task)
             candidates, price_fingerprint = self._modern_price_snapshot(page)
             if require_transition and (
                 configuration != initial_configuration
@@ -1812,6 +2168,23 @@ class JDAdapter:
         raise NonRetryableTechnicalError(
             "NO_VALID_SELLING_PRICE",
             "目标配置仅展示补贴价或划线原价，需人工补充",
+        )
+
+    def _modern_fixed_sku_price(self, page: Any) -> Decimal:
+        """Read a stable price when Apple's fixed SKU is proved by its title."""
+
+        previous: tuple[PriceCandidate, ...] | None = None
+        for _ in range(_MAX_PRICE_POLLS):
+            candidates, _ = self._modern_price_snapshot(page)
+            selected = choose_price(candidates, self.spec.price_policy)
+            if selected is not None and candidates == previous:
+                return selected
+            previous = candidates
+            page.wait_for_timeout(_POLL_INTERVAL_MS)
+            self._raise_if_authentication_blocked(page)
+        raise NonRetryableTechnicalError(
+            "NO_VALID_SELLING_PRICE",
+            "Apple固定配置未显示可验证的稳定售价，需人工补充",
         )
 
     def _stock_snapshot(
@@ -2135,8 +2508,148 @@ def _modern_option_label(value: str) -> str:
     return normalize_product_text(value).replace("无货", " ").strip()
 
 
+def _is_apple_task(task: WebsiteTask) -> bool:
+    return normalize_product_text(task.brand) == "苹果"
+
+
+def _is_actionable_modern_sku_option(option: Any) -> bool:
+    classes = set((option.get_attribute("class") or "").lower().split())
+    return bool(classes & {"specification-item-sku", "item"})
+
+
+def _prefer_actionable_modern_sku_options(
+    options: tuple[Any, ...],
+    *,
+    label_reader: Any,
+) -> tuple[Any, ...]:
+    """Discard labelled Apple wrappers only when a real control duplicates them."""
+
+    actionable_labels = {
+        normalize_product_text(label_reader(option))
+        for option in options
+        if _is_actionable_modern_sku_option(option)
+    }
+    return tuple(
+        option
+        for option in options
+        if _is_actionable_modern_sku_option(option)
+        or normalize_product_text(label_reader(option)) not in actionable_labels
+    )
+
+
+def _modern_sku_option_selectors(task: WebsiteTask) -> tuple[str, ...]:
+    """Accept JD's hybrid Apple detail controls without widening other brands.
+
+    The current Apple template can render the modern title/price pane together
+    with the legacy ``choose-attrs`` colour and capacity buttons.  A single CSS
+    union keeps both groups in one bounded option family so colour and storage
+    can still be selected and revalidated atomically.
+    """
+
+    if not _is_apple_task(task):
+        return JD_MODERN_SKU_OPTIONS
+    return (
+        ", ".join(
+            (
+                *JD_MODERN_SKU_OPTIONS,
+                *JD_CAPACITY_OPTIONS,
+                *JD_COLOR_OPTIONS,
+                # Apple's current JD detail template groups series, exterior
+                # colour and storage under numbered ``choose-attr`` blocks.
+                # Labels still decide which controls are colour/storage, so
+                # this remains bounded to Apple's exact requested options.
+                "#choose-attr-1 .item",
+                "#choose-attr-2 .item",
+                "#choose-attr-3 .item",
+            )
+        ),
+    )
+
+
+def _modern_option_locator_label(locator: Any) -> str:
+    """Read a modern JD option from its accessible label before visible text.
+
+    Some current JD product templates render the human label in an attribute
+    while the locator's direct text is only a generic control caption.  The
+    attribute order is deliberately bounded; unrelated page text is never
+    used to satisfy a colour or capacity match.
+    """
+
+    classes = set((locator.get_attribute("class") or "").lower().split())
+    for attribute in (
+        "aria-label",
+        "title",
+        "data-value",
+        "data-name",
+        "data-sku-name",
+    ):
+        value = locator.get_attribute(attribute)
+        if (
+            attribute == "title"
+            and "specification-item-sku" in classes
+            and value
+            and any(marker in value for marker in ("无货", "无此商品"))
+        ):
+            visible_label = _modern_option_label(locator.inner_text())
+            if visible_label:
+                return visible_label
+        if value and _modern_option_label(value):
+            return _modern_option_label(value)
+    return _modern_option_label(locator.inner_text())
+
+
 def _is_modern_capacity_label(value: str) -> bool:
     return _JD_MODERN_CAPACITY_LABEL.fullmatch(value.replace(" ", "")) is not None
+
+
+def _allows_fixed_ram_storage_only_capacity(task: WebsiteTask) -> bool:
+    """Allow storage-only JD labels for one Huawei model with fixed 8GB RAM."""
+
+    return (
+        normalize_product_text(task.brand) == "华为"
+        and normalize_product_text(task.model_name)
+        == normalize_product_text("华为畅享 90 Pro Max")
+        and normalize_product_text(task.ram) == "8GB"
+    )
+
+
+def _is_jd_modern_capacity_label(task: WebsiteTask, value: str) -> bool:
+    label = _modern_option_label(value).replace(" ", "")
+    if (
+        normalize_product_text(task.brand) == "苹果"
+        or _allows_fixed_ram_storage_only_capacity(task)
+    ):
+        return _JD_STORAGE_ONLY_CAPACITY_LABEL.fullmatch(label) is not None
+    return _is_modern_capacity_label(label)
+
+
+def _jd_modern_capacity_matches(task: WebsiteTask, candidate: str) -> bool:
+    """Match Apple's storage-only JD buttons without weakening other brands."""
+
+    label = _modern_option_label(candidate)
+    if (
+        normalize_product_text(task.brand) == "苹果"
+        or _allows_fixed_ram_storage_only_capacity(task)
+    ):
+        return normalize_product_text(label) == normalize_product_text(task.storage)
+    return capacity_matches(label, task.ram, task.storage)
+
+
+def _apple_fixed_sku_title_matches(task: WebsiteTask, title: str) -> bool:
+    """Accept Apple's fixed JD item only when its title proves the exact SKU."""
+
+    if normalize_product_text(task.brand) != "苹果":
+        return False
+    normalized_title = normalize_product_text(title)
+    if not _modern_result_card_matches(task.model_name, normalized_title):
+        return False
+    storage = normalize_product_text(task.storage).upper().replace(" ", "")
+    title_upper = normalized_title.upper()
+    storage_pattern = re.compile(
+        rf"(?<![0-9A-Z]){re.escape(storage)}(?![0-9A-Z])"
+    )
+    color = normalize_product_text(task.color)
+    return bool(color and color in normalized_title and storage_pattern.search(title_upper))
 
 
 def _jd_color_matches(target: str, candidate: str) -> bool:
@@ -2160,6 +2673,22 @@ def _jd_color_matches(target: str, candidate: str) -> bool:
         and normalized_candidate.endswith(base_colour)
         and "/" not in normalized_candidate
     )
+
+
+def _jd_store_name_matches(actual_name: str, expected_name: str) -> bool:
+    """Match the approved JD self-operated store across bounded title wording.
+
+    JD currently adds or removes the word ``官方`` between otherwise identical
+    self-operated flagship-store labels.  No other merchant wording is relaxed.
+    """
+
+    actual = normalize_product_text(actual_name)
+    expected = normalize_product_text(expected_name)
+    if not actual or not expected:
+        return False
+    if expected in actual:
+        return True
+    return expected.replace("官方", "") in actual.replace("官方", "")
 
 
 def _is_approved_selected(locator: Any) -> bool:
@@ -2262,12 +2791,19 @@ def _modern_seller_matches(actual_name: str, expected_name: str) -> bool:
 
     actual = normalize_product_text(actual_name)
     expected = normalize_product_text(expected_name)
-    if not actual or not expected or not actual.startswith(expected):
+    if not actual or not expected:
         return False
-    remainder = actual.removeprefix(expected).strip()
-    return not remainder or any(
-        remainder.startswith(prefix) for prefix in _JD_MODERN_SELLER_UI_SUFFIXES
-    )
+    expected_variants = (expected, expected.replace("官方", ""))
+    for expected_variant in expected_variants:
+        if not expected_variant or not actual.startswith(expected_variant):
+            continue
+        remainder = actual.removeprefix(expected_variant).strip()
+        if not remainder or any(
+            remainder.startswith(prefix)
+            for prefix in _JD_MODERN_SELLER_UI_SUFFIXES
+        ):
+            return True
+    return False
 
 
 def _result_card_is_unavailable(card: Any) -> bool:
@@ -2419,6 +2955,23 @@ def _css_rect(locator: Any, role: str) -> CssRect:
         raise LayoutRecognitionError("JD evidence rectangle is invalid") from error
 
 
+def _css_rect_union(locators: tuple[Any, ...], role: str) -> CssRect:
+    if not locators:
+        raise LayoutRecognitionError("JD evidence targets are unavailable")
+    rectangles = tuple(_css_rect(locator, role) for locator in locators)
+    left = min(rectangle.x for rectangle in rectangles)
+    top = min(rectangle.y for rectangle in rectangles)
+    right = max(rectangle.x + rectangle.width for rectangle in rectangles)
+    bottom = max(rectangle.y + rectangle.height for rectangle in rectangles)
+    return CssRect(
+        x=left,
+        y=top,
+        width=right - left,
+        height=bottom - top,
+        role=role,
+    )
+
+
 def _capture_css_rect(locator: Any, role: str) -> CssRect:
     try:
         return _css_rect(locator, role)
@@ -2428,4 +2981,14 @@ def _capture_css_rect(locator: Any, role: str) -> CssRect:
             safe_stage=(
                 "搜索框定位" if role == "search_keyword" else "结果区域定位"
             ),
+        ) from error
+
+
+def _capture_css_rect_union(locators: tuple[Any, ...], role: str) -> CssRect:
+    try:
+        return _css_rect_union(locators, role)
+    except LayoutRecognitionError as error:
+        raise CaptureViewGeometryError(
+            str(error),
+            safe_stage="结果区域定位",
         ) from error

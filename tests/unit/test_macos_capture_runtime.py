@@ -111,6 +111,27 @@ def test_darwin_beta_manual_layout_preserves_current_chromium_window(
     assert runtime._sampler._window_mode is ChromiumWindowMode.PRESERVE
 
 
+def test_darwin_beta_binds_retina_window_in_logical_screen_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    calls: list[str] = []
+    logical_native = replace(
+        _fixed_native(sample_id="native-logical"),
+        bounds_px=DisplayBounds(24, 49, 1464, 893),
+    )
+    runtime = MacFormalCaptureRuntime(
+        bridge=_Bridge(calls, native_window_samples=(logical_native,)),
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+        monotonic_clock=lambda: _NOW,
+    )
+
+    bound = runtime._bind(_fixed_chromium(sample_id="chromium-retina"))
+
+    assert bound.native is logical_native
+    assert bound.chromium.device_pixel_ratio == 2.0
+
+
 def test_full_display_beta_geometry_does_not_require_css_window_bounds_to_match(
 ) -> None:
     """Whole-display review cannot use browser CSS bounds for annotations."""
@@ -1192,6 +1213,51 @@ def test_strict_capture_keeps_existing_prepare_and_post_capture_call_order(
 
     assert calls.count("window-bounds") == window_bounds_before_capture
     assert bridge.focused_calls == focused_calls_before_capture
+
+
+def test_darwin_beta_capture_uses_current_display_size_when_snapshot_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = make_macos_full_display_geometry_snapshot(
+        BoundMacWindow(
+            identity=_IDENTITY,
+            chromium=_fixed_chromium(sample_id="current-display-chromium"),
+            native=_fixed_native(sample_id="current-display-native"),
+        ),
+        _DISPLAY,
+        now_monotonic=_NOW,
+    )
+    environment = MacOSCaptureEnvironment(
+        validate_capture_scale_dpr=False,
+    )
+    current_size = (2940, 1912)
+    observed: list[tuple[tuple[int, int], bool]] = []
+    monkeypatch.setattr(
+        "quote_app.evidence.macos._macos_main_display_physical_size",
+        lambda: current_size,
+    )
+
+    def capture_display(
+        _destination: Path,
+        *,
+        expected_physical_size: tuple[int, int],
+        validate_scale_dpr: bool,
+        **_kwargs: object,
+    ) -> None:
+        observed.append((expected_physical_size, validate_scale_dpr))
+
+    monkeypatch.setattr(
+        "quote_app.evidence.macos.capture_macos_primary_display",
+        capture_display,
+    )
+
+    environment.capture_primary_display(
+        tmp_path / "current-main-display.png",
+        snapshot,
+    )
+
+    assert observed == [(current_size, False)]
 
 
 def test_non_darwin_beta_keeps_existing_prepare_call_order(
@@ -2616,11 +2682,15 @@ class _SecurityBlockedCaptureAdapter(_VerifiedAdapter):
         raise SecurityVerificationRequired("jd", "京东需要人工完成安全验证")
 
 
-def _site_spec(channel: WebsiteChannel) -> SiteSpec:
+def _site_spec(
+    channel: WebsiteChannel,
+    *,
+    brand: str = "HONOR",
+) -> SiteSpec:
     return next(
         candidate
         for candidate in load_site_catalog()
-        if candidate.brand == "HONOR" and candidate.channel is channel
+        if candidate.brand == brand and candidate.channel is channel
     )
 
 
@@ -2661,11 +2731,13 @@ def test_honor_reader_uses_only_explicit_custom_adapter_registry() -> None:
     "channel",
     (WebsiteChannel.JD, WebsiteChannel.TMALL),
 )
-def test_default_honor_reader_supports_each_quotation_channel(
+@pytest.mark.parametrize("brand", ("HONOR", "小米", "欧珀", "维沃", "华为", "苹果"))
+def test_default_marketplace_reader_supports_each_six_brand_channel(
+    brand: str,
     channel: WebsiteChannel,
 ) -> None:
     calls: list[str] = []
-    adapter = _VerifiedAdapter(_site_spec(channel))
+    adapter = _VerifiedAdapter(_site_spec(channel, brand=brand))
     registry = _CustomAdapterRegistry(adapter)
     runtime = MacFormalCaptureRuntime(
         sampler=_Sampler(calls),
@@ -2674,15 +2746,16 @@ def test_default_honor_reader_supports_each_quotation_channel(
         adapter_registry=registry,
         monotonic_clock=lambda: _NOW,
     )
-    task = _task(channel=channel)
+    task = _task(channel=channel, brand=brand)
     page = object()
     state = _state(
+        brand=brand,
         canonical_url=f"https://example.test/{channel.value}/item-1"
     )
 
     context = runtime.capture_context_provider(task, page, state)
 
-    assert registry.calls == [("HONOR", channel)]
+    assert registry.calls == [(brand, channel)]
     assert adapter.calls == [(task, page, state)]
     assert isinstance(context.stability_probe.semantic_hash(), str)
 
@@ -2875,15 +2948,125 @@ def test_capture_preparation_layout_failure_preserves_retryable_safe_stage(
         monotonic_clock=lambda: _NOW,
     )
 
+    state = _state(canonical_url="https://example.test/jd/item-1")
+    if "no-model" in layout_message:
+        state = replace(
+            state,
+            current_sku="not-applicable",
+            region="not-applicable",
+            stock_state="not-applicable",
+            price=None,
+            outcome=BusinessOutcome.NO_MODEL,
+            css_rectangles=(
+                CssRect(30, 120, 720, 340, "result_region"),
+            ),
+        )
+
     with pytest.raises(RetryableEvidenceCaptureError) as captured:
         runtime.capture_context_provider(
             _task(channel=WebsiteChannel.JD),
             object(),
-            _state(canonical_url="https://example.test/jd/item-1"),
+            state,
         )
 
     assert captured.value.code == "CAPTURE_GEOMETRY"
     assert safe_stage in captured.value.message
+
+
+def test_macos_jd_price_capture_keeps_a_verified_offer_when_dom_viewport_geometry_disagrees() -> None:
+    """A verified JD offer remains capturable when only the DOM viewport gate fails."""
+
+    adapter = _FailingCapturePreparationAdapter(
+        _site_spec(WebsiteChannel.JD),
+        CaptureViewGeometryError(
+            "JD detail capture requires title, price, capacity and color "
+            "in the same viewport",
+            safe_stage="结果区域定位",
+        ),
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+    )
+    task = _task(channel=WebsiteChannel.JD)
+    state = _state(canonical_url="https://item.jd.com/100012345678.html")
+
+    context = runtime.capture_context_provider(task, object(), state)
+
+    assert context.css_rectangles is None
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0][0] == task
+    assert adapter.calls[0][2] == state
+
+
+def test_darwin_beta_jd_no_model_capture_keeps_verified_search_result_when_only_framing_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verified JD no-model page is still captured when only card framing fails."""
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    adapter = _FailingCapturePreparationAdapter(
+        _site_spec(WebsiteChannel.JD),
+        CaptureViewGeometryError(
+            "JD no-model product card name is not visible for capture",
+            safe_stage="结果区域定位",
+        ),
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    )
+    task = _task(channel=WebsiteChannel.JD)
+    state = replace(
+        _state(canonical_url="https://mall.jd.com/search?keyword=missing"),
+        current_sku="not-applicable",
+        region="not-applicable",
+        stock_state="not-applicable",
+        price=None,
+        outcome=BusinessOutcome.NO_MODEL,
+        css_rectangles=(CssRect(30, 120, 720, 340, "result_region"),),
+    )
+
+    context = runtime.capture_context_provider(task, object(), state)
+
+    assert context.css_rectangles is None
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0][0] == task
+    assert adapter.calls[0][2] == state
+
+
+def test_darwin_beta_jd_capture_does_not_reread_unused_dom_rectangles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mac JD uses the already prepared page and captures the full display."""
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    adapter = _FailingCaptureGeometryAdapter(
+        _site_spec(WebsiteChannel.JD)
+    )
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    )
+
+    context = runtime.capture_context_provider(
+        _task(channel=WebsiteChannel.JD),
+        object(),
+        _state(canonical_url="https://item.jd.com/100012345678.html"),
+    )
+
+    assert context.css_rectangles is None
 
 
 def test_capture_rectangle_layout_failure_preserves_result_region_stage() -> None:

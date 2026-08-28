@@ -7,7 +7,7 @@ from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
@@ -312,6 +312,7 @@ class _FixturePage:
         self.window_scroll_offsets: list[int] = []
         self.wait_timeout_milliseconds: list[float] = []
         self.pending_selections: dict[_Node, int] = {}
+        self.option_click_counts: dict[str, int] = {}
         self.pending_capacity_context: int | None = None
         self.price_snapshot_reads = 0
         self.color_access_before_capacity_context = False
@@ -557,6 +558,17 @@ class _FixturePage:
     def click_option(self, node: _Node) -> None:
         if self.selection_mode == "never":
             return
+        option_kind = self.option_kind(node)
+        if option_kind is not None:
+            self.option_click_counts[option_kind] = (
+                self.option_click_counts.get(option_kind, 0) + 1
+            )
+        if (
+            self.selection_mode == "oppo_capacity_first_click_ignored"
+            and option_kind == "capacity"
+            and self.option_click_counts[option_kind] == 1
+        ):
+            return
         if self.selection_mode == "async":
             self.pending_selections[node] = 2
             return
@@ -706,6 +718,34 @@ def _honor_spec() -> SiteSpec:
         spec
         for spec in load_site_catalog()
         if spec.brand == "HONOR" and spec.channel is WebsiteChannel.TMALL
+    )
+
+
+def _huawei_spec() -> SiteSpec:
+    return next(
+        spec
+        for spec in load_site_catalog()
+        if spec.brand == "华为" and spec.channel is WebsiteChannel.TMALL
+    )
+
+
+def _oppo_spec() -> SiteSpec:
+    return next(
+        spec
+        for spec in load_site_catalog()
+        if spec.brand == "欧珀" and spec.channel is WebsiteChannel.TMALL
+    )
+
+
+def _huawei_storage_only_html() -> str:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "华为官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "huaweistore.tmall.com")
+    html = html.replace("小米 15", "华为畅享 90 Pro Max")
+    html = html.replace("小米15", "华为畅享90 Pro Max")
+    return html.replace("8GB + 256GB", "128GB").replace(
+        "12GB + 256GB",
+        "256GB",
     )
 
 
@@ -929,6 +969,72 @@ def test_honor_power2_marketing_detail_title_reaches_price_and_capture_stage() -
     assert page.capture_scales == [0.8]
 
 
+def test_huawei_changxiang_90_pro_max_accepts_storage_only_capacity_group() -> None:
+    task = _task(
+        brand="华为",
+        model_name="华为畅享 90 Pro Max",
+        ram="8GB",
+        storage="256GB",
+        color="白色",
+    )
+    page = _FixturePage(
+        html=_huawei_storage_only_html(),
+        after_search_url=(
+            "https://huaweistore.tmall.com/"
+            "?q=%E5%8D%8E%E4%B8%BA%E7%95%85%E4%BA%AB%2090%20Pro%20Max"
+            + _LIVE_RESULTS_STATIC_QUERY
+        ),
+    )
+
+    observation = TmallAdapter(_huawei_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
+
+
+def test_huawei_storage_only_capacity_rejects_wrong_fixed_ram() -> None:
+    task = _task(
+        brand="华为",
+        model_name="华为畅享 90 Pro Max",
+        ram="12GB",
+        storage="256GB",
+        color="白色",
+    )
+    page = _FixturePage(
+        html=_huawei_storage_only_html(),
+        after_search_url=(
+            "https://huaweistore.tmall.com/"
+            "?q=%E5%8D%8E%E4%B8%BA%E7%95%85%E4%BA%AB%2090%20Pro%20Max"
+            + _LIVE_RESULTS_STATIC_QUERY
+        ),
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="capacity option"):
+        TmallAdapter(_huawei_spec()).observe(task, cast(Any, page))
+
+
+def test_oppo_re_resolves_and_retries_capacity_after_ignored_hydration_click() -> None:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "OPPO官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "oppo.tmall.com")
+    html = html.replace("小米 15", "OPPO A6 5G")
+    html = html.replace("小米15", "OPPO A6 5G")
+    task = _task(brand="欧珀", model_name="OPPO A6 5G")
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://oppo.tmall.com/?q=OPPO%20A6%205G"
+            + _LIVE_RESULTS_STATIC_QUERY
+        ),
+        selection_mode="oppo_capacity_first_click_ignored",
+    )
+
+    observation = TmallAdapter(_oppo_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.option_click_counts["capacity"] == 2
+
+
 def test_honor_power2_uses_stable_visible_configuration_without_hidden_sku_attributes(
 ) -> None:
     html = _live_observed_html()
@@ -1020,6 +1126,113 @@ def test_tmall_store_controls_accept_live_store_page_form_action() -> None:
 
     assert search_input.get_attribute("id") == "mq"
     assert search_action.get_attribute("id") == "J_CurrShopBtn"
+
+
+def test_tmall_falls_back_to_the_approved_direct_store_search_route_when_legacy_controls_are_absent() -> None:
+    html = _live_observed_html().replace(
+        'name="searchTop"',
+        'name="modernStoreSearch"',
+        1,
+    )
+    page = _FixturePage(html=html)
+
+    observation = TmallAdapter(_xiaomi_spec()).observe(
+        _task(),
+        cast(Any, page),
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert len(page.goto_calls) == 3
+    search_url = urlsplit(page.goto_calls[1])
+    assert search_url.hostname == "xiaomi.tmall.com"
+    assert dict(parse_qsl(search_url.query))["q"] == "小米 15"
+
+
+def test_tmall_accepts_the_exact_approved_store_name_from_the_page_title_when_the_legacy_marker_is_absent() -> None:
+    html = _live_observed_html().replace(
+        'class="slogo-shopname"',
+        'class="modern-store-name"',
+        1,
+    )
+    page = _FixturePage(html=html)
+    page._url = "https://xiaomi.tmall.com/shop/view_shop.htm"
+
+    TmallAdapter(_xiaomi_spec())._require_approved_store(cast(Any, page))
+
+
+def test_tmall_accepts_the_approved_store_title_on_the_modern_store_root() -> None:
+    html = _live_observed_html().replace(
+        'class="slogo-shopname"',
+        'class="modern-store-name"',
+        1,
+    )
+    page = _FixturePage(html=html)
+    page._url = "https://xiaomi.tmall.com/"
+
+    TmallAdapter(_xiaomi_spec())._require_approved_store(cast(Any, page))
+
+
+def test_tmall_accepts_bounded_modern_store_wording() -> None:
+    spec = next(
+        candidate
+        for candidate in load_site_catalog()
+        if candidate.brand == "维沃"
+        and candidate.channel is WebsiteChannel.TMALL
+    )
+    html = _live_observed_html().replace(
+        "小米官方旗舰店 - 天猫",
+        "首页-vivo手机官方旗舰店-天猫Tmall.com",
+        1,
+    ).replace(
+        "小米官方旗舰店",
+        "vivo手机官方旗舰店",
+        1,
+    )
+    page = _FixturePage(html=html)
+    page._url = "https://vivo.tmall.com/"
+
+    TmallAdapter(spec)._require_approved_store(cast(Any, page))
+
+
+def test_tmall_accepts_one_matching_store_marker_alongside_a_generic_duplicate() -> None:
+    html = _live_observed_html().replace(
+        '<a class="slogo-shopname">小米官方旗舰店</a>',
+        '<a class="slogo-shopname">小米官方旗舰店</a>'
+        '<a class="slogo-shopname">官方旗舰店</a>',
+        1,
+    )
+    page = _FixturePage(html=html)
+
+    TmallAdapter(_xiaomi_spec())._require_approved_store(cast(Any, page))
+
+
+def test_tmall_rejects_a_conflicting_named_store_marker() -> None:
+    html = _live_observed_html().replace(
+        '<a class="slogo-shopname">小米官方旗舰店</a>',
+        '<a class="slogo-shopname">小米官方旗舰店</a>'
+        '<a class="slogo-shopname">其他品牌官方旗舰店</a>',
+        1,
+    )
+    page = _FixturePage(html=html)
+
+    with pytest.raises(LayoutRecognitionError, match="does not match"):
+        TmallAdapter(_xiaomi_spec())._require_approved_store(cast(Any, page))
+
+
+def test_tmall_rejects_an_unrelated_page_title_when_the_legacy_store_marker_is_absent() -> None:
+    html = _live_observed_html().replace(
+        'class="slogo-shopname"',
+        'class="modern-store-name"',
+        1,
+    ).replace(
+        "小米官方旗舰店 - 天猫",
+        "其他店铺 - 天猫",
+        1,
+    )
+    page = _FixturePage(html=html)
+
+    with pytest.raises(LayoutRecognitionError, match="identity is missing"):
+        TmallAdapter(_xiaomi_spec())._require_approved_store(cast(Any, page))
 
 
 def test_tmall_prefers_available_exact_model_card_over_sold_out_duplicate() -> None:
@@ -1386,6 +1599,10 @@ def test_tmall_store_readiness_exhaustion_waits_nine_times_then_keeps_layout_err
         'class="slogo-shopname"',
         'class="slogo-shopname" data-delayed-store hidden',
         1,
+    ).replace(
+        "小米官方旗舰店 - 天猫",
+        "其他店铺 - 天猫",
+        1,
     )
     page = _FixturePage(html=html)
 
@@ -1442,15 +1659,16 @@ def test_exact_store_identity_is_required() -> None:
         _observe(html=html)
 
 
-def test_matching_title_without_visible_store_marker_fails_closed() -> None:
+def test_matching_title_without_legacy_store_marker_uses_the_approved_host() -> None:
     html = re.sub(
         r'<header class="shop-header">.*?</header>',
         "",
         (FIXTURES / "normal.html").read_text("utf-8"),
     )
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html)
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_conflicting_visible_store_marker_in_fallback_family_fails_closed() -> None:
@@ -1478,14 +1696,15 @@ def test_store_search_ignores_same_page_global_search_decoy() -> None:
     assert _observe(html=html).outcome is BusinessOutcome.PRICE_FOUND
 
 
-def test_generic_global_controls_cannot_replace_bounded_store_search() -> None:
+def test_generic_global_controls_are_ignored_in_favour_of_the_approved_direct_store_search() -> None:
     html = _live_observed_html().replace(
         '<form name="searchTop"',
         '<form name="globalSearch"',
         1,
     )
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html)
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_result_page_store_conflict_fails_before_card_interpretation() -> None:
@@ -1711,6 +1930,24 @@ def test_nonblank_result_input_must_prove_exact_keyword_before_price_or_no_model
     html = html.replace(marker, f'class="shop-search-input" value="{value}"', 1)
     with pytest.raises(LayoutRecognitionError):
         _observe(html=html)
+
+
+def test_result_keyword_accepts_live_search_form_input_without_legacy_mq_id() -> None:
+    html = _live_observed_html("no_model.html")
+    html = html.replace(
+        '<input id="mq" class="s-combobox-input" name="q" value="小米 15"',
+        '<form name="SearchForm"><input class="navsearch-text" '
+        'name="keyword" value="小米 15"',
+        1,
+    ).replace(
+        '<section id="J_ShopSearchResult"',
+        '</form><section id="J_ShopSearchResult"',
+        1,
+    )
+
+    observation = _observe(html=html, after_search_url=_LIVE_RESULTS_URL)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
 
 
 def test_exact_model_rejects_pro_plus_ultra_and_accessory_cards() -> None:

@@ -520,6 +520,28 @@ def test_capture_failure_keeps_the_saved_observation_and_retries_same_page(
     assert results[0].state is TaskState.SUCCEEDED
 
 
+def test_capture_window_identity_failure_retries_the_same_observed_page(
+    runner_case: RunnerCase,
+) -> None:
+    """A transient macOS window match must not discard a valid website result."""
+
+    runner_case.capture.fail_codes = [
+        "CAPTURE_WINDOW_IDENTITY",
+        "CAPTURE_WINDOW_IDENTITY",
+        None,
+    ]
+
+    results = runner_case.runner.run((runner_case.task,))
+
+    checkpoint = runner_case.repository.load_observation(
+        runner_case.task.task_id
+    )
+    assert checkpoint is not None
+    assert checkpoint.price == Decimal("4999")
+    assert runner_case.page.goto_calls == [runner_case.official_detail_url]
+    assert results[0].state is TaskState.SUCCEEDED
+
+
 def test_restart_resumes_saved_observation_without_repeating_store_search(
     tmp_path: Path,
 ) -> None:

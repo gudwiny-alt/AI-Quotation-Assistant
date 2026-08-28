@@ -756,7 +756,11 @@ class EvidenceCapturePipeline:
             image = _load_capture(temporary_path)
             assess_capture_quality(
                 image,
-                expected_size=(display.width, display.height),
+                expected_size=(
+                    (display.width, display.height)
+                    if policy is MacCapturePolicy.STRICT
+                    else image.size
+                ),
             )
             annotations = (
                 draw_red_annotations(

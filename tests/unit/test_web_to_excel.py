@@ -32,6 +32,51 @@ def test_excel_thumbnail_preserves_high_resolution_for_readable_zoom() -> None:
     assert len(payload) <= 1536 * 1024
 
 
+def test_no_model_excel_thumbnail_preserves_extra_search_proof_detail() -> None:
+    """Search proof remains readable when a manager zooms the Excel image."""
+    source = BytesIO()
+    Image.new("RGB", (3840, 2160), "white").save(source, format="PNG")
+
+    payload = web_to_excel._excel_thumbnail(
+        source.getvalue(),
+        high_detail=True,
+    )
+
+    with Image.open(BytesIO(payload)) as thumbnail:
+        assert thumbnail.format == "JPEG"
+        assert thumbnail.size == (2560, 1440)
+    assert len(payload) <= 2 * 1024 * 1024
+
+
+def test_prepare_evidence_uses_extra_detail_only_for_no_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Product-detail captures keep their frozen size; no-model proof gets clarity."""
+    row = make_quote_row()
+    price_task, no_model_task = make_tasks((row,))[:2]
+    price_result = make_business_result(tmp_path, price_task)
+    no_model_result = make_business_result(
+        tmp_path,
+        no_model_task,
+        outcome=web_to_excel.BusinessOutcome.NO_MODEL,
+    )
+    detail_modes: list[bool] = []
+
+    def record_thumbnail(payload: bytes, *, high_detail: bool = False) -> bytes:
+        detail_modes.append(high_detail)
+        return payload
+
+    monkeypatch.setattr(web_to_excel, "_excel_thumbnail", record_thumbnail)
+
+    web_to_excel._prepare_evidence(
+        (price_result, no_model_result),
+        capture_acceptance_policy=MacCapturePolicy.STRICT,
+    )
+
+    assert detail_modes == [False, True]
+
+
 def test_default_excel_publication_rejects_mac_visual_review_evidence(tmp_path) -> None:
     """Catches publishing beta evidence from the ordinary batch entry point."""
     row = make_quote_row()

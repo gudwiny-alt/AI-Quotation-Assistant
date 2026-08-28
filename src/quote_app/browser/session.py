@@ -371,6 +371,9 @@ class NativeChromeCdpSession:
             command = [
                 str(choice.executable_path),
                 *launch_args,
+                # Leave macOS in charge of the renderer scale.  Pinning Chrome
+                # to 1x makes the dedicated JD window visibly soft on Retina
+                # displays even though the native screen capture is 4K.
                 "--force-renderer-accessibility",
                 "--remote-debugging-address=127.0.0.1",
                 f"--remote-debugging-port={port}",

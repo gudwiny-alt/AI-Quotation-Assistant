@@ -42,7 +42,7 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "OPPO无精确机型证据修复版（官网天猫先行·京东独立收尾）2026.08.23.122"
+APP_BUILD_LABEL = "京东荣耀苹果定点修复版（六品牌三渠道）2026.08.26.135"
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：选中品牌依次执行全部官网、全部天猫，最后执行全部京东；"
     "京东独立登录状态会持久保留，首次使用无需预先登录；"

@@ -20,6 +20,7 @@ from quote_app.evidence.platform import PlatformEvidenceCapture
 from quote_app.evidence.validation import read_validated_evidence
 from quote_app.sites.catalog import site_session_family
 from quote_app.sites.honor_diagnostics import capture_honor_search_diagnostic
+from quote_app.sites.huawei_diagnostics import capture_huawei_search_diagnostic
 from quote_app.sites.oppo_diagnostics import capture_oppo_search_diagnostic
 from quote_app.sites.registry import AdapterRegistry
 from quote_app.browser.worker import WorkerEvent
@@ -394,6 +395,11 @@ def _capture_search_diagnostic(
         path,
         page,
     ) or capture_oppo_search_diagnostic(
+        task,
+        error,
+        path,
+        page,
+    ) or capture_huawei_search_diagnostic(
         task,
         error,
         path,

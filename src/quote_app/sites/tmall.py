@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.platform import PlatformEvidenceCapture
@@ -171,6 +171,7 @@ _TMALL_ITEM_OPTIONAL_QUERY_KEYS = frozenset(
     }
 )
 _NUMERIC_SKU = re.compile(r"^[0-9]+$")
+_STORAGE_ONLY_CAPACITY = re.compile(r"^[1-9][0-9]*(?:GB|TB)$", re.IGNORECASE)
 _TMALL_SKU_PROPERTIES = re.compile(r"^[0-9]+:[0-9]+(?:;[0-9]+:[0-9]+)*$")
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _LOGIN_HOSTS = frozenset({"login.tmall.com", "login.taobao.com"})
@@ -283,16 +284,23 @@ class TmallAdapter:
                 task.model_name,
             )
             if detail_url is None:
-                search_input, search_action = self._wait_for_store_search_controls(
-                    browser_page,
-                )
                 stage[0] = "天猫搜索页"
-                search_input.fill(task.model_name)
-                click_and_wait_for_navigation(
-                    browser_page,
-                    search_action,
-                    semantic_name="天猫店铺搜索",
-                )
+                try:
+                    search_input, search_action = self._wait_for_store_search_controls(
+                        browser_page,
+                    )
+                except LayoutRecognitionError:
+                    browser_page.goto(
+                        self._direct_store_search_url(task.model_name),
+                        wait_until="domcontentloaded",
+                    )
+                else:
+                    search_input.fill(task.model_name)
+                    click_and_wait_for_navigation(
+                        browser_page,
+                        search_action,
+                        semantic_name="天猫店铺搜索",
+                    )
                 self._raise_if_blocked_or_error(browser_page)
                 _validate_store_search_url(
                     browser_page.url,
@@ -389,7 +397,11 @@ class TmallAdapter:
         capacity = self._exact_option(
             capacity_group,
             TMALL_SKU_VALUES,
-            lambda label: capacity_matches(label, task.ram, task.storage),
+            lambda label: self._capacity_label_matches(
+                capacity_group,
+                task,
+                label,
+            ),
             semantic_name="capacity",
         )
         if _is_explicitly_disabled(capacity):
@@ -401,7 +413,31 @@ class TmallAdapter:
                 (_css_rect(capacity, "capacity"),),
             )
         self._prepare_exact_option(capacity)
-        self._wait_for_selected(browser_page, capacity, "capacity")
+        retry_capacity: Callable[[], Any] | None = None
+        if normalize_product_text(task.brand) == "欧珀":
+            def _retry_capacity() -> Any:
+                current_group = self._sku_option_group(
+                    browser_page,
+                    "存储容量",
+                )
+                return self._exact_option(
+                    current_group,
+                    TMALL_SKU_VALUES,
+                    lambda label: self._capacity_label_matches(
+                        current_group,
+                        task,
+                        label,
+                    ),
+                    semantic_name="capacity",
+                )
+            retry_capacity = _retry_capacity
+
+        self._wait_for_selected(
+            browser_page,
+            capacity,
+            "capacity",
+            retry_resolver=retry_capacity,
+        )
         self._raise_if_blocked_or_error(browser_page)
         self._require_exact_detail_url(browser_page, detail_url)
 
@@ -419,7 +455,11 @@ class TmallAdapter:
             self._unique_selected_option(
                 capacity_group,
                 TMALL_SKU_VALUES,
-                lambda label: capacity_matches(label, task.ram, task.storage),
+                lambda label: self._capacity_label_matches(
+                    capacity_group,
+                    task,
+                    label,
+                ),
                 semantic_name="capacity",
             )
             self._require_exact_detail_url(browser_page, detail_url)
@@ -528,10 +568,15 @@ class TmallAdapter:
         self._require_exact_detail_url(browser_page, expected.canonical_url)
         self._require_approved_detail_seller(browser_page)
         title = self._matching_detail_titles(browser_page, task)[0]
+        capacity_group = self._sku_option_group(browser_page, "存储容量")
         capacity = self._exact_option(
-            self._sku_option_group(browser_page, "存储容量"),
+            capacity_group,
             TMALL_SKU_VALUES,
-            lambda label: capacity_matches(label, task.ram, task.storage),
+            lambda label: self._capacity_label_matches(
+                capacity_group,
+                task,
+                label,
+            ),
             semantic_name="capacity",
         )
         color = self._exact_option(
@@ -794,10 +839,10 @@ class TmallAdapter:
         capacity = self._exact_option(
             capacity_group,
             TMALL_SKU_VALUES,
-            lambda label: capacity_matches(
+            lambda label: self._capacity_label_matches(
+                capacity_group,
+                task,
                 label,
-                task.ram,
-                task.storage,
             ),
             semantic_name="capacity",
         )
@@ -822,7 +867,11 @@ class TmallAdapter:
         self._unique_selected_option(
             capacity_group,
             TMALL_SKU_VALUES,
-            lambda label: capacity_matches(label, task.ram, task.storage),
+            lambda label: self._capacity_label_matches(
+                capacity_group,
+                task,
+                label,
+            ),
             semantic_name="capacity",
         )
         color = self._exact_option(
@@ -876,15 +925,31 @@ class TmallAdapter:
 
     def _require_approved_store(self, page: Any) -> None:
         markers = _all_visible_locators(page, TMALL_STORE_MARKERS)
-        if not markers:
-            raise LayoutRecognitionError("Tmall approved store identity is missing")
-        if any(
-            marker.inner_text().strip() != self.spec.store_name
-            for marker in markers
-        ):
+        if markers:
+            marker_texts = tuple(marker.inner_text().strip() for marker in markers)
+            matching = tuple(
+                text
+                for text in marker_texts
+                if _tmall_store_name_matches(text, self.spec.store_name)
+            )
+            conflicting = tuple(
+                text
+                for text in marker_texts
+                if _is_named_store_marker(text)
+                and not _tmall_store_name_matches(text, self.spec.store_name)
+            )
+            if matching and not conflicting:
+                return
             raise LayoutRecognitionError(
                 "Tmall visible store identity does not match"
             )
+        if (
+            (urlsplit(page.url).hostname or "").lower()
+            == _required_entry_host(self.spec.entry_url)
+            and _tmall_store_title_matches(page.title(), self.spec.store_name)
+        ):
+            return
+        raise LayoutRecognitionError("Tmall approved store identity is missing")
 
     def _wait_for_approved_store(self, page: Any) -> None:
         for poll in range(_MAX_STORE_READY_POLLS):
@@ -948,6 +1013,21 @@ class TmallAdapter:
                     raise
                 page.wait_for_timeout(_STORE_READY_INTERVAL_MS)
         raise AssertionError("Tmall store readiness loop did not return or raise")
+
+    def _direct_store_search_url(self, model_name: str) -> str:
+        host = _required_entry_host(self.spec.entry_url)
+        query = urlencode(
+            {
+                "q": model_name,
+                "type": "p",
+                "search": "y",
+                "newHeader_b": "s",
+                "searcy_type": "item",
+                "from": ".shop.pc_2_searchbutton",
+                "spm": "a1",
+            }
+        )
+        return f"https://{host}/?{query}"
 
     def _wait_for_result_region(self, page: Any) -> Any:
         for poll in range(_MAX_STORE_READY_POLLS):
@@ -1180,14 +1260,57 @@ class TmallAdapter:
         page: Any,
         option: Any,
         semantic_name: str,
+        *,
+        retry_resolver: Callable[[], Any] | None = None,
     ) -> None:
         for _ in range(_MAX_SELECTION_POLLS):
             if _is_approved_selected(option):
                 return
             page.wait_for_timeout(_POLL_INTERVAL_MS)
             self._raise_if_blocked_or_error(page)
+        if retry_resolver is not None:
+            option = retry_resolver()
+            self._prepare_exact_option(option)
+            for _ in range(_MAX_SELECTION_POLLS):
+                if _is_approved_selected(option):
+                    return
+                page.wait_for_timeout(_POLL_INTERVAL_MS)
+                self._raise_if_blocked_or_error(page)
         raise LayoutRecognitionError(
             f"Tmall exact {semantic_name} option did not reach a selected state"
+        )
+
+    def _capacity_label_matches(
+        self,
+        group: Any,
+        task: WebsiteTask,
+        label: str,
+    ) -> bool:
+        if capacity_matches(label, task.ram, task.storage):
+            return True
+        if not self._allows_huawei_fixed_ram_storage_only(group, task):
+            return False
+        return normalize_product_text(label) == normalize_product_text(task.storage)
+
+    @staticmethod
+    def _allows_huawei_fixed_ram_storage_only(
+        group: Any,
+        task: WebsiteTask,
+    ) -> bool:
+        if (
+            normalize_product_text(task.brand) != "华为"
+            or normalize_product_text(task.model_name)
+            != normalize_product_text("华为畅享 90 Pro Max")
+            or normalize_product_text(task.ram) != "8GB"
+        ):
+            return False
+        labels = tuple(
+            normalize_product_text(option.inner_text())
+            for option in visible_locators(group, TMALL_SKU_VALUES)
+        )
+        return bool(labels) and all(
+            _STORAGE_ONLY_CAPACITY.fullmatch(label) is not None
+            for label in labels
         )
 
     def _selected_configuration_snapshot(
@@ -1195,10 +1318,15 @@ class TmallAdapter:
         page: Any,
         task: WebsiteTask,
     ) -> tuple[str, str]:
+        capacity_group = self._sku_option_group(page, "存储容量")
         capacity = self._unique_selected_option(
-            self._sku_option_group(page, "存储容量"),
+            capacity_group,
             TMALL_SKU_VALUES,
-            lambda label: capacity_matches(label, task.ram, task.storage),
+            lambda label: self._capacity_label_matches(
+                capacity_group,
+                task,
+                label,
+            ),
             semantic_name="capacity",
         )
         color = self._unique_selected_option(
@@ -1512,6 +1640,41 @@ def _all_visible_locators(
 def _visible_page_contains(page: Any, text: str) -> bool:
     bodies = visible_locators(page, ("body",))
     return any(text in body.inner_text() for body in bodies)
+
+
+def _compact_store_name(value: str) -> str:
+    return normalize_product_text(value).replace(" ", "")
+
+
+def _tmall_store_name_matches(actual_name: str, expected_name: str) -> bool:
+    """Match bounded wording used by the same approved Tmall flagship store."""
+
+    actual = _compact_store_name(actual_name)
+    expected = _compact_store_name(expected_name)
+    if not actual or not expected:
+        return False
+    if actual == expected:
+        return True
+    return actual.replace("手机", "") == expected.replace("手机", "")
+
+
+def _tmall_store_title_matches(title: str, expected_name: str) -> bool:
+    actual = _compact_store_name(title)
+    expected = _compact_store_name(expected_name)
+    if not actual or not expected:
+        return False
+    variants = {expected, expected.replace("手机", "")}
+    actual_variants = {actual, actual.replace("手机", "")}
+    return any(
+        wanted and wanted in candidate
+        for wanted in variants
+        for candidate in actual_variants
+    )
+
+
+def _is_named_store_marker(value: str) -> bool:
+    compact = _compact_store_name(value)
+    return "旗舰店" in compact and compact not in {"旗舰店", "官方旗舰店"}
 
 
 def _is_explicitly_disabled(locator: Any) -> bool:

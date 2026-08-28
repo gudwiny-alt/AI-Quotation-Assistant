@@ -92,6 +92,7 @@ _CAPTURE_RETRY_CODES = frozenset(
         "CAPTURE_UNSTABLE",
         "CAPTURE_OBSCURED",
         "CAPTURE_GEOMETRY",
+        "CAPTURE_WINDOW_IDENTITY",
         "CAPTURE_FAILED",
     }
 )

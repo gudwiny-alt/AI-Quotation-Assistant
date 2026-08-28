@@ -112,6 +112,21 @@ def test_binder_returns_exact_pid_and_physical_bounds_match() -> None:
     assert bound.identity.window_handle != str(bound.chromium.cdp_window_id)
 
 
+def test_binder_can_match_logical_macos_window_coordinates_on_retina() -> None:
+    """CGWindow and CDP can both report logical screen coordinates."""
+
+    logical_native = _native(bounds_px=_chromium().bounds_dip)
+
+    bound = MacWindowBinder(window_coordinate_scale=1.0).bind(
+        _chromium(),
+        (logical_native,),
+        now_monotonic=_NOW,
+    )
+
+    assert bound.native is logical_native
+    assert bound.chromium.device_pixel_ratio == 2.0
+
+
 @pytest.mark.parametrize(
     "windows",
     [

@@ -58,7 +58,7 @@ JD_MODERN_DETAIL_SELLER_MARKERS = (
     ".shop-plugin",
 )
 JD_MODERN_SKU_OPTIONS = (
-    ".specification-item-sku",
+    ".specification-item-sku, [data-sku-name]",
 )
 JD_MODERN_CURRENT_SKU_SELLING_PRICES = (
     ".product-price--main",
@@ -111,6 +111,7 @@ TMALL_STORE_SEARCH_FORMS = (
 )
 TMALL_SEARCH_INPUTS = (
     "#mq",
+    'form[name="SearchForm"] input.navsearch-text[name="keyword"]',
 )
 TMALL_SEARCH_ACTIONS = (
     "#J_CurrShopBtn",

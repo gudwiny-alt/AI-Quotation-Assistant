@@ -59,7 +59,7 @@ from quote_app.evidence.semantic_state import (
 )
 from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.detail_capture_view import CaptureViewGeometryError
-from quote_app.tasks.models import WebsiteChannel, WebsiteTask
+from quote_app.tasks.models import BusinessOutcome, WebsiteChannel, WebsiteTask
 from quote_app.tasks.retry import LayoutRecognitionError, LoginRequired
 
 ReaderFactory = Callable[
@@ -77,7 +77,9 @@ _MAC_VISUAL_REVIEW_WINDOW_ARGS = (
     "--window-position=24,49",
     "--window-size=1464,893",
 )
-_LIVE_OFFICIAL_CAPTURE_BRANDS = ("小米", "欧珀", "维沃", "华为", "苹果")
+_SIX_CAPTURE_BRANDS = ("HONOR", "小米", "欧珀", "维沃", "华为", "苹果")
+_LIVE_OFFICIAL_CAPTURE_BRANDS = _SIX_CAPTURE_BRANDS
+_MARKETPLACE_CAPTURE_BRANDS = _SIX_CAPTURE_BRANDS
 _CAPTURE_VIEW_GEOMETRY_MESSAGES = {
     "缩放验证": "正式截图缩放验证失败",
     "搜索框定位": "正式截图搜索框定位失败",
@@ -221,7 +223,11 @@ class MacFormalCaptureRuntime:
             ),
         )
         self._bridge = bridge or MacNativeBridge()
-        self._binder = binder or MacWindowBinder()
+        self._binder = binder or MacWindowBinder(
+            window_coordinate_scale=(
+                1.0 if uses_darwin_beta_visual_review else None
+            )
+        )
         self._environment_factory = environment_factory
         self._monotonic_clock = monotonic_clock or time.monotonic
         self._sleeper = sleeper or time.sleep
@@ -230,9 +236,13 @@ class MacFormalCaptureRuntime:
             self._reader_factories = (
                 {
                     **{
-                        ("HONOR", channel):
-                            self._injected_honor_reader_factory
-                        for channel in WebsiteChannel
+                        (brand, channel):
+                            self._injected_marketplace_reader_factory
+                        for brand in _MARKETPLACE_CAPTURE_BRANDS
+                        for channel in (
+                            WebsiteChannel.JD,
+                            WebsiteChannel.TMALL,
+                        )
                     },
                     **{
                         (brand, WebsiteChannel.OFFICIAL):
@@ -996,22 +1006,47 @@ class MacFormalCaptureRuntime:
         page: Any,
         state: VerifiedSemanticState,
     ) -> SemanticStateReader:
+        """Backward-compatible entry point for the original HONOR bundle."""
+
+        if task.channel is WebsiteChannel.OFFICIAL:
+            return self._injected_live_official_reader_factory(
+                task,
+                page,
+                state,
+            )
+        return self._injected_marketplace_reader_factory(task, page, state)
+
+    def _injected_marketplace_reader_factory(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        state: VerifiedSemanticState,
+    ) -> SemanticStateReader:
         registry = self._adapter_registry
         if registry is None:
             raise ValueError(
-                "HONOR verified-state reader registry is required"
+                "Marketplace verified-state reader registry is required"
             )
         adapter = registry.adapter_for(task.brand, task.channel)
         self._prepared_adapters[(task.brand, task.channel)] = adapter
         spec = getattr(adapter, "spec", None)
         if (
-            getattr(spec, "brand", None) != task.brand
-            or getattr(spec, "channel", None) is not task.channel
+            not isinstance(spec, SiteSpec)
+            or task.brand not in _MARKETPLACE_CAPTURE_BRANDS
+            or task.channel not in (WebsiteChannel.JD, WebsiteChannel.TMALL)
+            or spec.brand != task.brand
+            or spec.channel is not task.channel
             or getattr(adapter, "channel", None) is not task.channel
         ):
             raise ValueError(
-                "HONOR verified-state reader adapter does not match task"
+                "Marketplace verified-state reader adapter does not match task"
             )
+        try:
+            spec.validate_approved()
+        except ValueError:
+            raise ValueError(
+                "Marketplace verified-state reader adapter is not approved"
+            ) from None
         capture_view_preparer = getattr(adapter, "prepare_capture_view", None)
         prepared = False
         try:
@@ -1019,9 +1054,20 @@ class MacFormalCaptureRuntime:
                 try:
                     capture_view_preparer(task, page, state)
                 except CaptureViewGeometryError as error:
-                    raise self._capture_view_layout_error(
-                        error,
-                    ) from None
+                    if not (
+                        task.channel is WebsiteChannel.JD
+                        and error.safe_stage == "结果区域定位"
+                        and (
+                            state.outcome is BusinessOutcome.PRICE_FOUND
+                            or (
+                                state.outcome is BusinessOutcome.NO_MODEL
+                                and self._uses_darwin_beta_visual_review()
+                            )
+                        )
+                    ):
+                        raise self._capture_view_layout_error(
+                            error,
+                        ) from None
                 except LayoutRecognitionError as error:
                     raise self._capture_view_semantic_error(
                         error,
@@ -1030,7 +1076,7 @@ class MacFormalCaptureRuntime:
             reader_builder = getattr(adapter, "verified_state_reader", None)
             if not callable(reader_builder):
                 raise ValueError(
-                    "HONOR verified-state reader is unavailable for channel"
+                    "Marketplace verified-state reader is unavailable for channel"
                 )
             return reader_builder(task, page, state)
         except BaseException:
@@ -1141,6 +1187,11 @@ class MacFormalCaptureRuntime:
         )
         if adapter is None:
             adapter = registry.adapter_for(task.brand, task.channel)
+        if (
+            self._uses_darwin_beta_visual_review()
+            and task.channel is WebsiteChannel.JD
+        ):
+            return None
         reader = getattr(adapter, "capture_rectangles_for_capture", None)
         if not callable(reader):
             return None

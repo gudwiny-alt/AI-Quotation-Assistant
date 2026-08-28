@@ -7,13 +7,18 @@ from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
 from quote_app.sites.catalog import SUPPORTED_BRANDS, SiteSpec, load_site_catalog
 from quote_app.sites.detail_capture_view import CaptureViewGeometryError
-from quote_app.sites.jd import JDAdapter, _jd_color_matches
+from quote_app.sites.jd import (
+    JDAdapter,
+    _jd_color_matches,
+    _jd_store_name_matches,
+    _modern_seller_matches,
+)
 from quote_app.sites.protocol import SiteObservationAdapter
 from quote_app.sites.registry import AdapterRegistry, RegisteredSiteAdapter
 from quote_app.tasks.models import (
@@ -247,6 +252,7 @@ class _FixturePage:
         price_snapshots: tuple[tuple[str, ...], ...] | None = None,
         price_sku_snapshots: tuple[tuple[str | None, ...], ...] | None = None,
         detail_redirect_url: str | None = None,
+        detail_redirect_urls: tuple[str | None, ...] | None = None,
         capacity_context_mode: str = "immediate",
         store_controls_ready_after: int | None = None,
         result_region_ready_after: int | None = None,
@@ -254,6 +260,7 @@ class _FixturePage:
         detail_seller_ready_after: int | None = None,
         modern_sku_ready_after_scroll: int | None = None,
         modern_exclusive_selection: bool = True,
+        modern_color_resets_capacity: bool = False,
         modern_price_after_selection: tuple[str, ...] | None = None,
         result_title_after_search_anchor: str | None = None,
         empty_state_in_viewport: bool = True,
@@ -271,6 +278,8 @@ class _FixturePage:
         self.after_search_urls = after_search_urls
         self.after_search_url_index = 0
         self.goto_calls: list[str] = []
+        self.goto_call_options: list[tuple[str, dict[str, object]]] = []
+        self.detail_navigation_count = 0
         self.selected_options: set[str] = set()
         self.option_scrolls: list[str] = []
         self.option_events: list[str] = []
@@ -289,6 +298,7 @@ class _FixturePage:
         self.price_sku_snapshots = price_sku_snapshots
         self.price_snapshot_reads = 0
         self.detail_redirect_url = detail_redirect_url
+        self.detail_redirect_urls = detail_redirect_urls
         self.capacity_context_mode = capacity_context_mode
         self.store_controls_ready_after = store_controls_ready_after
         self.result_region_ready_after = result_region_ready_after
@@ -296,6 +306,7 @@ class _FixturePage:
         self.detail_seller_ready_after = detail_seller_ready_after
         self.modern_sku_ready_after_scroll = modern_sku_ready_after_scroll
         self.modern_exclusive_selection = modern_exclusive_selection
+        self.modern_color_resets_capacity = modern_color_resets_capacity
         self.modern_price_after_selection = modern_price_after_selection
         self.result_title_after_search_anchor = result_title_after_search_anchor
         self.empty_state_in_viewport = empty_state_in_viewport
@@ -322,13 +333,23 @@ class _FixturePage:
     def url(self) -> str:
         return self._url
 
-    def goto(self, url: str, **_kwargs: object) -> None:
+    def goto(self, url: str, **kwargs: object) -> None:
         self.goto_calls.append(url)
+        self.goto_call_options.append((url, kwargs))
         self._url = url
         if urlsplit(url).hostname == "item.jd.com":
             self.activate("product")
-            if self.detail_redirect_url is not None:
-                self._url = self.detail_redirect_url
+            redirect_url = self.detail_redirect_url
+            if self.detail_redirect_urls is not None:
+                redirect_url = self.detail_redirect_urls[
+                    min(
+                        self.detail_navigation_count,
+                        len(self.detail_redirect_urls) - 1,
+                    )
+                ]
+            self.detail_navigation_count += 1
+            if redirect_url is not None:
+                self._url = redirect_url
         elif (
             urlsplit(url).hostname == "mall.jd.com"
             and urlsplit(url).path.startswith("/view_search-")
@@ -606,6 +627,15 @@ class _FixturePage:
 
     def _apply_selection(self, node: _Node) -> None:
         option_kind = self.option_kind(node)
+        if option_kind == "modern-color" and self.modern_color_resets_capacity:
+            for sibling in self.root.descendants():
+                if self.option_kind(sibling) != "modern-capacity":
+                    continue
+                sibling.attrs["aria-selected"] = "false"
+                sibling_classes = set(sibling.attrs.get("class", "").split())
+                sibling_classes.discard("specification-item-sku--selected")
+                sibling.attrs["class"] = " ".join(sorted(sibling_classes))
+                self.selected_options.discard(sibling.text)
         if option_kind.startswith("modern-") and self.modern_exclusive_selection:
             for sibling in self.root.descendants():
                 if sibling is node or self.option_kind(sibling) != option_kind:
@@ -648,6 +678,13 @@ def _pixels(value: str | None, default: float) -> float:
 
 
 def _select(nodes: list[_Node], selector: str) -> list[_Node]:
+    if "," in selector:
+        matched: list[_Node] = []
+        for alternative in selector.split(","):
+            for node in _select(nodes, alternative.strip()):
+                if node not in matched:
+                    matched.append(node)
+        return matched
     parts = selector.strip().split()
     if not parts:
         return []
@@ -709,6 +746,22 @@ def _honor_spec() -> SiteSpec:
         spec
         for spec in load_site_catalog()
         if spec.brand == "HONOR" and spec.channel is WebsiteChannel.JD
+    )
+
+
+def _apple_spec() -> SiteSpec:
+    return next(
+        spec
+        for spec in load_site_catalog()
+        if spec.brand == "苹果" and spec.channel is WebsiteChannel.JD
+    )
+
+
+def _huawei_spec() -> SiteSpec:
+    return next(
+        spec
+        for spec in load_site_catalog()
+        if spec.brand == "华为" and spec.channel is WebsiteChannel.JD
     )
 
 
@@ -862,7 +915,7 @@ def test_jd_entry_layout_failure_is_labeled_as_store_page() -> None:
     with pytest.raises(LayoutRecognitionError) as caught:
         _observe(html=html)
 
-    assert caught.value.stage == "京东店铺页"
+    assert caught.value.stage == "京东搜索页"
 
 
 def test_jd_waits_for_store_search_controls_before_declaring_layout_changed() -> None:
@@ -931,6 +984,55 @@ def test_jd_accepts_the_live_store_result_list_container() -> None:
     observation = _observe(html=html)
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_jd_falls_back_to_the_approved_direct_store_search_route_when_legacy_controls_are_absent() -> None:
+    html = (FIXTURES / "normal.html").read_text("utf-8").replace(
+        'class="i-search"',
+        'class="modern-store-search"',
+        1,
+    )
+    page = _FixturePage(html=html)
+
+    observation = JDAdapter(_xiaomi_spec()).observe(
+        _task(),
+        cast(Any, page),
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert len(page.goto_calls) == 3
+    search_url = urlsplit(page.goto_calls[1])
+    assert search_url.hostname == "mall.jd.com"
+    assert dict(parse_qsl(search_url.query))["keyword"] == "小米 15"
+
+
+@pytest.mark.parametrize(
+    ("visible_name", "approved_name"),
+    (
+        ("华为京东自营旗舰店", "华为京东自营官方旗舰店"),
+        ("vivo京东自营旗舰店", "vivo京东自营官方旗舰店"),
+        ("OPPO京东自营旗舰店", "OPPO京东自营官方旗舰店"),
+    ),
+)
+def test_jd_accepts_the_bounded_official_wording_difference_in_store_identity(
+    visible_name: str,
+    approved_name: str,
+) -> None:
+    assert _jd_store_name_matches(visible_name, approved_name)
+
+
+def test_jd_store_identity_does_not_accept_an_unrelated_merchant() -> None:
+    assert not _jd_store_name_matches(
+        "OPPO第三方专营店",
+        "OPPO京东自营官方旗舰店",
+    )
+
+
+def test_jd_modern_detail_accepts_the_bounded_official_wording_difference() -> None:
+    assert _modern_seller_matches(
+        "华为京东自营旗舰店",
+        "华为京东自营官方旗舰店",
+    )
 
 
 def test_jd_accepts_the_unique_marketing_colour_for_a_generic_base_colour() -> None:
@@ -1250,6 +1352,629 @@ def test_modern_detail_selects_available_configuration_and_reads_valid_price() -
     assert observation.url == "https://item.jd.com/100012345678.html"
 
 
+def test_modern_detail_reads_sku_labels_from_accessible_attributes() -> None:
+    """JD can render option names outside the locator's visible text node."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        '<div class="specification-item-sku '
+        'specification-item-sku--selected">12GB+256GB</div>',
+        '<div class="specification-item-sku '
+        'specification-item-sku--selected" '
+        'aria-label="12GB+256GB">容量 GB</div>',
+        1,
+    ).replace(
+        '<div class="specification-item-sku '
+        'specification-item-sku--selected">黑色</div>',
+        '<div class="specification-item-sku '
+        'specification-item-sku--selected" title="黑色">颜色选项</div>',
+        1,
+    )
+    page = _FixturePage(html=html)
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )() == observation.semantic_state
+
+
+def test_modern_apple_detail_matches_its_storage_only_capacity_option() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "Apple产品京东自营旗舰店",
+    ).replace(
+        "小米 15",
+        "iPhone 17",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 256GB 黑色 支持双卡双待手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 256GB 黑色 支持双卡双待手机",
+    ).replace(
+        ">12GB+256GB<",
+        ">256GB<",
+    ).replace(
+        ">16GB+512GB 无货<",
+        ">512GB 无货<",
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    page = _FixturePage(
+        html=html,
+        modern_color_resets_capacity=True,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000004123-99-1-24-1.html"
+            "?keyword=iPhone%2017"
+        ),
+    )
+    adapter = JDAdapter(_apple_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert page.option_events[:4] == [
+        "scroll:modern-color",
+        "click:modern-color",
+        "scroll:modern-capacity",
+        "click:modern-capacity",
+    ]
+    assert {"黑色", "256GB"} <= page.selected_options
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    assert page.capture_view_positions == []
+
+
+def test_modern_apple_detail_uses_visible_color_when_stock_title_is_composite() -> None:
+    """An unavailable Apple swatch title must not hide its visible colour label."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "Apple产品京东自营旗舰店",
+    ).replace(
+        "小米 15",
+        "iPhone 17",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        ">12GB+256GB<",
+        ">256GB<",
+    ).replace(
+        ">16GB+512GB 无货<",
+        ">512GB 无货<",
+    ).replace(
+        '<div class="specification-item-sku '
+        'specification-item-sku--selected">黑色</div>',
+        '<div class="specification-item-sku specification-item-sku--lack" '
+        'title="黑色-256GB-公开版 无货">'
+        '<span class="specification-item-sku-text">黑色</span>'
+        '<span class="specification-item-sku--lack-tag">无货</span>'
+        "</div>",
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    page = _FixturePage(
+        html=html,
+        modern_color_resets_capacity=True,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000004123-99-1-24-1.html"
+            "?keyword=iPhone%2017"
+        ),
+    )
+
+    observation = JDAdapter(_apple_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert page.option_events[:4] == [
+        "scroll:modern-color",
+        "click:modern-color",
+        "scroll:modern-capacity",
+        "click:modern-capacity",
+    ]
+    assert {"黑色无货", "256GB"} <= page.selected_options
+
+
+def test_modern_apple_detail_matches_attribute_labelled_sku_options() -> None:
+    """Current Apple detail controls can expose labels only via data-sku-name."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "Apple产品京东自营旗舰店",
+    ).replace(
+        "小米 15",
+        "iPhone 17",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        '<div class="specification-item-sku specification-item-sku--selected">12GB+256GB</div>',
+        '<div class="item" data-sku-name="256GB" aria-selected="true">选择容量</div>',
+    ).replace(
+        '<div class="specification-item-sku specification-item-sku--lack" style="left:20px;top:120px;width:150px;height:28px">16GB+512GB 无货</div>',
+        '<div class="item" data-sku-name="512GB 无货" aria-selected="false">其他容量</div>',
+    ).replace(
+        '<div class="specification-item-sku specification-item-sku--selected">黑色</div>',
+        '<div class="item" data-sku-name="黑色" aria-selected="true">选择颜色</div>',
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000004123-99-1-24-1.html"
+            "?keyword=iPhone%2017"
+        ),
+    )
+
+    observation = JDAdapter(_apple_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert {"选择容量", "选择颜色"} <= page.selected_options
+
+
+def test_modern_apple_detail_prefers_actionable_leaf_over_labelled_wrapper() -> None:
+    """Apple can expose the same SKU label on a wrapper and its button."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "Apple产品京东自营旗舰店",
+    ).replace(
+        "小米 15",
+        "iPhone 17",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        '<div class="specification-item-sku '
+        'specification-item-sku--selected">12GB+256GB</div>',
+        '<div data-sku-name="256GB" aria-selected="true">'
+        '<div class="item" data-sku-name="256GB" '
+        'aria-selected="true">256GB</div></div>',
+    ).replace(
+        '<div class="specification-item-sku '
+        'specification-item-sku--selected">黑色</div>',
+        '<div data-sku-name="黑色" aria-selected="true">'
+        '<div class="item" data-sku-name="黑色" '
+        'aria-selected="true">黑色</div></div>',
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000004123-99-1-24-1.html"
+            "?keyword=iPhone%2017"
+        ),
+    )
+
+    observation = JDAdapter(_apple_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert {"黑色", "256GB"} <= page.selected_options
+
+
+def test_modern_apple_detail_uses_legacy_sku_controls_in_hybrid_template() -> None:
+    """Apple can pair JD's modern title pane with legacy colour/SKU buttons."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "Apple产品京东自营旗舰店",
+    ).replace(
+        "小米 15",
+        "iPhone 17",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        """<section class="modern-specifications">
+        <div class="specification-item-sku specification-item-sku--selected">12GB+256GB</div>
+        <div class="specification-item-sku specification-item-sku--lack" style="left:20px;top:120px;width:150px;height:28px">16GB+512GB 无货</div>
+        <div class="specification-item-sku specification-item-sku--selected">黑色</div>
+      </section>""",
+        """<section class="choose-attrs">
+        <div class="p-choose" data-type="color">
+          <div class="item">薰衣草紫色</div>
+          <div class="item">黑色</div>
+        </div>
+        <div class="p-choose" data-type="capacity">
+          <div class="item">512GB</div>
+          <div class="item">256GB</div>
+        </div>
+      </section>""",
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000004123-99-1-24-1.html"
+            "?keyword=iPhone%2017"
+        ),
+    )
+
+    observation = JDAdapter(_apple_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert {"黑色", "256GB"} <= page.selected_options
+    JDAdapter(_apple_spec()).prepare_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+
+def test_modern_apple_detail_selects_numbered_jd_attribute_groups() -> None:
+    """Apple's current JD page exposes colour/storage under choose-attr IDs."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "Apple产品京东自营旗舰店",
+    ).replace(
+        "小米 15",
+        "iPhone 17",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 手机",
+    ).replace(
+        """<section class="modern-specifications">
+        <div class="specification-item-sku specification-item-sku--selected">12GB+256GB</div>
+        <div class="specification-item-sku specification-item-sku--lack" style="left:20px;top:120px;width:150px;height:28px">16GB+512GB 无货</div>
+        <div class="specification-item-sku specification-item-sku--selected">黑色</div>
+      </section>""",
+        """<section class="choose-attrs">
+        <div id="choose-attr-1" class="li p-choose" data-type="系列品">
+          <div class="item" aria-selected="true">iPhone 17</div>
+        </div>
+        <div id="choose-attr-2" class="li p-choose" data-type="外观">
+          <div class="item" aria-selected="false">薰衣草紫色</div>
+          <div class="item" aria-selected="false">黑色 无货</div>
+        </div>
+        <div id="choose-attr-3" class="li p-choose" data-type="存储容量">
+          <div class="item" aria-selected="false">512GB</div>
+          <div class="item" aria-selected="false">256GB</div>
+        </div>
+      </section>""",
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000004123-99-1-24-1.html"
+            "?keyword=iPhone%2017"
+        ),
+    )
+
+    observation = JDAdapter(_apple_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert page.option_events[:4] == [
+        "scroll:legacy-color",
+        "click:legacy-color",
+        "scroll:legacy-capacity",
+        "click:legacy-capacity",
+    ]
+    assert {"黑色 无货", "256GB"} <= page.selected_options
+
+
+def test_modern_apple_fixed_sku_title_can_prove_configuration_without_options() -> None:
+    """A fixed-SKU Apple item title can carry its storage and colour proof."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "Apple产品京东自营旗舰店",
+    ).replace(
+        "小米 15",
+        "iPhone 17",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 256GB 黑色 支持双卡双待手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 256GB 黑色 支持双卡双待手机",
+    )
+    html = re.sub(
+        r'<section class="modern-specifications">.*?</section>',
+        "",
+        html,
+        flags=re.DOTALL,
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000004123-99-1-24-1.html"
+            "?keyword=iPhone%2017"
+        ),
+    )
+    adapter = JDAdapter(_apple_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+    assert adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )() == observation.semantic_state
+    adapter.prepare_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+
+def test_modern_apple_fixed_sku_title_rejects_the_wrong_colour() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "Apple产品京东自营旗舰店",
+    ).replace(
+        "小米 15",
+        "iPhone 17",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 256GB 白色 支持双卡双待手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "Apple/苹果 iPhone 17 256GB 白色 支持双卡双待手机",
+    )
+    html = re.sub(
+        r'<section class="modern-specifications">.*?</section>',
+        "",
+        html,
+        flags=re.DOTALL,
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+
+    with pytest.raises(LayoutRecognitionError):
+        JDAdapter(_apple_spec()).observe(
+            task,
+            cast(
+                Any,
+                _FixturePage(
+                    html=html,
+                    after_search_url=(
+                        "https://mall.jd.com/"
+                        "view_search-1000004123-99-1-24-1.html"
+                        "?keyword=iPhone%2017"
+                    ),
+                ),
+            ),
+        )
+
+
+def test_jd_no_model_capture_rect_ends_at_real_results_not_recommendations() -> None:
+    html = (FIXTURES / "no_model.html").read_text("utf-8")
+    html = html.replace(
+        'id="J_goodsList" style="left:10px;top:70px;width:780px;height:360px"',
+        'id="J_goodsList" style="left:10px;top:70px;width:780px;height:1400px"',
+        1,
+    ).replace(
+        '<article class="gl-item">',
+        '<article class="gl-item" style="left:20px;top:90px;width:340px;height:220px">',
+        1,
+    ).replace(
+        '<article class="gl-item">',
+        '<article class="gl-item" style="left:380px;top:90px;width:340px;height:220px">',
+        1,
+    )
+    page = _FixturePage(html=html)
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    assert rectangles[1].height == 220
+
+
+def test_huawei_changxiang_90_pro_max_matches_fixed_ram_storage_only_capacity() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "华为京东自营官方旗舰店",
+    ).replace(
+        "小米 15",
+        "华为畅享 90 Pro Max",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "华为畅享 90 Pro Max 256GB 曜金黑 鸿蒙智能手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "华为畅享 90 Pro Max 256GB 曜金黑 鸿蒙智能手机",
+    ).replace(
+        ">12GB+256GB<",
+        ">256GB<",
+    ).replace(
+        ">16GB+512GB 无货<",
+        ">512GB 无货<",
+    ).replace(
+        ">黑色<",
+        ">曜金黑<",
+    )
+    task = _task(
+        brand="华为",
+        model_name="华为畅享 90 Pro Max",
+        ram="8GB",
+        storage="256GB",
+        color="曜金黑",
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://mall.jd.com/view_search-1000004255-99-1-24-1.html"
+            "?keyword=%E5%8D%8E%E4%B8%BA%E7%95%85%E4%BA%AB%2090%20Pro%20Max"
+        ),
+    )
+    adapter = JDAdapter(_huawei_spec())
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4299")
+
+
+def test_huawei_storage_only_capacity_is_rejected_for_wrong_fixed_ram() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    )
+    html = html.replace(
+        "小米京东自营旗舰店",
+        "华为京东自营官方旗舰店",
+    ).replace(
+        "小米 15",
+        "华为畅享 90 Pro Max",
+    ).replace(
+        "新品 小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "华为畅享 90 Pro Max 256GB 曜金黑 鸿蒙智能手机",
+    ).replace(
+        "小米15 12+256 黑色 第五代旗舰芯片 5G AI手机",
+        "华为畅享 90 Pro Max 256GB 曜金黑 鸿蒙智能手机",
+    ).replace(
+        ">12GB+256GB<",
+        ">256GB<",
+    ).replace(
+        ">黑色<",
+        ">曜金黑<",
+    )
+    task = _task(
+        brand="华为",
+        model_name="华为畅享 90 Pro Max",
+        ram="12GB",
+        storage="256GB",
+        color="曜金黑",
+    )
+
+    with pytest.raises(
+        LayoutRecognitionError,
+        match="did not reveal the requested SKU options",
+    ):
+        JDAdapter(_huawei_spec()).observe(
+            task,
+            cast(
+                Any,
+                _FixturePage(
+                    html=html,
+                    after_search_url=(
+                        "https://mall.jd.com/"
+                        "view_search-1000004255-99-1-24-1.html"
+                        "?keyword=%E5%8D%8E%E4%B8%BA%E7%95%85%E4%BA%AB%20"
+                        "90%20Pro%20Max"
+                    ),
+                ),
+            ),
+        )
+
+
 def test_jd_modern_positions_the_selected_detail_only_when_formal_capture_is_prepared() -> None:
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
@@ -1270,19 +1995,19 @@ def test_jd_modern_positions_the_selected_detail_only_when_formal_capture_is_pre
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.option_events == [
-        "scroll:modern-capacity",
-        "click:modern-capacity",
         "scroll:modern-color",
         "click:modern-color",
+        "scroll:modern-capacity",
+        "click:modern-capacity",
     ]
-    assert page.option_scrolls == ["modern-capacity", "modern-color"]
+    assert page.option_scrolls == ["modern-color", "modern-capacity"]
     assert page.capture_view_positions == []
     assert page.window_scroll_offsets == []
 
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
 
     assert page.current_capture_scale == 0.8
-    assert page.capture_view_positions == ["modern-capacity"]
+    assert page.capture_view_positions == []
     assert len(page.goto_calls) == goto_count
     assert 300 in page.wait_timeout_milliseconds
 
@@ -1407,7 +2132,7 @@ def test_jd_legacy_positions_the_selected_detail_only_when_formal_capture_is_pre
 
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
 
-    assert page.capture_view_positions == ["legacy-capacity"]
+    assert page.capture_view_positions == []
     assert 300 in page.wait_timeout_milliseconds
 
 
@@ -1536,6 +2261,36 @@ def test_modern_detail_prefers_the_verified_struck_through_price_over_subsidy_pr
         '<div class="product-price-panel">'
         '<span class="product-price--main">¥4,299</span>国补领后价'
         '<span class="product-price--gray-line-through" style="text-decoration:line-through">¥4,499</span>'
+        '</div>',
+        1,
+    )
+
+    observation = _observe(
+        html=html,
+        task=_task(ram="16GB", storage="512GB"),
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4499")
+
+
+def test_modern_detail_accepts_class_marked_struck_through_price() -> None:
+    """JD can mark the verified pre-discount price by class without inline CSS."""
+
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
+        "utf-8"
+    ).replace(
+        'specification-item-sku specification-item-sku--lack" '
+        'style="left:20px;top:120px;width:150px;height:28px">'
+        '16GB+512GB 无货',
+        'specification-item-sku" '
+        'style="left:20px;top:120px;width:150px;height:28px">16GB+512GB',
+        1,
+    ).replace(
+        '<div class="product-price-panel"><span class="product-price--main">¥4,299</span></div>',
+        '<div class="product-price-panel">'
+        '<span class="product-price--main">¥4,299</span>国补领后价'
+        '<span class="product-price--gray-line-through">¥4,499</span>'
         '</div>',
         1,
     )
@@ -1963,6 +2718,77 @@ def test_risk_control_redirect_requires_manual_verification() -> None:
             "no_model.html",
             after_search_url="https://cfe.m.jd.com/privatedomain/risk_handler",
         )
+
+
+def test_frequency_control_redirect_retries_from_search_with_referrer() -> None:
+    """JD frequency control gets two automatic recoveries before manual handling."""
+    frequency_url = (
+        "https://pc-frequent-pro.pf.jd.com/?from=pc_item&reason=403"
+    )
+    page = _FixturePage(
+        detail_redirect_urls=(frequency_url, frequency_url, None),
+    )
+
+    observation = JDAdapter(_xiaomi_spec()).observe(
+        _task(),
+        cast(Any, page),
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    detail_calls = [
+        options
+        for url, options in page.goto_call_options
+        if urlsplit(url).hostname == "item.jd.com"
+    ]
+    assert len(detail_calls) == 3
+    assert all(options.get("referer") == page.after_search_url for options in detail_calls)
+    assert page.goto_calls.count(page.after_search_url) == 2
+    assert page.wait_timeout_milliseconds.count(5000) == 2
+
+
+def test_detail_document_replacement_is_reacquired_without_reopening_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal JD React document replacement is not a failed navigation."""
+
+    page = _FixturePage()
+    adapter = JDAdapter(_xiaomi_spec())
+    real_ensure_fixed_scale = adapter._ensure_fixed_scale
+    destroyed_once = False
+
+    def flaky_ensure_fixed_scale(browser_page: _FixturePage) -> None:
+        nonlocal destroyed_once
+        if browser_page._active == "product" and not destroyed_once:
+            destroyed_once = True
+            raise RuntimeError(
+                "Execution context was destroyed, most likely because of a navigation"
+            )
+        real_ensure_fixed_scale(browser_page)
+
+    monkeypatch.setattr(adapter, "_ensure_fixed_scale", flaky_ensure_fixed_scale)
+
+    observation = adapter.observe(_task(), cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert destroyed_once is True
+    assert page.detail_navigation_count == 1
+
+
+def test_frequency_control_redirect_requires_manual_after_two_auto_retries() -> None:
+    """The third frequency-control redirect is the first point needing a person."""
+    frequency_url = (
+        "https://pc-frequent-pro.pf.jd.com/?from=pc_item&reason=403"
+    )
+    page = _FixturePage(
+        detail_redirect_urls=(frequency_url, frequency_url, frequency_url),
+    )
+
+    with pytest.raises(SecurityVerificationRequired, match="自动重试2次"):
+        JDAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+
+    assert page.detail_navigation_count == 3
+    assert page.goto_calls.count(page.after_search_url) == 2
+    assert page.wait_timeout_milliseconds.count(5000) == 2
 
 
 def test_target_blank_protocol_relative_item_link_is_navigated_on_controlled_page() -> None:
@@ -2412,11 +3238,6 @@ def test_selected_variant_without_valid_current_sku_price_fails_technically() ->
     "mutation",
     [
         lambda html: html.replace(
-            '<input id="key01"',
-            '<input id="key01"><input id="key01"',
-            1,
-        ),
-        lambda html: html.replace(
             '<article class="gl-item">',
             '<article class="gl-item"><div class="p-name"><a href="#product">'
             "<em>小米 15 12GB+256GB 手机</em></a></div></article>"
@@ -2447,7 +3268,7 @@ def test_store_search_is_scoped_away_from_same_page_global_search_decoys() -> No
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
-def test_generic_global_search_controls_cannot_replace_store_search() -> None:
+def test_generic_global_search_controls_are_ignored_in_favour_of_the_approved_direct_store_search() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         '<input id="key01"',
         '<input name="keyword"',
@@ -2458,8 +3279,9 @@ def test_generic_global_search_controls_cannot_replace_store_search() -> None:
         1,
     )
 
-    with pytest.raises(LayoutRecognitionError):
-        _observe(html=html)
+    observation = _observe(html=html)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
 
 
 def test_result_page_store_conflict_fails_before_product_or_no_model_decision() -> None:
@@ -2546,16 +3368,29 @@ def test_jd_no_model_capture_waits_for_matching_search_input_to_stabilize() -> N
     assert page.wait_timeout_milliseconds.count(250) >= 1
 
 
-def test_jd_no_model_capture_rejects_an_empty_search_input_after_stabilization_timeout() -> None:
+def test_jd_url_proven_no_model_capture_restores_a_blank_visible_search_input() -> None:
     page = _FixturePage(html=_no_model_html_with_blank_result_search_input())
     task = _task()
     adapter = JDAdapter(_xiaomi_spec())
     observation = adapter.observe(task, cast(Any, page))
 
-    with pytest.raises(CaptureViewGeometryError) as captured:
-        adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    adapter.prepare_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
 
-    assert captured.value.safe_stage == "搜索框定位"
+    assert tuple(rectangle.role for rectangle in observation.css_rectangles) == (
+        "result_region",
+    )
+    visible_search_inputs = [
+        node
+        for node in page.root.descendants()
+        if node.attrs.get("id") == "key01" and node.visible
+    ]
+    assert len(visible_search_inputs) == 1
+    assert visible_search_inputs[0].attrs["value"] == "小米 15"
+    assert page.capture_view_positions == ["search"]
 
 
 def test_jd_no_model_capture_rejects_a_nonmatching_search_input_without_waiting() -> None:
@@ -2603,7 +3438,7 @@ def test_jd_no_model_capture_rectangles_wait_for_a_late_matching_search_input() 
     assert page.wait_timeout_milliseconds.count(250) > waits_before
 
 
-def test_jd_no_model_capture_rectangles_reject_an_empty_search_input_after_stabilization_timeout() -> None:
+def test_jd_no_model_capture_rectangles_restore_an_empty_search_input() -> None:
     page = _FixturePage(html=_no_model_html_with_blank_result_search_input())
     task = _task()
     adapter = JDAdapter(_xiaomi_spec())
@@ -2616,8 +3451,40 @@ def test_jd_no_model_capture_rectangles_reject_an_empty_search_input_after_stabi
         if node.attrs.get("id") == "key01" and node.visible:
             node.attrs["value"] = ""
 
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    visible_search_inputs = [
+        node
+        for node in page.root.descendants()
+        if node.attrs.get("id") == "key01" and node.visible
+    ]
+    assert len(visible_search_inputs) == 1
+    assert visible_search_inputs[0].attrs["value"] == "小米 15"
+
+
+def test_jd_no_model_capture_rejects_when_no_search_input_is_visible() -> None:
+    html = _no_model_html_with_blank_result_search_input().replace(
+        '<input id="key01" value="" '
+        'style="left:20px;top:20px;width:260px;height:32px">',
+        '<input id="key01" value="" hidden '
+        'style="left:20px;top:20px;width:260px;height:32px">',
+        1,
+    )
+    page = _FixturePage(html=html)
+    task = _task()
+    adapter = JDAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
     with pytest.raises(CaptureViewGeometryError) as captured:
-        adapter.capture_rectangles_for_capture(
+        adapter.prepare_capture_view(
             task,
             cast(Any, page),
             observation.semantic_state,
@@ -2719,12 +3586,6 @@ def test_jd_no_model_capture_retry_keeps_the_fixed_scale() -> None:
 
     adapter.observe = cast(Any, observe_must_not_run)
 
-    with pytest.raises(CaptureViewGeometryError, match="search input"):
-        adapter.prepare_capture_view(
-            task,
-            cast(Any, page),
-            observation.semantic_state,
-        )
     adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
     rectangles = adapter.capture_rectangles_for_capture(
         task,
@@ -2839,7 +3700,7 @@ def test_jd_empty_no_model_capture_requires_the_empty_marker_in_viewport() -> No
     adapter = JDAdapter(_xiaomi_spec())
     observation = adapter.observe(task, cast(Any, page))
 
-    with pytest.raises(LayoutRecognitionError, match="empty state"):
+    with pytest.raises(LayoutRecognitionError, match="complete result region"):
         adapter.prepare_capture_view(
             task,
             cast(Any, page),
@@ -2847,7 +3708,7 @@ def test_jd_empty_no_model_capture_requires_the_empty_marker_in_viewport() -> No
         )
 
     assert observation.outcome is BusinessOutcome.NO_MODEL
-    assert page.current_capture_scale == 0.8
+    assert page.current_capture_scale == 0.5
     assert page.capture_scale_restore_count == 0
 
 
@@ -2902,7 +3763,7 @@ def test_jd_no_model_capture_rectangle_failure_has_dedicated_geometry_stage(
             if node.attrs.get("id") == "key01" and node.visible
         ]
     else:
-        targets = _select(page.root.descendants(), "#J_goodsList")
+        targets = _select(page.root.descendants(), ".gl-item")[:1]
     assert len(targets) == 1
     targets[0].attrs["data-invalid-box"] = "true"
 
@@ -2943,8 +3804,9 @@ def test_no_model_rejects_conflicting_result_page_search_keyword(
 
 def test_invalid_bounding_box_prevents_unverifiable_legal_no() -> None:
     html = (FIXTURES / "no_model.html").read_text("utf-8").replace(
-        'id="J_goodsList"',
-        'id="J_goodsList" data-invalid-box="true"',
+        'class="gl-item"',
+        'class="gl-item" data-invalid-box="true"',
+        1,
     )
     with pytest.raises(LayoutRecognitionError):
         _observe(html=html)

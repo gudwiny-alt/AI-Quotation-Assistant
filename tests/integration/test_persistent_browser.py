@@ -245,6 +245,7 @@ def test_native_cdp_session_launches_installed_chrome_without_automation_flags(
         "--no-default-browser-check",
         "about:blank",
     ]
+    assert not any("force-device-scale-factor" in argument for argument in command)
     assert not any("automation" in argument for argument in command)
     assert not any("webdriver" in argument for argument in command)
     assert kwargs["stdin"] is subprocess.DEVNULL

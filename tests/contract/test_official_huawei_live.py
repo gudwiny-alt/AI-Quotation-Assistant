@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
@@ -110,6 +110,12 @@ class _HuaweiLocator(_OfficialLocator):
     def click(self) -> None:
         page = _huawei_page(self.page)
         node = self.nodes[0]
+        modern_detail = node.attrs.get("data-current-vmall-detail")
+        if modern_detail is not None:
+            if page.active != "results":
+                raise AssertionError("current VMALL card click must start from results")
+            page.goto(modern_detail)
+            return
         if node.tag == "a":
             if page.active != "results" or node.parent is None:
                 raise AssertionError("VMALL detail navigation must start from a result card")
@@ -227,6 +233,14 @@ class _HuaweiPage(_OfficialFixturePage):
             self._url, self.active = self.redirect_url or _item_detail_url(url), "detail"
         else:
             self._url, self.active = url, "results"
+            search_words = parse_qs(urlsplit(url).query).get("searchWord", ())
+            if search_words:
+                result_search = next(
+                    node
+                    for node in self.results_root.descendants()
+                    if node.attrs.get("id") == "search-kw"
+                )
+                result_search.attrs["value"] = search_words[0]
 
     def wait_for_load_state(self, *_args: object, **_kwargs: object) -> None:
         return None
@@ -823,14 +837,57 @@ def test_huawei_capture_harness_rejects_wrong_real_selector() -> None:
         page.proofs_from_selectors(wrong)
 
 
-def test_huawei_submits_real_home_search_once_and_quotes_selected_offer() -> None:
+def test_huawei_uses_direct_search_route_and_quotes_selected_offer() -> None:
     page = _HuaweiPage()
     result = _adapter().observe(_task(), page)
-    assert page.goto_calls[0] == ENTRY
-    assert page.fill_calls == ["HUAWEI Mate 70 Pro"]
-    assert page.presses == ["Enter"] and page.search_submissions == 1
+    assert page.goto_calls[0] == (
+        "https://www.vmall.com/portal/search/index.html?"
+        "targetRoute=searchresult&searchWord=HUAWEI%20Mate%2070%20Pro"
+    )
+    assert page.fill_calls == []
+    assert page.presses == [] and page.search_submissions == 0
     assert result.outcome is BusinessOutcome.PRICE_FOUND
     assert result.price == Decimal("4999")
+
+
+def test_huawei_current_exact_text_card_enters_numeric_detail_without_legacy_selectors() -> None:
+    page = _HuaweiPage()
+    _set_huawei_cards(page, ())
+    region = _HuaweiPage._class_node(page.results_root, "search-result")
+    title = _OfficialNode(
+        "span",
+        {"data-current-vmall-detail": DETAIL},
+        region,
+    )
+    title.text_parts = ["HUAWEI Mate 70 Pro"]
+    region.children.append(title)
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert result.price == Decimal("4999")
+    assert result.url == DETAIL
+
+
+def test_huawei_current_exact_anchor_title_enters_detail_without_legacy_card_classes() -> None:
+    """The current VMALL grid exposes the exact title on its clickable anchor."""
+
+    page = _HuaweiPage()
+    _set_huawei_cards(page, ())
+    region = _HuaweiPage._class_node(page.results_root, "search-result")
+    title_link = _OfficialNode(
+        "a",
+        {"data-current-vmall-detail": DETAIL},
+        region,
+    )
+    title_link.text_parts = ["HUAWEI Mate 70 Pro"]
+    region.children.append(title_link)
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert result.price == Decimal("4999")
+    assert result.url == DETAIL
 
 
 @pytest.mark.parametrize("reveal_after", [18, 39])

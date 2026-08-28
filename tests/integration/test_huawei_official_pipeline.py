@@ -457,7 +457,18 @@ def test_huawei_two_rows_keep_input_order_and_report_consistent_counts(
     )
 
     assert [row.material_code for row in result.rows] == ["HUAWEI-1", "HUAWEI-2"]
-    assert page.fill_calls == ["HUAWEI Mate 70 Pro", "HUAWEI Mate 70 Pro"]
+    assert page.fill_calls == []
+    search_calls = [
+        url
+        for url in page.goto_calls
+        if urlsplit(url).path == "/portal/search/index.html"
+    ]
+    assert len(search_calls) == 2
+    assert all(
+        parse_qs(urlsplit(url).query).get("searchWord")
+        == ["HUAWEI Mate 70 Pro"]
+        for url in search_calls
+    )
     assert result.summary.total_rows == 2
     assert result.summary.completed_rows == 2
     assert result.summary.failed_rows == 0

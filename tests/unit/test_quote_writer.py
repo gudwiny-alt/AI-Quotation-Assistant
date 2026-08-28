@@ -1,5 +1,6 @@
 from dataclasses import replace
 from hashlib import sha256
+from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -7,11 +8,16 @@ import re
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 from openpyxl.workbook.workbook import Workbook  # type: ignore[import-untyped]
 from openpyxl.xml.functions import tostring  # type: ignore[import-untyped]
+from PIL import Image
 import pytest
 
 from quote_app.domain.models import QuoteMonth, QuoteRow
 from quote_app.excel import quote_writer
-from quote_app.excel.quote_writer import QuoteWriteRequest, write_quote_workbook
+from quote_app.excel.quote_writer import (
+    QuoteEvidenceImage,
+    QuoteWriteRequest,
+    write_quote_workbook,
+)
 
 
 TEMPLATE_PATH = Path("resources/templates/quote_template.xlsx")
@@ -219,6 +225,42 @@ def test_writer_replicates_complete_a_to_ap_format_and_page_properties(
     finally:
         workbook.close()
         template.close()
+
+
+def test_writer_expands_evidence_cells_for_readable_screenshot_previews(
+    tmp_path: Path,
+) -> None:
+    source = BytesIO()
+    Image.new("RGB", (1512, 982), (34, 48, 71)).save(source, format="PNG")
+
+    output = write_quote_workbook(
+        QuoteWriteRequest(
+            quote_month=QuoteMonth(2026, 8),
+            rows=_rows(),
+            template_path=TEMPLATE_PATH,
+            output_dir=tmp_path,
+            evidence_images=(
+                QuoteEvidenceImage(anchor="AL2", payload=source.getvalue()),
+            ),
+        )
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    try:
+        sheet = workbook["5G手机"]
+        assert all(
+            float(sheet.column_dimensions[column].width or 0) >= 26
+            for column in ("AL", "AM", "AN")
+        )
+        assert all(
+            float(sheet.row_dimensions[row_number].height or 0) >= 76
+            for row_number in (2, 3)
+        )
+        assert len(sheet._images) == 1
+        assert sheet._images[0].width >= 145
+        assert sheet._images[0].height >= 90
+    finally:
+        workbook.close()
 
 
 def test_writer_adds_n_validation_for_every_and_only_generated_row(

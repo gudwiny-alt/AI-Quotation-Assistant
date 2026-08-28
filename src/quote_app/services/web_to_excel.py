@@ -81,6 +81,8 @@ _WEB_OUTPUT_COLUMNS = (
 )
 _THUMBNAIL_MAX_SIZE = (1920, 1200)
 _THUMBNAIL_MAX_BYTES = 1536 * 1024
+_NO_MODEL_THUMBNAIL_MAX_SIZE = (2560, 1600)
+_NO_MODEL_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,7 +452,10 @@ def _prepare_evidence(
             )
             continue
         try:
-            thumbnail = _excel_thumbnail(audit.payload)
+            thumbnail = _excel_thumbnail(
+                audit.payload,
+                high_detail=result.outcome is BusinessOutcome.NO_MODEL,
+            )
         except (OSError, UnidentifiedImageError):
             report_results.append(
                 _evidence_failure_result(
@@ -485,11 +490,21 @@ def _prepare_evidence(
     return payloads, tuple(report_results)
 
 
-def _excel_thumbnail(payload: bytes) -> bytes:
+def _excel_thumbnail(payload: bytes, *, high_detail: bool = False) -> bytes:
     with Image.open(BytesIO(payload)) as source:
         source.load()
         image = source.convert("RGB")
-    image.thumbnail(_THUMBNAIL_MAX_SIZE, Image.Resampling.LANCZOS)
+    max_size = (
+        _NO_MODEL_THUMBNAIL_MAX_SIZE
+        if high_detail
+        else _THUMBNAIL_MAX_SIZE
+    )
+    max_bytes = (
+        _NO_MODEL_THUMBNAIL_MAX_BYTES
+        if high_detail
+        else _THUMBNAIL_MAX_BYTES
+    )
+    image.thumbnail(max_size, Image.Resampling.LANCZOS)
     for _ in range(12):
         for quality in (92, 86, 80, 74):
             output = BytesIO()
@@ -500,7 +515,7 @@ def _excel_thumbnail(payload: bytes) -> bytes:
                 optimize=True,
             )
             candidate = output.getvalue()
-            if len(candidate) <= _THUMBNAIL_MAX_BYTES:
+            if len(candidate) <= max_bytes:
                 return candidate
         next_size = (
             max(240, int(image.width * 0.8)),

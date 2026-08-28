@@ -417,6 +417,25 @@ def test_macos_visual_review_beta_does_not_require_system_ui_geometry_proof(
     assert environment.system_ui_calls == 0
 
 
+def test_macos_visual_review_beta_qualities_the_actual_full_display_size(
+    tmp_path: Path,
+) -> None:
+    environment = _Environment(
+        tmp_path,
+        image=_readable_image(390, 290),
+    )
+
+    record = EvidenceCapturePipeline(
+        environment,
+        sleeper=lambda _seconds: None,
+        now=lambda: NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    ).capture(_request(tmp_path / "actual-display-size.png", environment))
+
+    assert record.validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
+    assert Image.open(record.path).size == (390, 290)
+
+
 def test_pipeline_policy_cannot_be_reassigned_after_construction(
     tmp_path: Path,
 ) -> None:
@@ -1268,6 +1287,33 @@ def test_macos_visual_review_capture_allows_browser_dpr_to_differ_from_retina_sc
 
     assert writes == [
         ((2880, 1800), str(tmp_path / "retina-visual-review.png"))
+    ]
+
+
+def test_macos_visual_review_capture_uses_actual_main_display_pixels(
+    tmp_path: Path,
+) -> None:
+    from quote_app.evidence.macos import capture_macos_primary_display
+
+    darwin = SimpleNamespace(IMAGE_OPTIONS=123)
+    fake = _FakeMSS(darwin, size=(2940, 1912))
+    writes: list[tuple[tuple[int, int], str]] = []
+
+    capture_macos_primary_display(
+        tmp_path / "actual-main-display.png",
+        expected_physical_size=(3024, 1964),
+        expected_scale=(1, 1),
+        expected_device_pixel_ratio=1,
+        validate_scale_dpr=False,
+        mss_factory=lambda: fake,
+        png_writer=lambda _rgb, size, *, output: writes.append(
+            (tuple(size), output)
+        ),
+        darwin_module=darwin,
+    )
+
+    assert writes == [
+        ((2940, 1912), str(tmp_path / "actual-main-display.png"))
     ]
 
 

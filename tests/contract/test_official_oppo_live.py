@@ -731,6 +731,102 @@ def test_oppo_accepts_visible_search_query_when_result_input_value_is_cleared() 
     assert len(page.wait_timeout_milliseconds) <= 4
 
 
+def test_oppo_accepts_visible_vuetify_field_when_result_input_value_is_cleared() -> None:
+    page = _OppoNoModelPageWithVisibleQuery()
+    query = next(
+        node
+        for node in page.root.descendants()
+        if node.attrs.get("data-oppo-role") == "search-query"
+    )
+    query.attrs.pop("data-oppo-role")
+    query.attrs["class"] = "v-field v-field--active"
+    _set_result_cards(
+        page,
+        (
+            ("OPPO A6i+ 8GB+256GB 冰川蓝", "/cn/web/products/40101.html"),
+            ("OPPO A6 Pro 12GB+256GB 流光白", "/cn/web/products/40102.html"),
+            ("OPPO A6x 8GB+256GB 冰川蓝", "/cn/web/products/40103.html"),
+        ),
+    )
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rect.role for rect in observation.css_rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+
+
+def test_oppo_reads_query_from_vuetify_field_input_value_not_container_text() -> None:
+    page = _OppoNoModelPageWithVisibleQuery()
+    for node in page.root.descendants():
+        if node.attrs.get("data-oppo-role") == "search-input":
+            node.attrs.pop("data-oppo-role")
+    query = next(
+        node
+        for node in page.root.descendants()
+        if node.attrs.get("data-oppo-role") == "search-query"
+    )
+    query.attrs.pop("data-oppo-role")
+    query.attrs["class"] = "v-field v-field--active"
+    query.text_parts = []
+    nested_input = _OfficialNode(
+        "input",
+        {
+            "class": "v-field__input",
+            "value": "OPPO A6 5G",
+            "style": "left:20px;top:20px;width:280px;height:36px",
+        },
+        query,
+    )
+    query.children.append(nested_input)
+    _set_result_cards(
+        page,
+        (
+            ("OPPO A6i+ 8GB+256GB 冰川蓝", "/cn/web/products/40101.html"),
+            ("OPPO A6 Pro 12GB+256GB 流光白", "/cn/web/products/40102.html"),
+            ("OPPO A6x 8GB+256GB 冰川蓝", "/cn/web/products/40103.html"),
+        ),
+    )
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rect.role for rect in observation.css_rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+
+
+def test_oppo_reads_query_from_current_generic_dialog_input() -> None:
+    page = _OppoNoModelPageWithVisibleQuery()
+    for node in page.root.descendants():
+        if node.attrs.get("data-oppo-role") == "search-input":
+            node.attrs.pop("data-oppo-role")
+            node.attrs["class"] = "v-input__control-current"
+        if node.attrs.get("data-oppo-role") == "search-query":
+            node.attrs.pop("data-oppo-role")
+            node.attrs["class"] = "v-field v-field--active"
+            node.text_parts = []
+    _set_result_cards(
+        page,
+        (
+            ("OPPO A6i+ 8GB+256GB 冰川蓝", "/cn/web/products/40101.html"),
+            ("OPPO A6 Pro 12GB+256GB 流光白", "/cn/web/products/40102.html"),
+            ("OPPO A6x 8GB+256GB 冰川蓝", "/cn/web/products/40103.html"),
+        ),
+    )
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rect.role for rect in observation.css_rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+
+
 def test_oppo_no_model_capture_uses_80_percent_and_restores_after_capture() -> None:
     adapter = _adapter()
     task = _task()

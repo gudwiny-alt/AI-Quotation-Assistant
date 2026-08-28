@@ -59,14 +59,17 @@ _SEARCH_DIALOGS = (
 _SEARCH_INPUTS = (
     '[data-oppo-role="search-input"]',
     'input[placeholder="点击搜索"]',
+    "input.v-field__input",
     ".v-combobox input",
     ".official-oppo-search-input",
+    "input",
 )
 _SEARCH_QUERY_EVIDENCE = (
     '[data-oppo-role="search-query"]',
     ".v-combobox__selection",
     ".v-autocomplete__selection",
     ".v-select__selection",
+    ".v-field",
     '[class*="search-keyword"]',
 )
 _RESULT_REGIONS = (

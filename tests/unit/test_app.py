@@ -66,7 +66,7 @@ def test_app_build_label_identifies_six_brand_full_site_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
     assert APP_BUILD_LABEL == (
-        "OPPO无精确机型证据修复版（官网天猫先行·京东独立收尾）2026.08.23.122"
+        "京东荣耀苹果定点修复版（六品牌三渠道）2026.08.26.135"
     )
     assert "当前受控页" in BETA_NOTICE
     assert "全部官网、全部天猫，最后执行全部京东" in BETA_NOTICE
