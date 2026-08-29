@@ -797,8 +797,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
 
     def _stable_offer(self, task: WebsiteTask, page: Any) -> OfficialOfferSnapshot:
         identity = _detail_identity(page.url)
-        previous: OfficialOfferSnapshot | None = None
-        stable_intervals = 0
+        observations: dict[OfficialOfferSnapshot, int] = {}
         for tick in range(21):
             self.raise_if_manual_action(page)
             try:
@@ -806,13 +805,17 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             except _PriceUnavailable:
                 # React may replace the visible price node for a single render
                 # tick even though the selected SKU and numeric price do not
-                # change. Preserve the last verified offer across that empty
-                # tick; any different valid offer still resets stability below.
+                # change. Preserve accumulated evidence across that empty tick.
                 pass
             else:
-                stable_intervals = stable_intervals + 1 if current == previous else 0
-                previous = current
-                if stable_intervals >= 12:
+                # During a SKU switch VMALL can briefly expose a still-visible
+                # prior-SKU price node between renders. Require thirteen full,
+                # identical SKU observations inside the five-second window,
+                # but do not discard already verified observations because of
+                # those intermittent stale frames. A genuinely alternating
+                # price still cannot reach this threshold and remains closed.
+                observations[current] = observations.get(current, 0) + 1
+                if observations[current] >= 13:
                     return current
             if tick < 20:
                 page.wait_for_timeout(250)

@@ -201,6 +201,7 @@ class _HuaweiPage(_OfficialFixturePage):
         self.unstable_prices = False
         self.price_poll = 0
         self.price_missing_polls: set[int] = set()
+        self.price_stale_polls: set[int] = set()
         self.title_override: str | None = None
         self.redirect_url: str | None = None
         self.capture_scale = 1.0
@@ -412,8 +413,11 @@ class _HuaweiPage(_OfficialFixturePage):
         if self.price_poll in self.price_missing_polls:
             self.price_poll += 1
             return ""
+        if self.price_poll in self.price_stale_polls:
+            self.price_poll += 1
+            return "¥4899"
         if not self.unstable_prices:
-            if self.price_missing_polls:
+            if self.price_missing_polls or self.price_stale_polls:
                 self.price_poll += 1
             return node.text
         values = ("¥4999", "¥5099", "¥4899", "¥5099")
@@ -1366,6 +1370,19 @@ def test_huawei_same_price_stabilizes_across_transient_react_price_gaps() -> Non
 
     page = _HuaweiPage()
     page.price_missing_polls = {2, 5, 8, 11}
+    for node in page.price_nodes()[1:]:
+        node.attrs["hidden"] = ""
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.price == Decimal("4999")
+
+
+def test_huawei_same_offer_stabilizes_across_transient_stale_react_prices() -> None:
+    """A stale prior-SKU price must not restart otherwise stable offer evidence."""
+
+    page = _HuaweiPage()
+    page.price_stale_polls = {2, 5, 8}
     for node in page.price_nodes()[1:]:
         node.attrs["hidden"] = ""
 
