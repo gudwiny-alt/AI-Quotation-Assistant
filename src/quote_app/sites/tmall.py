@@ -606,12 +606,12 @@ class TmallAdapter:
                 "Tmall selected configuration changed before formal capture"
             )
         configuration = self._selected_configuration_snapshot(browser_page, task)
-        if self._uses_authoritative_price_evidence(task):
-            price = self._snapshot_price_for_capture(
+        if self._uses_locked_price_evidence(task):
+            price = self._locked_price_snapshot(
                 browser_page,
                 task,
                 configuration,
-            ).amount
+            )
         else:
             price = self._stable_visible_price(
                 browser_page,
@@ -768,12 +768,8 @@ class TmallAdapter:
                 browser_page,
                 task,
             )
-            if self._uses_authoritative_price_evidence(task):
-                price = self._snapshot_price_for_capture(
-                    browser_page,
-                    task,
-                    configuration,
-                ).amount
+            if self._uses_locked_price_evidence(task):
+                price = expected.price
             else:
                 price = self._stable_visible_price(
                     browser_page,
@@ -1605,6 +1601,16 @@ class TmallAdapter:
             normalize_product_text("HONOR"),
         }
 
+    @staticmethod
+    def _uses_locked_price_evidence(task: WebsiteTask) -> bool:
+        normalized_brand = normalize_product_text(task.brand)
+        return normalized_brand in {
+            normalize_product_text("华为"),
+            normalize_product_text("荣耀"),
+            normalize_product_text("HONOR"),
+            normalize_product_text("苹果"),
+        }
+
     def _authoritative_price_evidence(
         self,
         candidates: tuple[PriceCandidate, ...],
@@ -1642,25 +1648,33 @@ class TmallAdapter:
             evidence=SellingPriceEvidence.VERIFIED_CURRENT_SKU_SELLING_NODE,
         )
 
-    def _snapshot_price_for_capture(
+    def _locked_price_snapshot(
         self,
         page: Any,
         task: WebsiteTask,
         configuration: tuple[str, str],
-    ) -> _AuthoritativeTmallPrice:
+    ) -> Decimal:
         snapshot = self._visible_configuration_evidence(page, task)
         if snapshot.configuration != configuration:
             raise LayoutRecognitionError(
                 "Tmall selected visible configuration changed before formal capture"
             )
-        selected = self._authoritative_price_evidence(
-            snapshot.price_candidates
+        if self._uses_authoritative_price_evidence(task):
+            selected = self._authoritative_price_evidence(snapshot.price_candidates)
+            if selected is None:
+                raise LayoutRecognitionError(
+                    "Tmall authoritative price is unavailable before formal capture"
+                )
+            return selected.amount
+        selected_amount = choose_price(
+            snapshot.price_candidates,
+            self.spec.price_policy,
         )
-        if selected is None:
+        if selected_amount is None:
             raise LayoutRecognitionError(
-                "Tmall authoritative price is unavailable before formal capture"
+                "Tmall selected variant price is unavailable before formal capture"
             )
-        return selected
+        return selected_amount
 
     def _stable_visible_price(
         self,
@@ -1668,6 +1682,8 @@ class TmallAdapter:
         task: WebsiteTask,
         configuration: tuple[str, str],
     ) -> Decimal:
+        if self._uses_locked_price_evidence(task):
+            return self._locked_price_snapshot(page, task, configuration)
         title = self._matching_detail_title_snapshot(page, task)
         transition_sample = self._visible_configuration_evidence(page, task)
         if transition_sample.configuration != configuration:

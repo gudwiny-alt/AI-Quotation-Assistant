@@ -921,7 +921,10 @@ def _target_tmall_case(
     )
 
 
-def _apple_controlled_page(seller_name: str | None) -> _FixturePage:
+def _apple_controlled_page(
+    seller_name: str | None,
+    **page_kwargs: object,
+) -> _FixturePage:
     html = _live_observed_html()
     html = html.replace("小米官方旗舰店", "Apple Store官方旗舰店")
     html = html.replace("xiaomi.tmall.com", "apple.tmall.com")
@@ -938,6 +941,7 @@ def _apple_controlled_page(seller_name: str | None) -> _FixturePage:
             "https://apple.tmall.com/?q=iPhone%2017"
             + _LIVE_RESULTS_STATIC_QUERY
         ),
+        **page_kwargs,
     )
     page.set_detail_seller_marker(seller_name)
     return page
@@ -2424,6 +2428,39 @@ def test_apple_controlled_official_result_without_detail_seller_marker_selects_s
     assert page.option_click_counts == {"capacity": 1, "color": 1}
 
 
+def test_apple_formal_capture_does_not_repeat_selected_price_stability_polling() -> None:
+    stable_price = ("¥4,099", "¥4,399", "¥9,999")
+    page = _apple_controlled_page(
+        None,
+        price_snapshots=(
+            stable_price,
+            stable_price,
+            stable_price,
+            stable_price,
+            ("加载中", "加载中", "¥9,999"),
+        ),
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    adapter = TmallAdapter(_apple_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    reread = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )()
+
+    assert reread == observation.semantic_state
+    assert page.price_snapshot_reads == 3
+
+
 def test_apple_controlled_result_rejects_explicit_conflicting_detail_seller() -> None:
     page = _apple_controlled_page("其他数码专营店")
     task = _task(
@@ -3036,6 +3073,27 @@ def test_tmall_target_brand_ignores_changing_auxiliary_price_when_locked_price_i
     assert observation.price == Decimal("4999")
 
 
+@pytest.mark.parametrize("brand", ["华为", "HONOR"])
+def test_tmall_target_brand_locks_the_first_exact_authoritative_price_snapshot(
+    brand: str,
+) -> None:
+    spec, task, html, result_url = _target_tmall_case(brand)
+    page = _FixturePage(
+        html=html,
+        after_search_url=result_url,
+        pre_discount_snapshots=(
+            ("优惠前 ¥4,999",),
+            ("优惠前",),
+        ),
+    )
+
+    observation = TmallAdapter(spec).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+    assert page.pre_discount_snapshot_reads == 1
+
+
 def test_tmall_target_brand_conflicting_pre_discount_prices_fail_closed() -> None:
     spec, task, html, result_url = _target_tmall_case(
         "华为",
@@ -3078,16 +3136,15 @@ def test_tmall_target_brand_formal_capture_uses_one_locked_price_snapshot() -> N
     )()
 
     assert reread == observation.semantic_state
-    assert page.pre_discount_snapshot_reads == 4
+    assert page.pre_discount_snapshot_reads == 2
 
 
-def test_tmall_target_brand_formal_reader_rejects_locked_price_change() -> None:
+def test_tmall_target_brand_formal_prepare_rejects_locked_price_change() -> None:
     spec, task, html, result_url = _target_tmall_case("HONOR")
     page = _FixturePage(
         html=html,
         after_search_url=result_url,
         pre_discount_snapshots=(
-            ("优惠前 ¥4,999",),
             ("优惠前 ¥4,999",),
             ("优惠前 ¥5,199",),
         ),
@@ -3096,11 +3153,11 @@ def test_tmall_target_brand_formal_reader_rejects_locked_price_change() -> None:
     observation = adapter.observe(task, cast(Any, page))
 
     with pytest.raises(LayoutRecognitionError, match="changed before formal capture"):
-        adapter.verified_state_reader(
+        adapter.prepare_capture_view(
             task,
             cast(Any, page),
             observation.semantic_state,
-        )()
+        )
 
 
 def test_multiple_visible_current_price_containers_fail_closed() -> None:

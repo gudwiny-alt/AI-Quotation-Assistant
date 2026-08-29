@@ -809,12 +809,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         page: Any,
         expected_identity: OfficialDetailIdentity,
     ) -> OfficialOfferSnapshot:
-        identity = _detail_identity(page.url)
-        if identity.product_key != expected_identity.product_key:
-            raise LayoutRecognitionError("VMALL price wait detail identity changed")
-        self._require_detail_title(page, task.model_name)
-        self._require_selected(page, "capacity", task)
-        self._require_selected(page, "color", task)
+        identity = self._require_offer_identity(task, page, expected_identity)
         return OfficialOfferSnapshot(
             identity=identity,
             brand=task.brand,
@@ -824,36 +819,42 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             price=self._current_price(page)[0],
         )
 
+    def _require_offer_identity(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected_identity: OfficialDetailIdentity,
+    ) -> OfficialDetailIdentity:
+        identity = _detail_identity(page.url)
+        if identity.product_key != expected_identity.product_key:
+            raise LayoutRecognitionError("VMALL price wait detail identity changed")
+        self._require_detail_title(page, task.model_name)
+        self._require_selected(page, "capacity", task)
+        self._require_selected(page, "color", task)
+        return identity
+
     def _stable_offer(self, task: WebsiteTask, page: Any) -> OfficialOfferSnapshot:
         identity = _detail_identity(page.url)
-        previous: OfficialOfferSnapshot | None = None
-        matching_confirmations = 0
+        locked: OfficialOfferSnapshot | None = None
         for tick in range(21):
             self.raise_if_manual_action(page)
             try:
-                current = self._instant_offer(task, page, identity)
+                locked = self._instant_offer(task, page, identity)
             except _PriceUnavailable:
-                # React may replace the visible price node for a single render
-                # tick even though the selected SKU and numeric price do not
-                # change. Preserve accumulated evidence across that empty tick.
                 pass
             else:
-                # The first read is the transition sample. Two further
-                # identical full-offer reads confirm the selected SKU without
-                # coupling readiness to auxiliary price nodes that React may
-                # continuously rerender.
-                if current == previous:
-                    matching_confirmations += 1
-                else:
-                    previous = current
-                    matching_confirmations = 0
-                if matching_confirmations >= 2:
-                    return current
+                break
             if tick < 20:
                 page.wait_for_timeout(250)
-        raise CaptureQualityError(
-            "CAPTURE_UNSTABLE", "VMALL selected current price did not stabilize"
-        )
+        if locked is None:
+            raise CaptureQualityError(
+                "CAPTURE_UNSTABLE", "VMALL selected current price did not become available"
+            )
+        for _ in range(2):
+            page.wait_for_timeout(250)
+            self.raise_if_manual_action(page)
+            self._require_offer_identity(task, page, identity)
+        return locked
 
     def _current_price(self, page: Any) -> tuple[Decimal, Any]:
         for candidate in _visible(page, (_PRICE_CANDIDATE,)):

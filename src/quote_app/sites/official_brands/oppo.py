@@ -992,6 +992,10 @@ def _title_matches_model(model_name: str, title: str) -> bool:
         return True
     actual = normalize_product_text(title)
     wanted = normalize_product_text(model_name)
+    wanted_networks = set(_NETWORK_MARKER.findall(wanted))
+    actual_networks = set(_NETWORK_MARKER.findall(actual))
+    if wanted_networks and actual_networks and wanted_networks != actual_networks:
+        return False
     without_network = " ".join(_NETWORK_MARKER.sub(" ", wanted).split())
     return any(
         _title_has_model_prefix(candidate, actual)

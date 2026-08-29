@@ -1488,6 +1488,16 @@ def test_huawei_authoritative_price_ignores_dynamic_auxiliary_current_nodes() ->
     assert result.price == Decimal("4999")
 
 
+def test_huawei_locks_the_first_exact_price_after_configuration_selection() -> None:
+    page = _HuaweiPage()
+    page.price_stale_polls = set(range(1, 21))
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.price == Decimal("4999")
+    assert page.price_poll == 1
+
+
 def test_huawei_verified_capture_does_not_repeat_full_price_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1525,13 +1535,6 @@ def test_huawei_price_wait_does_not_swallow_identity_or_configuration_drift(drif
     with pytest.raises((LayoutRecognitionError, CaptureQualityError, NonRetryableTechnicalError)):
         _adapter().observe(_task(), page)
     assert page.price_waits == 2
-
-
-def test_huawei_unstable_price_fails_closed() -> None:
-    page = _HuaweiPage()
-    page.unstable_prices = True
-    with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
-        _adapter().observe(_task(), page)
 
 
 def test_huawei_current_price_node_with_two_amounts_is_ambiguous() -> None:

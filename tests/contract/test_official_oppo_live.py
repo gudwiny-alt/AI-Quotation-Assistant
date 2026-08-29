@@ -1020,6 +1020,15 @@ def test_oppo_allows_official_title_to_omit_the_input_network_marker() -> None:
     )
 
 
+def test_oppo_does_not_treat_an_explicit_4g_result_as_the_requested_5g_model() -> None:
+    from quote_app.sites.official_brands.oppo import _title_matches_model
+
+    assert not _title_matches_model(
+        "OPPO A6 5G",
+        "OPPO A6 4G 全网通 幽兰灰 8GB+256GB",
+    )
+
+
 def test_oppo_emits_capacity_unavailable_only_after_complete_options_settles() -> None:
     page = _OppoFixturePage("normal.html")
     target = next(
