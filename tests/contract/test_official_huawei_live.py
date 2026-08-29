@@ -40,6 +40,7 @@ _CAPTURE_SELECTOR_SPECS = {
             "[data-prdid] .summary-price .current-price "
             "[data-testid=vui_text_container]"
         ),
+        "primary_detail_root": "true",
     },
     "capacity": {
         "role": "capacity",
@@ -65,6 +66,22 @@ def _capture_selector_specs(
     specs["capacity"]["expected_text"] = capacity
     specs["color"]["expected_text"] = color
     return specs
+
+
+def _append_related_price(page: _HuaweiPage, value: str) -> None:
+    related = _OfficialNode("section", {"data-prdid": "related-accessory"}, page.detail_root)
+    summary = _OfficialNode("div", {"class": "summary-price"}, related)
+    current = _OfficialNode("div", {"class": "current-price"}, summary)
+    amount = _OfficialNode(
+        "span",
+        {"data-testid": "vui_text_container"},
+        current,
+    )
+    amount.text_parts = [value]
+    current.children.append(amount)
+    summary.children.append(current)
+    related.children.append(summary)
+    page.detail_root.children.append(related)
 
 
 class _HuaweiLocator(_OfficialLocator):
@@ -162,6 +179,19 @@ class _HuaweiLocator(_OfficialLocator):
         node = self.nodes[0]
         if "VMALL_CONFIG_OPTION_SELECTED" in script:
             return _huawei_page(self.page).option_is_selected(node)
+        product_root = next(
+            (
+                ancestor
+                for ancestor in (node, *_ancestors(node))
+                if "data-prdid" in ancestor.attrs
+            ),
+            None,
+        )
+        primary_detail_root = product_root is not None and any(
+            descendant.attrs.get("id") == "prd-detail-name"
+            and descendant.attrs.get("data-testid") == "prd-detail-name"
+            for descendant in product_root.descendants()
+        )
         return {
             "color": "rgb(207, 10, 44)",
             "effectiveLineThrough": node.tag == "s",
@@ -169,6 +199,7 @@ class _HuaweiLocator(_OfficialLocator):
             "ancestorClasses": [
                 ancestor.attrs.get("class", "") for ancestor in _ancestors(node)
             ],
+            "primaryDetailRoot": primary_detail_root,
         }
 
 
@@ -543,6 +574,21 @@ class _HuaweiPage(_OfficialFixturePage):
                 raise AssertionError(f"{role} selector is not CSS")
             matches = _official_select(self.detail_root.descendants(), selector)
             if role == "price":
+                if declaration.get("primary_detail_root") != "true":
+                    raise AssertionError("price selector is not scoped to the primary detail root")
+                matches = [
+                    node
+                    for node in matches
+                    if any(
+                        "data-prdid" in ancestor.attrs
+                        and any(
+                            descendant.attrs.get("id") == "prd-detail-name"
+                            and descendant.attrs.get("data-testid") == "prd-detail-name"
+                            for descendant in ancestor.descendants()
+                        )
+                        for ancestor in _ancestors(node)
+                    )
+                ]
                 expected_text = declaration.get("expected_text")
                 if not isinstance(expected_text, str):
                     raise AssertionError("price selector has no selected business text")
@@ -1319,6 +1365,38 @@ def test_huawei_promotion_with_same_public_text_testid_does_not_pollute_price() 
         for child in promotional.children
     )
     assert _adapter().observe(_task(), page).price == Decimal("4999")
+
+
+def test_huawei_related_product_price_does_not_pollute_primary_detail_offer() -> None:
+    """Only the product root containing the live detail title owns the offer."""
+
+    page = _HuaweiPage()
+    _append_related_price(page, "99")
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.price == Decimal("4999")
+
+
+def test_huawei_capture_ignores_same_price_from_related_product_root() -> None:
+    page = _HuaweiPage()
+    _append_related_price(page, "4999")
+    adapter = _adapter()
+
+    result = adapter.observe(_task(), page)
+    adapter.prepare_capture_view(_task(), page, result.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        _task(),
+        page,
+        result.semantic_state,
+    )
+
+    assert [rectangle.role for rectangle in rectangles] == [
+        "title",
+        "price",
+        "capacity",
+        "color",
+    ]
 
 
 @pytest.mark.parametrize(

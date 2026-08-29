@@ -158,7 +158,11 @@ _PRICE_EXCLUSION_MARKERS = (
 )
 _CAPTURE_SELECTORS = {
     "title": {"role": "title", "selector": _DETAIL_TITLE},
-    "price": {"role": "price", "selector": _CAPTURE_PRICE},
+    "price": {
+        "role": "price",
+        "selector": _CAPTURE_PRICE,
+        "primary_detail_root": "true",
+    },
     "capacity": {
         "role": "capacity",
         "selector": _SELECTED_CANDIDATE,
@@ -183,7 +187,16 @@ _PRICE_STYLE = """
     ancestorClasses.push(String(current.className || ''));
     current = current.parentElement;
   }
-  return {effectiveLineThrough: lineThrough, contextText, ancestorClasses};
+  const productRoot = element.closest('[data-prdid]');
+  const primaryDetailRoot = Boolean(productRoot?.querySelector(
+    '#prd-detail-name[data-testid="prd-detail-name"]'
+  ));
+  return {
+    effectiveLineThrough: lineThrough,
+    contextText,
+    ancestorClasses,
+    primaryDetailRoot,
+  };
 }
 """
 _OPTION_INDEXES = r"""
@@ -233,7 +246,15 @@ _OPTION_SELECTED = r"""
 _FIT = r"""
 (proofs) => {
   const resolve = (proof) => {
-    const candidates = Array.from(document.querySelectorAll(proof.selector));
+    let candidates = Array.from(document.querySelectorAll(proof.selector));
+    if (proof.primary_detail_root === 'true') {
+      candidates = candidates.filter(element => {
+        const productRoot = element.closest('[data-prdid]');
+        return Boolean(productRoot?.querySelector(
+          '#prd-detail-name[data-testid="prd-detail-name"]'
+        ));
+      });
+    }
     if (!proof.group_label) {
       const exact = proof.expected_text === undefined ? candidates : candidates.filter(
         element => (element.textContent || '').trim() === proof.expected_text
@@ -275,7 +296,15 @@ _FIT = r"""
 _GEOMETRY = r"""
 (proofs) => {
   const resolve = (proof) => {
-    const candidates = Array.from(document.querySelectorAll(proof.selector));
+    let candidates = Array.from(document.querySelectorAll(proof.selector));
+    if (proof.primary_detail_root === 'true') {
+      candidates = candidates.filter(element => {
+        const productRoot = element.closest('[data-prdid]');
+        return Boolean(productRoot?.querySelector(
+          '#prd-detail-name[data-testid="prd-detail-name"]'
+        ));
+      });
+    }
     if (!proof.group_label) {
       const exact = proof.expected_text === undefined ? candidates : candidates.filter(
         element => (element.textContent || '').trim() === proof.expected_text
@@ -827,6 +856,8 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         approved: list[tuple[Decimal, Any]] = []
         for candidate in _visible(page, (_PRICE_CANDIDATE,)):
             style = candidate.evaluate(_PRICE_STYLE)
+            if not isinstance(style, dict) or style.get("primaryDetailRoot") is not True:
+                continue
             if isinstance(style, dict) and style.get("effectiveLineThrough") is True:
                 continue
             if _price_context_rejected(style):
