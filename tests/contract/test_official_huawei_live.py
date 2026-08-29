@@ -231,6 +231,8 @@ class _HuaweiPage(_OfficialFixturePage):
         self.ambiguous_capacity_after_price_waits: int | None = None
         self.unstable_prices = False
         self.price_poll = 0
+        self.auxiliary_prices: tuple[str, ...] = ()
+        self.auxiliary_price_poll = 0
         self.price_missing_polls: set[int] = set()
         self.price_stale_polls: set[int] = set()
         self.title_override: str | None = None
@@ -440,6 +442,12 @@ class _HuaweiPage(_OfficialFixturePage):
         if node.attrs.get("hidden") is not None:
             return ""
         if node is not self.price_nodes()[0]:
+            if self.auxiliary_prices:
+                value = self.auxiliary_prices[
+                    self.auxiliary_price_poll % len(self.auxiliary_prices)
+                ]
+                self.auxiliary_price_poll += 1
+                return value
             return node.text
         if self.price_poll in self.price_missing_polls:
             self.price_poll += 1
@@ -1426,21 +1434,21 @@ def test_huawei_explicitly_pauses_for_login_and_security_states(
         _adapter().raise_if_manual_action(page)
 
 
-def test_huawei_price_may_appear_late_then_stabilizes_three_seconds() -> None:
+def test_huawei_price_may_appear_late_then_confirms_twice() -> None:
     page = _HuaweiPage()
     for node in page.price_nodes():
         node.attrs["hidden"] = ""
     page.price_visible_after_waits = 6
     result = _adapter().observe(_task(), page)
     assert result.price == Decimal("4999")
-    assert 18 <= page.price_waits <= 20
+    assert 8 <= page.price_waits <= 10
 
 
-def test_huawei_requires_three_seconds_of_continuous_price_stability() -> None:
+def test_huawei_requires_two_confirmations_after_transition_sample() -> None:
     page = _HuaweiPage()
     result = _adapter().observe(_task(), page)
     assert result.price == Decimal("4999")
-    assert page.price_waits >= 12
+    assert page.price_waits >= 2
 
 
 def test_huawei_same_price_stabilizes_across_transient_react_price_gaps() -> None:
@@ -1467,6 +1475,44 @@ def test_huawei_same_offer_stabilizes_across_transient_stale_react_prices() -> N
     result = _adapter().observe(_task(), page)
 
     assert result.price == Decimal("4999")
+
+
+def test_huawei_authoritative_price_ignores_dynamic_auxiliary_current_nodes() -> None:
+    """Only the first scoped current-price node describes the selected SKU."""
+
+    page = _HuaweiPage()
+    page.auxiliary_prices = ("¥4899", "¥4799", "¥4699", "¥4599")
+
+    result = _adapter().observe(_task(), page)
+
+    assert result.price == Decimal("4999")
+
+
+def test_huawei_verified_capture_does_not_repeat_full_price_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe(task, page)
+
+    def reject_full_business_reread(*_args: object) -> object:
+        raise AssertionError("full Huawei business discovery must not repeat")
+
+    monkeypatch.setattr(adapter, "_read_business_state", reject_full_business_reread)
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    reader = adapter.verified_state_reader(task, page, observation.semantic_state)
+
+    assert reader() == observation.semantic_state
+    assert tuple(
+        rectangle.role
+        for rectangle in adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+    ) == ("title", "price", "capacity", "color")
 
 
 @pytest.mark.parametrize("drift", ["identity", "configuration"])

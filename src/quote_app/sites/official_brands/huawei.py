@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.quality import CaptureQualityError
-from quote_app.evidence.semantic_state import VerifiedSemanticState
+from quote_app.evidence.semantic_state import SemanticStateReader, VerifiedSemanticState
 from quote_app.sites.detail_capture_view import ensure_capture_scale, restore_capture_scale
 from quote_app.sites.matching import color_matches, normalize_product_text
 from quote_app.sites.official_brands.base import LiveOfficialAdapterBase
@@ -826,7 +826,8 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
 
     def _stable_offer(self, task: WebsiteTask, page: Any) -> OfficialOfferSnapshot:
         identity = _detail_identity(page.url)
-        observations: dict[OfficialOfferSnapshot, int] = {}
+        previous: OfficialOfferSnapshot | None = None
+        matching_confirmations = 0
         for tick in range(21):
             self.raise_if_manual_action(page)
             try:
@@ -837,14 +838,16 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 # change. Preserve accumulated evidence across that empty tick.
                 pass
             else:
-                # During a SKU switch VMALL can briefly expose a still-visible
-                # prior-SKU price node between renders. Require thirteen full,
-                # identical SKU observations inside the five-second window,
-                # but do not discard already verified observations because of
-                # those intermittent stale frames. A genuinely alternating
-                # price still cannot reach this threshold and remains closed.
-                observations[current] = observations.get(current, 0) + 1
-                if observations[current] >= 13:
+                # The first read is the transition sample. Two further
+                # identical full-offer reads confirm the selected SKU without
+                # coupling readiness to auxiliary price nodes that React may
+                # continuously rerender.
+                if current == previous:
+                    matching_confirmations += 1
+                else:
+                    previous = current
+                    matching_confirmations = 0
+                if matching_confirmations >= 2:
                     return current
             if tick < 20:
                 page.wait_for_timeout(250)
@@ -853,7 +856,6 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         )
 
     def _current_price(self, page: Any) -> tuple[Decimal, Any]:
-        approved: list[tuple[Decimal, Any]] = []
         for candidate in _visible(page, (_PRICE_CANDIDATE,)):
             style = candidate.evaluate(_PRICE_STYLE)
             if not isinstance(style, dict) or style.get("primaryDetailRoot") is not True:
@@ -866,10 +868,35 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             if len(values) > 1:
                 raise LayoutRecognitionError("VMALL current price candidate is ambiguous")
             if len(values) == 1:
-                approved.append((values[0], candidate))
-        if not approved:
-            raise _PriceUnavailable("VMALL current price is unavailable")
-        return min(approved, key=lambda item: item[0])
+                # VMALL renders the selected SKU's current price first inside
+                # the scoped purchase summary. Later current-price nodes are
+                # auxiliary offer copies and can change independently.
+                return values[0], candidate
+            raise _PriceUnavailable("VMALL authoritative current price is unavailable")
+        raise _PriceUnavailable("VMALL current price is unavailable")
+
+    def _verified_price_proofs(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> tuple[Any, Any, Any, Any]:
+        identity = _detail_identity(page.url)
+        if identity.canonical_url != expected.canonical_url:
+            raise LayoutRecognitionError("VMALL capture URL changed")
+        if expected.current_sku != f"official-detail:{identity.product_key}":
+            raise LayoutRecognitionError("VMALL capture detail identity changed")
+        title = self._require_detail_title(page, task.model_name)
+        capacity = self._require_selected(page, "capacity", task)
+        color = self._require_selected(page, "color", task)
+        if self._capacity_value(page, task) != expected.capacity:
+            raise LayoutRecognitionError("VMALL capture capacity changed")
+        if not color_matches(expected.color, color.inner_text()):
+            raise LayoutRecognitionError("VMALL capture color changed")
+        amount, price = self._current_price(page)
+        if amount != expected.price:
+            raise LayoutRecognitionError("VMALL capture price changed")
+        return title, price, capacity, color
 
     def _no_model_state(self, task: WebsiteTask, page: Any) -> OfficialBusinessState:
         keyword = next(
@@ -961,14 +988,31 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                     raise LayoutRecognitionError(
                         "VMALL four-proof capture view cannot be established"
                     )
-            current = self.build_observation(task, self._read_business_state(task, browser))
-            if current.semantic_state != expected:
-                raise LayoutRecognitionError("VMALL capture view changed the selected offer")
+            self._verified_price_proofs(task, browser, expected)
         except Exception:
             if scaled:
                 restore_capture_scale(browser)
             raise
         self._prepared.add(key)
+
+    def verified_state_reader(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        expected: VerifiedSemanticState,
+    ) -> SemanticStateReader:
+        self._validate_task(task)
+        self._validate_expected_state(task, expected)
+        if expected.outcome is not BusinessOutcome.PRICE_FOUND:
+            return super().verified_state_reader(task, page, expected)
+        browser = _page(page)
+
+        def reader() -> VerifiedSemanticState:
+            self.raise_if_manual_action(browser)
+            self._verified_price_proofs(task, browser, expected)
+            return expected
+
+        return reader
 
     def restore_capture_view(
         self,
@@ -992,23 +1036,22 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self._validate_task(task)
         self._validate_expected_state(task, expected)
         browser = _page(page)
-        current = self.build_observation(task, self._read_business_state(task, browser))
         if expected.outcome is BusinessOutcome.PRICE_FOUND:
-            if current.semantic_state != expected:
-                raise LayoutRecognitionError("VMALL capture state changed")
+            title, price, capacity, color = self._verified_price_proofs(
+                task,
+                browser,
+                expected,
+            )
             selectors = _capture_selectors(expected)
             if not _proofs_fit(browser, selectors):
                 raise LayoutRecognitionError("VMALL final four-proof geometry changed")
-            title = self._require_detail_title(browser, task.model_name)
-            _amount, price = self._current_price(browser)
-            capacity = self._require_selected(browser, "capacity", task)
-            color = self._require_selected(browser, "color", task)
             return (
                 _rect(title, "title"),
                 _rect(price, "price"),
                 _rect(capacity, "capacity"),
                 _rect(color, "color"),
             )
+        current = self.build_observation(task, self._read_business_state(task, browser))
         if not self._same_legal_no_business_state(current.semantic_state, expected):
             raise LayoutRecognitionError("VMALL legal-no capture state changed")
         return current.css_rectangles
