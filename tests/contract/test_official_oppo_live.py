@@ -894,11 +894,59 @@ def test_oppo_no_model_capture_reuses_state_validated_during_positioning() -> No
         task, page, observation.semantic_state
     )
 
-    assert reads == 1
+    assert reads == 0
     assert tuple(rect.role for rect in rectangles) == (
         "search_keyword",
         "result_region",
     )
+
+
+def test_oppo_no_model_capture_reader_does_not_repeat_full_business_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared search evidence is rechecked directly, not rediscovered."""
+
+    adapter = _adapter()
+    task = _task()
+    page = _OppoNoModelPageWithVisibleQuery()
+    observation = adapter.observe(task, page)
+
+    def reject_full_business_reread(*_args: object) -> object:
+        raise AssertionError("full OPPO business discovery must not repeat")
+
+    monkeypatch.setattr(adapter, "_read_business_state", reject_full_business_reread)
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    reader = adapter.verified_state_reader(
+        task,
+        page,
+        observation.semantic_state,
+    )
+
+    assert reader() == observation.semantic_state
+
+
+def test_oppo_no_model_capture_reader_rejects_exact_model_appearing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoNoModelPageWithVisibleQuery()
+    observation = adapter.observe(task, page)
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    monkeypatch.setattr(
+        adapter,
+        "_preferred_exact_result_link",
+        lambda *_args: object(),
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="exact model appeared"):
+        adapter.verified_state_reader(
+            task,
+            page,
+            observation.semantic_state,
+        )()
 
 
 def test_oppo_homepage_product_links_do_not_bypass_the_real_search_submission() -> None:

@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.quality import CaptureQualityError
-from quote_app.evidence.semantic_state import VerifiedSemanticState
+from quote_app.evidence.semantic_state import SemanticStateReader, VerifiedSemanticState
 from quote_app.sites.detail_capture_view import ensure_capture_scale, restore_capture_scale
 from quote_app.sites.matching import (
     capacity_matches,
@@ -406,20 +406,65 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                                 "OPPO search keyword and complete result region "
                                 "must fit the same viewport"
                             )
-                current_business = self._read_business_state(task, browser_page)
-                current_state = self.build_observation(
-                    task, current_business
-                ).semantic_state
-                if not self._same_legal_no_business_state(current_state, expected):
-                    raise LayoutRecognitionError("OPPO legal-no capture view changed")
-                self._prepared_rectangles[key] = tuple(
-                    current_business.capture_view.css_rectangles
-                )
+                if expected.outcome is BusinessOutcome.NO_MODEL:
+                    current_url = self.require_approved_url(browser_page.url)
+                    if current_url != expected.canonical_url:
+                        raise LayoutRecognitionError(
+                            "OPPO no-model capture URL changed"
+                        )
+                    if self._preferred_exact_result_link(browser_page, task) is not None:
+                        raise LayoutRecognitionError(
+                            "OPPO exact model appeared before no-model capture"
+                        )
+                    keyword, region = proofs
+                    self._prepared_rectangles[key] = (
+                        _css_rect(keyword, "search_keyword"),
+                        _css_rect(region, "result_region"),
+                    )
+                else:
+                    current_business = self._read_business_state(task, browser_page)
+                    current_state = self.build_observation(
+                        task, current_business
+                    ).semantic_state
+                    if not self._same_legal_no_business_state(current_state, expected):
+                        raise LayoutRecognitionError("OPPO legal-no capture view changed")
+                    self._prepared_rectangles[key] = tuple(
+                        current_business.capture_view.css_rectangles
+                    )
             except Exception:
                 if expected.outcome is BusinessOutcome.NO_MODEL:
                     restore_capture_scale(browser_page)
                 raise
         self._prepared.add(key)
+
+    def verified_state_reader(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        expected: VerifiedSemanticState,
+    ) -> SemanticStateReader:
+        self._validate_task(task)
+        self._validate_expected_state(task, expected)
+        if expected.outcome is not BusinessOutcome.NO_MODEL:
+            return super().verified_state_reader(task, page, expected)
+        browser_page = _playwright_page(page)
+        key = (id(browser_page), task.task_id, expected.current_sku)
+        if key not in self._prepared_rectangles:
+            raise LayoutRecognitionError("OPPO no-model capture view is not prepared")
+
+        def reader() -> VerifiedSemanticState:
+            self.raise_if_manual_action(browser_page)
+            current_url = self.require_approved_url(browser_page.url)
+            if current_url != expected.canonical_url:
+                raise LayoutRecognitionError("OPPO no-model capture URL changed")
+            self._no_model_capture_proof_locators(task, browser_page)
+            if self._preferred_exact_result_link(browser_page, task) is not None:
+                raise LayoutRecognitionError(
+                    "OPPO exact model appeared before no-model capture"
+                )
+            return expected
+
+        return reader
 
     def restore_capture_view(
         self,
