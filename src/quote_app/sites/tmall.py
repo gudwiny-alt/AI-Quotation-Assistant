@@ -53,6 +53,7 @@ from quote_app.sites.prices import (
     PriceCandidate,
     SellingPriceEvidence,
     choose_price,
+    filter_valid_prices,
     parse_price,
 )
 from quote_app.sites.protocol import AdapterObservation, BrowserPage
@@ -241,6 +242,12 @@ class TmallVisibleConfigurationEvidence:
     title: str
     configuration: tuple[str, str]
     price_candidates: tuple[PriceCandidate, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthoritativeTmallPrice:
+    amount: Decimal
+    evidence: SellingPriceEvidence
 
 
 class TmallAdapter:
@@ -587,11 +594,18 @@ class TmallAdapter:
                 "Tmall selected configuration changed before formal capture"
             )
         configuration = self._selected_configuration_snapshot(browser_page, task)
-        price = self._stable_visible_price(
-            browser_page,
-            task,
-            configuration,
-        )
+        if self._uses_authoritative_price_evidence(task):
+            price = self._snapshot_price_for_capture(
+                browser_page,
+                task,
+                configuration,
+            ).amount
+        else:
+            price = self._stable_visible_price(
+                browser_page,
+                task,
+                configuration,
+            )
         current_sku = f"visible:{configuration[0]}|{configuration[1]}"
         current = self._semantic_state(
             task,
@@ -738,11 +752,18 @@ class TmallAdapter:
                 browser_page,
                 task,
             )
-            price = self._stable_visible_price(
-                browser_page,
-                task,
-                configuration,
-            )
+            if self._uses_authoritative_price_evidence(task):
+                price = self._snapshot_price_for_capture(
+                    browser_page,
+                    task,
+                    configuration,
+                ).amount
+            else:
+                price = self._stable_visible_price(
+                    browser_page,
+                    task,
+                    configuration,
+                )
             self._require_exact_detail_url(
                 browser_page,
                 expected.canonical_url,
@@ -1491,6 +1512,72 @@ class TmallAdapter:
             price_candidates=self._price_candidates(page),
         )
 
+    @staticmethod
+    def _uses_authoritative_price_evidence(task: WebsiteTask) -> bool:
+        normalized_brand = normalize_product_text(task.brand)
+        return normalized_brand in {
+            normalize_product_text("华为"),
+            normalize_product_text("荣耀"),
+            normalize_product_text("HONOR"),
+        }
+
+    def _authoritative_price_evidence(
+        self,
+        candidates: tuple[PriceCandidate, ...],
+    ) -> _AuthoritativeTmallPrice | None:
+        valid = filter_valid_prices(candidates)
+        pre_discount_evidence = (
+            SellingPriceEvidence.VERIFIED_CURRENT_SKU_PRE_DISCOUNT_PRICE
+        )
+        amounts = {
+            amount
+            for candidate in valid
+            if candidate.selling_evidence is pre_discount_evidence
+            and (amount := parse_price(candidate.text)) is not None
+        }
+        if amounts:
+            if len(amounts) != 1:
+                raise LayoutRecognitionError(
+                    "Tmall authoritative price is ambiguous"
+                )
+            return _AuthoritativeTmallPrice(
+                amount=next(iter(amounts)),
+                evidence=pre_discount_evidence,
+            )
+        current_candidates = tuple(
+            candidate
+            for candidate in valid
+            if candidate.selling_evidence
+            is SellingPriceEvidence.VERIFIED_CURRENT_SKU_SELLING_NODE
+        )
+        selected = choose_price(current_candidates, self.spec.price_policy)
+        if selected is None:
+            return None
+        return _AuthoritativeTmallPrice(
+            amount=selected,
+            evidence=SellingPriceEvidence.VERIFIED_CURRENT_SKU_SELLING_NODE,
+        )
+
+    def _snapshot_price_for_capture(
+        self,
+        page: Any,
+        task: WebsiteTask,
+        configuration: tuple[str, str],
+    ) -> _AuthoritativeTmallPrice:
+        snapshot = self._visible_configuration_evidence(page, task)
+        if snapshot.configuration != configuration:
+            raise LayoutRecognitionError(
+                "Tmall selected visible configuration changed before formal capture"
+            )
+        selected = self._authoritative_price_evidence(
+            snapshot.price_candidates
+        )
+        if selected is None:
+            raise LayoutRecognitionError(
+                "Tmall authoritative price is unavailable before formal capture"
+            )
+        return selected
+
     def _stable_visible_price(
         self,
         page: Any,
@@ -1506,6 +1593,34 @@ class TmallAdapter:
         if transition_sample.title != title:
             raise LayoutRecognitionError(
                 "Tmall matching detail title changed during result polling"
+            )
+        if self._uses_authoritative_price_evidence(task):
+            previous_authoritative = self._authoritative_price_evidence(
+                transition_sample.price_candidates
+            )
+            for _ in range(_MAX_PRICE_POLLS - 1):
+                page.wait_for_timeout(_PRICE_POLL_INTERVAL_MS)
+                self._raise_if_blocked_or_error(page)
+                snapshot = self._visible_configuration_evidence(page, task)
+                if snapshot.configuration != configuration:
+                    raise LayoutRecognitionError(
+                        "Tmall selected visible configuration changed during result polling"
+                    )
+                if snapshot.title != title:
+                    raise LayoutRecognitionError(
+                        "Tmall matching detail title changed during result polling"
+                    )
+                selected_authoritative = self._authoritative_price_evidence(
+                    snapshot.price_candidates
+                )
+                if (
+                    selected_authoritative is not None
+                    and selected_authoritative == previous_authoritative
+                ):
+                    return selected_authoritative.amount
+                previous_authoritative = selected_authoritative
+            raise LayoutRecognitionError(
+                "Tmall authoritative price did not reach a verified stable state"
             )
         previous_selected: Decimal | None = None
         for _ in range(_MAX_PRICE_POLLS - 1):

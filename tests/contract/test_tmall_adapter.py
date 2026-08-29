@@ -139,6 +139,8 @@ class _Locator:
             matches.extend(_select(node.descendants(), selector))
         if selector == '[class^="highlightPrice--"]':
             self.page.apply_price_snapshot(matches)
+        if selector == '[class^="subPrice--"]':
+            self.page.apply_pre_discount_snapshot(matches)
         return _Locator(self.page, matches)
 
     def is_visible(self) -> bool:
@@ -274,6 +276,7 @@ class _FixturePage:
         selection_mode: str = "immediate",
         capacity_context_mode: str = "immediate",
         price_snapshots: tuple[tuple[str, ...], ...] | None = None,
+        pre_discount_snapshots: tuple[tuple[str, ...], ...] | None = None,
         price_sku_snapshots: tuple[tuple[str | None, ...], ...] | None = None,
         detail_redirect_url: str | None = None,
         price_context_mode: str = "dom",
@@ -306,6 +309,7 @@ class _FixturePage:
         self.selection_mode = selection_mode
         self.capacity_context_mode = capacity_context_mode
         self.price_snapshots = price_snapshots
+        self.pre_discount_snapshots = pre_discount_snapshots
         self.price_sku_snapshots = price_sku_snapshots
         self.detail_redirect_url = detail_redirect_url
         self.price_context_mode = price_context_mode
@@ -340,6 +344,7 @@ class _FixturePage:
         self.option_click_counts: dict[str, int] = {}
         self.pending_capacity_context: int | None = None
         self.price_snapshot_reads = 0
+        self.pre_discount_snapshot_reads = 0
         self.color_access_before_capacity_context = False
         if capacity_context_mode in {"async", "never"}:
             for node in self.root.descendants():
@@ -403,7 +408,28 @@ class _FixturePage:
             and (self.price_snapshots or self.price_sku_snapshots)
         ):
             self.apply_price_snapshot(nodes)
+        if (
+            selector
+            == '#tbpcDetail_SkuPanelRightWrap [class^="subPrice--"]'
+            and self.pre_discount_snapshots
+        ):
+            self.apply_pre_discount_snapshot(nodes)
         return _Locator(self, nodes)
+
+    def apply_pre_discount_snapshot(self, nodes: list[_Node]) -> None:
+        if not nodes or not self.pre_discount_snapshots:
+            return
+        snapshot_index = min(
+            self.pre_discount_snapshot_reads,
+            len(self.pre_discount_snapshots) - 1,
+        )
+        self.pre_discount_snapshot_reads += 1
+        for node, text in zip(
+            nodes,
+            self.pre_discount_snapshots[snapshot_index],
+            strict=False,
+        ):
+            node.text_parts = [text]
 
     def apply_price_snapshot(self, nodes: list[_Node]) -> None:
         if not nodes or not (self.price_snapshots or self.price_sku_snapshots):
@@ -803,6 +829,61 @@ def _huawei_storage_only_html() -> str:
     return html.replace("8GB + 256GB", "128GB").replace(
         "12GB + 256GB",
         "256GB",
+    )
+
+
+def _with_pre_discount_prices(html: str, *amounts: str) -> str:
+    nodes = "".join(
+        '<span class="subPrice--fixture" '
+        f'style="color:rgb(120,120,120)">优惠前 ¥{amount}</span>'
+        for amount in amounts
+    )
+    return re.sub(
+        r'(<section id="tbpcDetail_SkuPanelRightWrap">.*?)(</section>)',
+        rf"\1{nodes}\2",
+        html,
+        count=1,
+        flags=re.DOTALL,
+    )
+
+
+def _target_tmall_case(
+    brand: str,
+    *,
+    pre_discount_amounts: tuple[str, ...] = ("4,999",),
+) -> tuple[SiteSpec, WebsiteTask, str, str]:
+    if brand == "华为":
+        return (
+            _huawei_spec(),
+            _task(
+                brand="华为",
+                model_name="华为畅享 90 Pro Max",
+                ram="8GB",
+                storage="256GB",
+                color="白色",
+            ),
+            _with_pre_discount_prices(
+                _huawei_storage_only_html(),
+                *pre_discount_amounts,
+            ),
+            (
+                "https://huaweistore.tmall.com/"
+                "?q=%E5%8D%8E%E4%B8%BA%E7%95%85%E4%BA%AB%2090%20Pro%20Max"
+                + _LIVE_RESULTS_STATIC_QUERY
+            ),
+        )
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2").replace(
+        "小米15",
+        "荣耀Power2",
+    )
+    return (
+        _honor_spec(),
+        _task(brand="HONOR", model_name="荣耀Power2"),
+        _with_pre_discount_prices(html, *pre_discount_amounts),
+        _honor_power2_result_url(),
     )
 
 
@@ -2823,6 +2904,97 @@ def test_changing_auxiliary_prices_do_not_block_a_stable_selected_quotation() ->
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.price == Decimal("4399")
+
+
+@pytest.mark.parametrize("brand", ["华为", "HONOR"])
+def test_tmall_target_brand_ignores_changing_auxiliary_price_when_locked_price_is_stable(
+    brand: str,
+) -> None:
+    spec, task, html, result_url = _target_tmall_case(brand)
+    page = _FixturePage(
+        html=html,
+        after_search_url=result_url,
+        price_snapshots=(
+            ("¥5,099", "¥4,399", "¥9,999"),
+            ("¥5,199", "¥4,399", "¥9,999"),
+        ),
+        pre_discount_snapshots=(
+            ("优惠前 ¥4,999",),
+            ("优惠前 ¥4,999",),
+        ),
+    )
+
+    observation = TmallAdapter(spec).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_tmall_target_brand_conflicting_pre_discount_prices_fail_closed() -> None:
+    spec, task, html, result_url = _target_tmall_case(
+        "华为",
+        pre_discount_amounts=("4,999", "5,199"),
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=result_url,
+        pre_discount_snapshots=(
+            ("优惠前 ¥4,999", "优惠前 ¥5,199"),
+        ),
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="authoritative price"):
+        TmallAdapter(spec).observe(task, cast(Any, page))
+
+
+def test_tmall_target_brand_formal_capture_uses_one_locked_price_snapshot() -> None:
+    spec, task, html, result_url = _target_tmall_case("华为")
+    page = _FixturePage(
+        html=html,
+        after_search_url=result_url,
+        price_snapshots=(
+            ("¥5,099", "¥4,399", "¥9,999"),
+            ("¥5,199", "¥4,399", "¥9,999"),
+            ("¥5,299", "¥4,399", "¥9,999"),
+            ("¥5,399", "¥4,399", "¥9,999"),
+            ("¥5,499", "¥4,399", "¥9,999"),
+        ),
+        pre_discount_snapshots=(("优惠前 ¥4,999",),) * 8,
+    )
+    adapter = TmallAdapter(spec)
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    reread = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )()
+
+    assert reread == observation.semantic_state
+    assert page.pre_discount_snapshot_reads == 4
+
+
+def test_tmall_target_brand_formal_reader_rejects_locked_price_change() -> None:
+    spec, task, html, result_url = _target_tmall_case("HONOR")
+    page = _FixturePage(
+        html=html,
+        after_search_url=result_url,
+        pre_discount_snapshots=(
+            ("优惠前 ¥4,999",),
+            ("优惠前 ¥4,999",),
+            ("优惠前 ¥5,199",),
+        ),
+    )
+    adapter = TmallAdapter(spec)
+    observation = adapter.observe(task, cast(Any, page))
+
+    with pytest.raises(LayoutRecognitionError, match="changed before formal capture"):
+        adapter.verified_state_reader(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )()
 
 
 def test_multiple_visible_current_price_containers_fail_closed() -> None:
