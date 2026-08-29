@@ -262,6 +262,7 @@ class TmallAdapter:
         if spec.channel is not WebsiteChannel.TMALL:
             raise ValueError("spec channel must be TMALL")
         self.spec = spec
+        self._approved_detail_sources: set[tuple[int, str, str]] = set()
 
     def execute(
         self,
@@ -359,6 +360,13 @@ class TmallAdapter:
                 detail_url = self._exact_product_detail_url(
                     exact_cards,
                     base_url=browser_page.url,
+                )
+                self._approved_detail_sources.add(
+                    self._approved_detail_source_key(
+                        browser_page,
+                        task,
+                        detail_url,
+                    )
                 )
             stage[0] = "天猫商品详情页"
             return self._observe_detail(task, browser_page, detail_url)
@@ -570,7 +578,11 @@ class TmallAdapter:
         if expected.outcome is not BusinessOutcome.PRICE_FOUND:
             return
         self._require_exact_detail_url(browser_page, expected.canonical_url)
-        self._require_approved_detail_seller(browser_page)
+        self._require_approved_detail_seller(
+            browser_page,
+            task=task,
+            detail_url=expected.canonical_url,
+        )
         title = self._matching_detail_titles(browser_page, task)[0]
         capacity_group = self._sku_option_group(browser_page, "存储容量")
         capacity = self._exact_option(
@@ -746,7 +758,11 @@ class TmallAdapter:
                 browser_page,
                 expected.canonical_url,
             )
-            self._require_approved_detail_seller(browser_page)
+            self._require_approved_detail_seller(
+                browser_page,
+                task=task,
+                detail_url=expected.canonical_url,
+            )
             self._matching_detail_titles(browser_page, task)
             configuration = self._selected_configuration_snapshot(
                 browser_page,
@@ -857,7 +873,11 @@ class TmallAdapter:
             page,
             expected.canonical_url,
         )
-        self._require_approved_detail_seller(page)
+        self._require_approved_detail_seller(
+            page,
+            task=task,
+            detail_url=expected.canonical_url,
+        )
         self._matching_detail_titles(page, task)
         capacity_group = self._sku_option_group(page, "存储容量")
         capacity = self._exact_option(
@@ -1078,7 +1098,11 @@ class TmallAdapter:
             self._raise_if_blocked_or_error(page)
             try:
                 self._require_exact_detail_url(page, detail_url)
-                self._require_approved_detail_seller(page)
+                self._require_approved_detail_seller(
+                    page,
+                    task=task,
+                    detail_url=detail_url,
+                )
                 self._matching_detail_titles(page, task)
                 return
             except LayoutRecognitionError:
@@ -1087,19 +1111,60 @@ class TmallAdapter:
                 page.wait_for_timeout(_STORE_READY_INTERVAL_MS)
         raise AssertionError("Tmall detail-layout readiness loop did not return")
 
-    def _require_approved_detail_seller(self, page: Any) -> None:
+    @staticmethod
+    def _approved_detail_source_key(
+        page: Any,
+        task: WebsiteTask,
+        detail_url: str,
+    ) -> tuple[int, str, str]:
+        canonical_url = _approved_item_url(
+            detail_url,
+            base_url=detail_url,
+        )
+        return (id(page), task.task_id, canonical_url)
+
+    def _require_approved_detail_seller(
+        self,
+        page: Any,
+        *,
+        task: WebsiteTask | None = None,
+        detail_url: str | None = None,
+    ) -> None:
         sellers = visible_locators(page, TMALL_DETAIL_SELLER_MARKERS)
-        if (
-            len(sellers) != 1
-            or not _tmall_detail_seller_name_matches(
-                sellers[0].inner_text(),
+        seller_texts = tuple(seller.inner_text().strip() for seller in sellers)
+        matching = tuple(
+            text
+            for text in seller_texts
+            if _tmall_detail_seller_name_matches(
+                text,
                 self.spec.store_name,
                 self.spec.brand,
             )
-        ):
-            raise LayoutRecognitionError(
-                "Tmall product detail seller does not match the approved store"
+        )
+        conflicting = tuple(
+            text
+            for text in seller_texts
+            if _is_named_store_marker(text)
+            and not _tmall_detail_seller_name_matches(
+                text,
+                self.spec.store_name,
+                self.spec.brand,
             )
+        )
+        if not conflicting and len(matching) == 1:
+            return
+        if (
+            not conflicting
+            and normalize_product_text(self.spec.brand) == "苹果"
+            and task is not None
+            and detail_url is not None
+            and self._approved_detail_source_key(page, task, detail_url)
+            in self._approved_detail_sources
+        ):
+            return
+        raise LayoutRecognitionError(
+            "Tmall product detail seller does not match the approved store"
+        )
 
     @staticmethod
     def _matching_detail_titles(page: Any, task: WebsiteTask) -> tuple[Any, ...]:
@@ -1316,9 +1381,28 @@ class TmallAdapter:
     ) -> bool:
         if capacity_matches(label, task.ram, task.storage):
             return True
-        if not self._allows_huawei_fixed_ram_storage_only(group, task):
+        if not (
+            self._allows_huawei_fixed_ram_storage_only(group, task)
+            or self._allows_apple_storage_only(group, task)
+        ):
             return False
         return normalize_product_text(label) == normalize_product_text(task.storage)
+
+    @staticmethod
+    def _allows_apple_storage_only(
+        group: Any,
+        task: WebsiteTask,
+    ) -> bool:
+        if normalize_product_text(task.brand) != "苹果":
+            return False
+        labels = tuple(
+            normalize_product_text(option.inner_text())
+            for option in visible_locators(group, TMALL_SKU_VALUES)
+        )
+        return bool(labels) and all(
+            _STORAGE_ONLY_CAPACITY.fullmatch(label) is not None
+            for label in labels
+        )
 
     @staticmethod
     def _allows_huawei_fixed_ram_storage_only(
@@ -1822,7 +1906,9 @@ def _tmall_store_title_matches(title: str, expected_name: str) -> bool:
 
 def _is_named_store_marker(value: str) -> bool:
     compact = _compact_store_name(value)
-    return "旗舰店" in compact and compact not in {"旗舰店", "官方旗舰店"}
+    store_types = ("旗舰店", "专营店", "专卖店")
+    generic = {"旗舰店", "官方旗舰店", "专营店", "专卖店"}
+    return any(store_type in compact for store_type in store_types) and compact not in generic
 
 
 def _is_explicitly_disabled(locator: Any) -> bool:

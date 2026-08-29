@@ -606,6 +606,30 @@ class _FixturePage:
         elif screen == "product":
             self._url = "https://detail.tmall.com/item.htm?id=123456789018"
 
+    def set_detail_seller_marker(self, value: str | None) -> None:
+        product_roots = [
+            node
+            for node in self.root.descendants()
+            if node.attrs.get("data-screen") == "product"
+        ]
+        assert len(product_roots) == 1
+        sellers = [
+            node
+            for node in product_roots[0].descendants()
+            if any(
+                class_name.startswith(("shopName--", "tmall-detail-seller"))
+                for class_name in node.attrs.get("class", "").split()
+            )
+        ]
+        assert len(sellers) == 1
+        seller = sellers[0]
+        if value is None:
+            assert seller.parent is not None
+            seller.parent.children.remove(seller)
+            return
+        seller.children.clear()
+        seller.text_parts = [value]
+
     def click_option(self, node: _Node) -> None:
         if self.selection_mode == "never":
             return
@@ -687,7 +711,17 @@ class _FixturePage:
                 for class_name in node.attrs.get("class", "").split()
             )
         ]
-        capacity = next(node for node in options if node.text == "12GB + 256GB")
+        capacity = next(
+            (node for node in options if node.text == "12GB + 256GB"),
+            None,
+        )
+        if capacity is None:
+            capacity = next(
+                node
+                for node in options
+                if "GB" in node.text
+                and node.attrs.get("aria-selected") == "true"
+            )
         color = next(node for node in options if node.text == "黑色")
         if self.final_selection_mode == "rerender":
             for stale in (capacity, color):
@@ -885,6 +919,28 @@ def _target_tmall_case(
         _with_pre_discount_prices(html, *pre_discount_amounts),
         _honor_power2_result_url(),
     )
+
+
+def _apple_controlled_page(seller_name: str | None) -> _FixturePage:
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "Apple Store官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "apple.tmall.com")
+    html = html.replace("小米 15", "Apple iPhone 17").replace(
+        "小米15",
+        "iPhone 17",
+    )
+    html = html.replace('value="Apple iPhone 17"', 'value="iPhone 17"')
+    html = html.replace("8GB + 256GB", "128GB")
+    html = html.replace("12GB + 256GB", "256GB")
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://apple.tmall.com/?q=iPhone%2017"
+            + _LIVE_RESULTS_STATIC_QUERY
+        ),
+    )
+    page.set_detail_seller_marker(seller_name)
+    return page
 
 
 def _task(**changes: object) -> WebsiteTask:
@@ -2350,6 +2406,56 @@ def test_apple_detail_accepts_chinese_brand_alias_of_same_official_store() -> No
     page.activate("product")
 
     TmallAdapter(_apple_spec())._require_approved_detail_seller(cast(Any, page))
+
+
+def test_apple_controlled_official_result_without_detail_seller_marker_selects_sku() -> None:
+    page = _apple_controlled_page(None)
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+
+    observation = TmallAdapter(_apple_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.option_click_counts == {"capacity": 1, "color": 1}
+
+
+def test_apple_controlled_result_rejects_explicit_conflicting_detail_seller() -> None:
+    page = _apple_controlled_page("其他数码专营店")
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="approved store"):
+        TmallAdapter(_apple_spec()).observe(task, cast(Any, page))
+
+
+def test_apple_direct_detail_without_seller_or_provenance_still_fails() -> None:
+    page = _apple_controlled_page(None)
+    page.activate("product")
+    page._url = "https://detail.tmall.com/item.htm?id=123456789018"
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="approved store"):
+        TmallAdapter(_apple_spec())._observe_detail(
+            task,
+            cast(Any, page),
+            page.url,
+        )
 
 
 def test_detail_model_is_revalidated() -> None:
