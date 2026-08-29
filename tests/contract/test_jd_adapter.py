@@ -182,6 +182,11 @@ class _Locator:
             self.page.activate(target[1:])
 
     def scroll_into_view_if_needed(self) -> None:
+        if self.page.transient_option_scroll_failures > 0:
+            self.page.transient_option_scroll_failures -= 1
+            raise RuntimeError(
+                "Element is not attached to the DOM while scrolling into view"
+            )
         option_kind = self.page.option_kind(self.nodes[0])
         if option_kind is not None:
             self.page.option_scrolls.append(option_kind)
@@ -268,6 +273,7 @@ class _FixturePage:
         capture_search_value_ready_after: int | None = None,
         capture_search_value: str | None = None,
         capture_scale_samples: tuple[tuple[float, float], ...] | None = None,
+        transient_option_scroll_failures: int = 0,
     ) -> None:
         parser = _DocumentParser()
         parser.feed(html if html is not None else (FIXTURES / fixture).read_text("utf-8"))
@@ -315,6 +321,7 @@ class _FixturePage:
         self.capture_search_value = capture_search_value
         self.capture_scale_samples = capture_scale_samples
         self.capture_scale_sample_index = 0
+        self.transient_option_scroll_failures = transient_option_scroll_failures
         self.detail_scan_scrolls: list[int] = []
         self.pending_capacity_context: int | None = None
         self.pending_modern_price_update: int | None = None
@@ -2169,6 +2176,7 @@ def test_honor_magic8_modern_result_enters_exact_item_and_reads_offer() -> None:
     )
     page = _FixturePage(
         html=html,
+        transient_option_scroll_failures=1,
         after_search_url=(
             "https://mall.jd.com/view_search-1000000904-99-1-24-1.html"
             "?keyword=%E8%8D%A3%E8%80%80Magic8"
@@ -2186,6 +2194,106 @@ def test_honor_magic8_modern_result_enters_exact_item_and_reads_offer() -> None:
         cast(Any, page),
         observation.semantic_state,
     )() == observation.semantic_state
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Element is not attached to the DOM while scrolling into view",
+        "Element is not stable while scrolling into view",
+    ],
+)
+def test_jd_option_scroll_retries_one_transient_dom_error_once(
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    class Page:
+        url = "https://item.jd.com/100012345678.html"
+
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            self.waits.append(milliseconds)
+
+    class Option:
+        def __init__(self) -> None:
+            self.scroll_calls = 0
+            self.clicked = False
+
+        def scroll_into_view_if_needed(self) -> None:
+            self.scroll_calls += 1
+            if self.scroll_calls == 1:
+                raise RuntimeError(message)
+
+        def click(self) -> None:
+            self.clicked = True
+
+    adapter = JDAdapter(_honor_spec())
+    page = Page()
+    option = Option()
+    monkeypatch.setattr(adapter, "_raise_if_authentication_blocked", lambda _page: None)
+
+    adapter._prepare_exact_option(page, option)
+
+    assert page.waits == [250]
+    assert option.scroll_calls == 2
+    assert option.clicked is True
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected_scroll_calls", "expected_waits"),
+    [
+        (("ordinary scroll failure",), 1, []),
+        (
+            (
+                "Element is not attached to the DOM",
+                "Element is not attached to the DOM",
+            ),
+            2,
+            [250],
+        ),
+    ],
+)
+def test_jd_option_scroll_does_not_retry_beyond_the_narrow_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    messages: tuple[str, ...],
+    expected_scroll_calls: int,
+    expected_waits: list[int],
+) -> None:
+    class Page:
+        url = "https://item.jd.com/100012345678.html"
+
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            self.waits.append(milliseconds)
+
+    class Option:
+        def __init__(self) -> None:
+            self.scroll_calls = 0
+            self.clicked = False
+
+        def scroll_into_view_if_needed(self) -> None:
+            message = messages[min(self.scroll_calls, len(messages) - 1)]
+            self.scroll_calls += 1
+            raise RuntimeError(message)
+
+        def click(self) -> None:
+            self.clicked = True
+
+    adapter = JDAdapter(_honor_spec())
+    page = Page()
+    option = Option()
+    monkeypatch.setattr(adapter, "_raise_if_authentication_blocked", lambda _page: None)
+
+    with pytest.raises(RuntimeError, match=messages[-1]):
+        adapter._prepare_exact_option(page, option)
+
+    assert page.waits == expected_waits
+    assert option.scroll_calls == expected_scroll_calls
+    assert option.clicked is False
 
 
 def test_honor_store_entry_can_open_one_exact_item_without_legacy_search_form() -> None:

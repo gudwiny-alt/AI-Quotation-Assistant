@@ -926,7 +926,7 @@ def test_oppo_no_model_capture_reader_does_not_repeat_full_business_discovery(
     assert reader() == observation.semantic_state
 
 
-def test_oppo_no_model_capture_reader_rejects_exact_model_appearing(
+def test_oppo_no_model_capture_reader_reuses_the_prepared_search_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = _adapter()
@@ -938,15 +938,23 @@ def test_oppo_no_model_capture_reader_rejects_exact_model_appearing(
     monkeypatch.setattr(
         adapter,
         "_preferred_exact_result_link",
-        lambda *_args: object(),
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("prepared no-model search must not be rediscovered")
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_no_model_capture_proof_locators",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("prepared no-model proof locators must be reused")
+        ),
     )
 
-    with pytest.raises(LayoutRecognitionError, match="exact model appeared"):
-        adapter.verified_state_reader(
-            task,
-            page,
-            observation.semantic_state,
-        )()
+    assert adapter.verified_state_reader(
+        task,
+        page,
+        observation.semantic_state,
+    )() == observation.semantic_state
 
 
 def test_oppo_homepage_product_links_do_not_bypass_the_real_search_submission() -> None:

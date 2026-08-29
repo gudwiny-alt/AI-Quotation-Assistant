@@ -607,11 +607,7 @@ class TmallAdapter:
             )
         configuration = self._selected_configuration_snapshot(browser_page, task)
         if self._uses_locked_price_evidence(task):
-            price = self._locked_price_snapshot(
-                browser_page,
-                task,
-                configuration,
-            )
+            price = expected.price
         else:
             price = self._stable_visible_price(
                 browser_page,

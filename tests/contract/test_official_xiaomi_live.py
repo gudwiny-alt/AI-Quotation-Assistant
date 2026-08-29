@@ -1002,11 +1002,15 @@ def test_xiaomi_legal_no_is_revalidated_and_uses_latest_capture_geometry(
     page = _XiaomiFixturePage(fixture)
     observation = adapter.observe(task, page)
     assert observation.outcome is outcome
-    proof_role = {
-        BusinessOutcome.NO_MODEL: "results",
-        BusinessOutcome.CAPACITY_UNAVAILABLE: "capacity-group",
-        BusinessOutcome.COLOR_UNAVAILABLE: "color-group",
-    }[outcome]
+    proof_role = (
+        "empty-results"
+        if fixture == "empty_results.html"
+        else {
+            BusinessOutcome.NO_MODEL: "results",
+            BusinessOutcome.CAPACITY_UNAVAILABLE: "capacity-group",
+            BusinessOutcome.COLOR_UNAVAILABLE: "color-group",
+        }[outcome]
+    )
     proof = next(
         node
         for node in page.root.iter()
@@ -1067,6 +1071,43 @@ def test_xiaomi_zero_cards_without_explicit_empty_state_is_not_no_model() -> Non
 
     with pytest.raises(LayoutRecognitionError, match="stabilize"):
         _adapter().observe(_task(), page)
+
+
+@pytest.mark.parametrize("preserve_structure", [True, False])
+def test_xiaomi_current_empty_message_is_accepted_as_the_result_proof(
+    preserve_structure: bool,
+) -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _XiaomiFixturePage("empty_results.html")
+    results = next(
+        node
+        for node in page.root.iter()
+        if node.get("data-xiaomi-role") == "results"
+    )
+    empty = next(node for node in results.iter() if node.tag == "p")
+    if not preserve_structure:
+        results.attrib.pop("data-xiaomi-role")
+        empty.attrib.pop("data-xiaomi-role")
+    empty.set("style", "left:77px;top:180px;width:640px;height:60px")
+    empty.text = "对应筛选条件下没有找到商品，换个筛选条件吧"
+
+    observation = adapter.observe(task, page)
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    verified = adapter.verified_state_reader(task, page, observation.semantic_state)()
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    )
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert verified == observation.semantic_state
+    assert tuple(rect.role for rect in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    assert rectangles[-1].x == 77
 
 
 def test_xiaomi_waits_for_delayed_search_cards_before_deciding_no_model() -> None:

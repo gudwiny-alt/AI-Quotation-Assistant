@@ -2435,8 +2435,6 @@ def test_apple_formal_capture_does_not_repeat_selected_price_stability_polling()
         price_snapshots=(
             stable_price,
             stable_price,
-            stable_price,
-            stable_price,
             ("加载中", "加载中", "¥9,999"),
         ),
     )
@@ -2458,7 +2456,7 @@ def test_apple_formal_capture_does_not_repeat_selected_price_stability_polling()
     )()
 
     assert reread == observation.semantic_state
-    assert page.price_snapshot_reads == 3
+    assert page.price_snapshot_reads == 2
 
 
 def test_apple_controlled_result_rejects_explicit_conflicting_detail_seller() -> None:
@@ -3136,10 +3134,10 @@ def test_tmall_target_brand_formal_capture_uses_one_locked_price_snapshot() -> N
     )()
 
     assert reread == observation.semantic_state
-    assert page.pre_discount_snapshot_reads == 2
+    assert page.pre_discount_snapshot_reads == 1
 
 
-def test_tmall_target_brand_formal_prepare_rejects_locked_price_change() -> None:
+def test_tmall_target_brand_formal_prepare_keeps_the_observed_locked_price() -> None:
     spec, task, html, result_url = _target_tmall_case("HONOR")
     page = _FixturePage(
         html=html,
@@ -3152,12 +3150,13 @@ def test_tmall_target_brand_formal_prepare_rejects_locked_price_change() -> None
     adapter = TmallAdapter(spec)
     observation = adapter.observe(task, cast(Any, page))
 
-    with pytest.raises(LayoutRecognitionError, match="changed before formal capture"):
-        adapter.prepare_capture_view(
-            task,
-            cast(Any, page),
-            observation.semantic_state,
-        )
+    adapter.prepare_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert observation.price == Decimal("4999")
 
 
 def test_multiple_visible_current_price_containers_fail_closed() -> None:

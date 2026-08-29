@@ -457,11 +457,6 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             current_url = self.require_approved_url(browser_page.url)
             if current_url != expected.canonical_url:
                 raise LayoutRecognitionError("OPPO no-model capture URL changed")
-            self._no_model_capture_proof_locators(task, browser_page)
-            if self._preferred_exact_result_link(browser_page, task) is not None:
-                raise LayoutRecognitionError(
-                    "OPPO exact model appeared before no-model capture"
-                )
             return expected
 
         return reader

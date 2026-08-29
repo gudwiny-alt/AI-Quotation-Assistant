@@ -487,7 +487,7 @@ class JDAdapter:
                 browser_page,
                 (_css_rect(capacity, "capacity"),),
             )
-        self._prepare_exact_option(capacity)
+        self._prepare_exact_option(browser_page, capacity)
         self._wait_for_selected(browser_page, capacity, "capacity")
         self._raise_if_authentication_blocked(browser_page)
         capacity_context_sku = self._wait_for_capacity_context(
@@ -516,7 +516,7 @@ class JDAdapter:
                 browser_page,
                 (_css_rect(color, "color"),),
             )
-        self._prepare_exact_option(color)
+        self._prepare_exact_option(browser_page, color)
         self._wait_for_selected(browser_page, color, "color")
         self._raise_if_authentication_blocked(browser_page)
         current_sku = self._selected_sku_identity(
@@ -946,7 +946,7 @@ class JDAdapter:
             label_reader=_modern_option_locator_label,
             prefer_actionable=_is_apple_task(task),
         )
-        self._prepare_exact_option(color)
+        self._prepare_exact_option(page, color)
         color = self._wait_for_modern_selected(
             page,
             task,
@@ -962,7 +962,7 @@ class JDAdapter:
             label_reader=_modern_option_locator_label,
             prefer_actionable=_is_apple_task(task),
         )
-        self._prepare_exact_option(capacity)
+        self._prepare_exact_option(page, capacity)
         capacity = self._wait_for_modern_selected(
             page,
             task,
@@ -1956,9 +1956,19 @@ class JDAdapter:
             )
         return selected[0]
 
-    @staticmethod
-    def _prepare_exact_option(option: Any) -> None:
-        option.scroll_into_view_if_needed()
+    def _prepare_exact_option(self, page: Any, option: Any) -> None:
+        try:
+            option.scroll_into_view_if_needed()
+        except Exception as error:
+            message = str(error).lower()
+            if not any(
+                marker in message
+                for marker in ("not attached to the dom", "element is not stable")
+            ):
+                raise
+            page.wait_for_timeout(250)
+            self._raise_if_authentication_blocked(page)
+            option.scroll_into_view_if_needed()
         option.click()
 
     def _wait_for_modern_selected(

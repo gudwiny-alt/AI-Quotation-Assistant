@@ -81,6 +81,9 @@ _EMPTY_RESULTS = (
     '[class*="empty-result"]',
     '[class*="no-result"]',
 )
+_CURRENT_EMPTY_RESULT_MESSAGES = (
+    "对应筛选条件下没有找到商品，换个筛选条件吧",
+)
 _PRODUCT_LINKS = (
     '[data-xiaomi-role="product-link"]',
     'a[href*="/shop/buy?product_id="]',
@@ -440,9 +443,11 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
                 raise
         else:
             if expected.outcome is BusinessOutcome.NO_MODEL:
-                keyword = self._require_search_keyword(browser_page, task.model_name)
-                region = _first_visible(browser_page, _RESULT_REGIONS)
-                if region is None or not _scroll_proof_group_into_view(
+                keyword, region = self._no_model_proof_locators(
+                    task,
+                    browser_page,
+                )
+                if not _scroll_proof_group_into_view(
                     browser_page,
                     (keyword, region),
                 ):
@@ -600,7 +605,28 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
         return keyword
 
     def _explicit_empty_result(self, page: Any) -> bool:
-        return _first_visible(page, _EMPTY_RESULTS) is not None
+        return self._explicit_empty_result_locator(page) is not None
+
+    def _explicit_empty_result_locator(self, page: Any) -> Any | None:
+        structural = _first_visible(page, _EMPTY_RESULTS)
+        if structural is not None:
+            return structural
+        getter = getattr(page, "get_by_text", None)
+        if not callable(getter):
+            return None
+        for message in _CURRENT_EMPTY_RESULT_MESSAGES:
+            try:
+                candidates = getter(message, exact=True)
+                # Prefer the deepest text node over an ancestor whose complete
+                # text happens to be identical; the proof should frame the
+                # actual empty-result message, not the whole page.
+                for index in reversed(range(candidates.count())):
+                    candidate = candidates.nth(index)
+                    if candidate.is_visible():
+                        return candidate
+            except (AttributeError, RuntimeError):
+                continue
+        return None
 
     def _wait_for_detail_title(self, page: Any, model_name: str) -> None:
         for _ in range(21):
@@ -920,13 +946,7 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
         return None
 
     def _no_model_state(self, task: WebsiteTask, page: Any) -> OfficialBusinessState:
-        keyword = self._require_search_keyword(page, task.model_name)
-        region = _first_visible(page, _RESULT_REGIONS)
-        links = _visible_product_links(page)
-        if region is None or (not links and not self._explicit_empty_result(page)):
-            raise LayoutRecognitionError("Xiaomi no-model evidence is incomplete")
-        if self._exact_result_link(page, task.model_name) is not None:
-            raise LayoutRecognitionError("Xiaomi exact model exists on no-model page")
+        keyword, region = self._no_model_proof_locators(task, page)
         return OfficialBusinessState.legal_no(
             canonical_url=self.require_approved_url(page.url),
             brand=task.brand,
@@ -939,6 +959,21 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
             ),
             detail_identity=None,
         )
+
+    def _no_model_proof_locators(
+        self,
+        task: WebsiteTask,
+        page: Any,
+    ) -> tuple[Any, Any]:
+        keyword = self._require_search_keyword(page, task.model_name)
+        links = _visible_product_links(page)
+        empty_result = self._explicit_empty_result_locator(page)
+        region = _first_visible(page, _RESULT_REGIONS) if links else empty_result
+        if region is None or (not links and empty_result is None):
+            raise LayoutRecognitionError("Xiaomi no-model evidence is incomplete")
+        if self._exact_result_link(page, task.model_name) is not None:
+            raise LayoutRecognitionError("Xiaomi exact model exists on no-model page")
+        return keyword, region
 
     def _configuration_no_state(
         self,
