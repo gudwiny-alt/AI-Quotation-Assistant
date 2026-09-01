@@ -209,7 +209,7 @@ class _Locator:
             node.attrs["style"] = (
                 f"{existing};" if existing else ""
             ) + (
-                "outline:5px solid rgb(255, 0, 0);"
+                "outline:4px solid rgb(255, 59, 48);"
                 "outline-offset:3px"
             )
             return True
@@ -3244,7 +3244,7 @@ def test_honor_unselectable_capacity_and_color_return_two_red_frame_targets() ->
     for node in unavailable_targets.values():
         styles = _style(node.attrs.get("style", ""))
         assert node.attrs.get("data-quote-unavailable-outline") == "true"
-        assert styles.get("outline") == "5px solid rgb(255, 0, 0)"
+        assert styles.get("outline") == "4px solid rgb(255, 59, 48)"
         assert styles.get("outline-offset") == "3px"
         assert "background" not in styles
         assert "opacity" not in styles

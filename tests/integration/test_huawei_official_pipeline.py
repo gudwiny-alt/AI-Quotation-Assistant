@@ -352,10 +352,10 @@ def test_huawei_price_capture_checkpoint_reaches_excel_ak_and_an(
     assert result.summary.failed_rows == 0
 
 
-def test_huawei_price_timeout_keeps_the_formal_capture_without_late_reread(
+def test_huawei_captures_before_the_detail_price_node_hydrates(
     tmp_path: Path,
 ) -> None:
-    """A missing price must not delete the already accepted formal screenshot."""
+    """The formal screenshot must not wait behind VMALL price recognition."""
 
     page = _HuaweiPage()
     price_nodes = page.price_nodes()
@@ -381,68 +381,9 @@ def test_huawei_price_timeout_keeps_the_formal_capture_without_late_reread(
     )
 
     assert len(capture.requests) == 1
-    assert audit.observations == []
-    assert audit.results[0].state is TaskState.TECHNICAL_FAILURE
-    assert audit.results[0].error_code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
-    assert audit.results[0].evidence is not None
-
-
-def test_huawei_reads_price_before_formal_capture_when_it_is_available(
-    tmp_path: Path,
-) -> None:
-    page = _HuaweiPage()
-    price_polls_at_capture: list[int] = []
-    capture = _FormalCapture(
-        on_capture=lambda: price_polls_at_capture.append(page.price_read_calls)
-    )
-    audit = _RunnerAudit()
-
-    run_full_pipeline(
-        _full_request(_huawei_inputs(tmp_path), tmp_path),
-        website_runner=lambda request: _run_real_runner(
-            request,
-            capture=capture,
-            session=_HuaweiSession(page),
-            audit=audit,
-        ),
-    )
-
-    assert price_polls_at_capture == [1]
+    assert audit.observations[0].price == Decimal("4999")
     assert audit.results[0].state is TaskState.SUCCEEDED
-    assert audit.results[0].price == Decimal("4999")
-
-
-def test_huawei_price_failure_still_publishes_and_keeps_formal_screenshot(
-    tmp_path: Path,
-) -> None:
-    page = _HuaweiPage()
-    for node in page.price_nodes():
-        node.attrs["hidden"] = ""
-    capture = _FormalCapture()
-    audit = _RunnerAudit()
-
-    result = run_full_pipeline(
-        _full_request(_huawei_inputs(tmp_path), tmp_path),
-        website_runner=lambda request: _run_real_runner(
-            request,
-            capture=capture,
-            session=_HuaweiSession(page),
-            audit=audit,
-        ),
-    )
-
-    quote = load_workbook(result.quote_path, data_only=False)
-    try:
-        sheet = quote["5G手机"]
-        assert sheet["AK2"].value is None
-        assert _image_anchors(sheet) == {"AN2"}
-    finally:
-        quote.close()
-    assert len(capture.requests) == 1
-    assert audit.results[0].state is TaskState.TECHNICAL_FAILURE
-    assert audit.results[0].error_code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
     assert audit.results[0].evidence is not None
-    assert audit.results[0].evidence.path.is_file()
 
 
 @pytest.mark.parametrize(
@@ -498,7 +439,7 @@ def test_huawei_each_legal_no_state_reaches_formal_capture(
     assert result.summary.failed_rows == 0
 
 
-def test_huawei_capture_failure_keeps_the_pre_capture_price_checkpoint(
+def test_huawei_capture_failure_does_not_publish_price_or_checkpoint(
     tmp_path: Path,
 ) -> None:
     seen_tasks: list[WebsiteTask] = []
@@ -516,7 +457,7 @@ def test_huawei_capture_failure_keeps_the_pre_capture_price_checkpoint(
     quote = load_workbook(result.quote_path, data_only=False)
     try:
         sheet = quote["5G手机"]
-        assert sheet["AK2"].value == 4999
+        assert sheet["AK2"].value is None
         assert "AN2" not in _image_anchors(sheet)
     finally:
         quote.close()
@@ -527,21 +468,20 @@ def test_huawei_capture_failure_keeps_the_pre_capture_price_checkpoint(
             row[0].value: row[1].value
             for row in overview.iter_rows(min_col=1, max_col=2)
         }
-        assert totals["部分完成"] == 1
-        assert totals["处理失败"] == 0
+        assert totals["部分完成"] == 0
+        assert totals["处理失败"] == 1
     finally:
         report.close()
     with SQLiteTaskRepository(tmp_path / "tasks.sqlite3") as repository:
         assert len(seen_tasks) == 1
         checkpoint = repository.load_observation(seen_tasks[0].task_id)
         saved_result = repository.load_result(seen_tasks[0].task_id)
-        assert checkpoint is not None
-        assert checkpoint.price == Decimal("4999")
+        assert checkpoint is None
         assert saved_result is not None
         assert saved_result.state is TaskState.TECHNICAL_FAILURE
     assert result.summary.completed_rows == 0
-    assert result.summary.partial_rows == 1
-    assert result.summary.failed_rows == 0
+    assert result.summary.partial_rows == 0
+    assert result.summary.failed_rows == 1
     assert len(capture.requests) == 3
 
 
@@ -593,7 +533,7 @@ def test_huawei_two_rows_keep_input_order_and_report_consistent_counts(
         report.close()
 
 
-def test_huawei_restart_before_capture_resumes_from_the_saved_price_checkpoint(
+def test_huawei_restart_before_capture_repeats_search_without_premature_checkpoint(
     tmp_path: Path,
 ) -> None:
     run_id = "huawei-resume"
@@ -620,8 +560,7 @@ def test_huawei_restart_before_capture_resumes_from_the_saved_price_checkpoint(
         with pytest.raises(SystemExit, match="stop before price finalization"):
             runner.run((task,))
         checkpoint = repository.load_observation(task.task_id)
-        assert checkpoint is not None
-        assert checkpoint.price == Decimal("4999")
+        assert checkpoint is None
 
     resumed_page = _HuaweiPage()
     with SQLiteTaskRepository(database) as repository:
@@ -640,9 +579,10 @@ def test_huawei_restart_before_capture_resumes_from_the_saved_price_checkpoint(
     assert results[0].state is TaskState.SUCCEEDED
     assert resumed_page.fill_calls == []
     assert resumed_page.search_submissions == 0
-    assert len(resumed_page.goto_calls) == 1
-    search_result = urlsplit(resumed_page.goto_calls[0])
-    assert search_result.hostname == "item.vmall.com"
+    assert len(resumed_page.goto_calls) == 2
+    assert urlsplit(resumed_page.goto_calls[0]).path == "/portal/search/index.html"
+    search_result = urlsplit(resumed_page.goto_calls[1])
+    assert search_result.hostname == "www.vmall.com"
     assert search_result.path == "/product/comdetail/index.html"
     assert parse_qs(search_result.query).get("prdId", [""])[0].isdigit()
 

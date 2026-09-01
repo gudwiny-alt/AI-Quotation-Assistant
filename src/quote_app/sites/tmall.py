@@ -241,7 +241,7 @@ element => {
   }
   element.style.setProperty(
     'outline',
-    '5px solid rgb(255, 0, 0)',
+    '4px solid rgb(255, 59, 48)',
     'important'
   );
   element.style.setProperty('outline-offset', '3px', 'important');

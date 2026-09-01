@@ -363,7 +363,7 @@ def _prepare_evidence(
     report_results: list[WebsiteResult] = []
     for result in results:
         _require_accepted_evidence(result, capture_acceptance_policy)
-        if result.state is not TaskState.SUCCEEDED and result.evidence is None:
+        if result.state is not TaskState.SUCCEEDED:
             report_results.append(result)
             continue
         evidence = result.evidence
@@ -531,15 +531,17 @@ def _require_accepted_evidence(
     result: WebsiteResult,
     capture_acceptance_policy: MacCapturePolicy,
 ) -> None:
+    if result.state is not TaskState.SUCCEEDED:
+        return
     evidence = result.evidence
     if evidence is None:
         return
     if (
         evidence.validation_code == "CAPTURE_OK_MAC_VISUAL_REVIEW"
         and not accepts_capture_validation(
-        evidence.validation_code,
-        policy=capture_acceptance_policy,
-        platform_name=host_platform.system(),
+            evidence.validation_code,
+            policy=capture_acceptance_policy,
+            platform_name=host_platform.system(),
         )
     ):
         raise ValueError("capture validation is not accepted for this publication")
@@ -581,17 +583,6 @@ def _map_results(
     for task in tasks:
         complete_result = result_by_task.get(task.task_id)
         observation = observation_by_task.get(task.task_id)
-        if (
-            complete_result is not None
-            and (payload := evidence_payloads.get(complete_result.task_id)) is not None
-        ):
-            _price_column, evidence_column = _CHANNEL_COLUMNS[task.channel]
-            images.append(
-                QuoteEvidenceImage(
-                    anchor=f"{evidence_column}{task.output_row_number}",
-                    payload=payload,
-                )
-            )
         source = (
             complete_result
             if (
@@ -611,6 +602,17 @@ def _map_results(
             row.cells[price_column] = "无"
         else:
             raise ValueError("website result has an unsupported business outcome")
+        if (
+            complete_result is not None
+            and complete_result.state is TaskState.SUCCEEDED
+            and (payload := evidence_payloads.get(complete_result.task_id)) is not None
+        ):
+            images.append(
+                QuoteEvidenceImage(
+                    anchor=f"{evidence_column}{task.output_row_number}",
+                    payload=payload,
+                )
+            )
 
     for output_row_number, row in enumerate(rows, start=2):
         _map_minimum(row, by_row.get(output_row_number, {}))

@@ -409,26 +409,11 @@ class WebsiteTaskRunner:
                 if isinstance(observation, CaptureReadyObservation):
                     if deferred_adapter is None:
                         raise AssertionError("capture-ready adapter is unavailable")
-                    try:
-                        completed = deferred_adapter.finalize_observation(
-                            task,
-                            page,
-                            observation,
-                        )
-                    except NonRetryableTechnicalError as error:
-                        if error.code != "PRICE_UNAVAILABLE_AFTER_CAPTURE":
-                            raise
-                        return WebsiteResult(
-                            task_id=task.task_id,
-                            state=TaskState.TECHNICAL_FAILURE,
-                            outcome=None,
-                            price=None,
-                            url=observation.url,
-                            evidence=evidence,
-                            diagnostic_path=None,
-                            error_code=error.code,
-                            error_message=error.message,
-                        )
+                    completed = deferred_adapter.finalize_observation(
+                        task,
+                        page,
+                        observation,
+                    )
                     if not isinstance(completed, AdapterObservation):
                         raise ValueError(
                             "capture-before-price adapter returned an invalid observation"

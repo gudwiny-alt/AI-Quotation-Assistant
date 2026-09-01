@@ -177,14 +177,6 @@ class _HuaweiLocator(_OfficialLocator):
 
     def evaluate(self, script: str) -> object:
         node = self.nodes[0]
-        if "VMALL_CONFIG_OPTION_META" in script:
-            group = _huawei_page(self.page).group_for(node)
-            return {
-                "interactive": node.tag == "button" or node.attrs.get("tabindex") == "0",
-                "group": {"capacity": "版本", "color": "颜色"}.get(group),
-                "text": node.text.strip(),
-                "visible": node.visible,
-            }
         if "data-quote-capture-proof" in script:
             node.attrs["data-quote-capture-proof"] = "price"
             return True
@@ -244,7 +236,6 @@ class _HuaweiPage(_OfficialFixturePage):
         self.ambiguous_capacity_after_price_waits: int | None = None
         self.unstable_prices = False
         self.price_poll = 0
-        self.price_read_calls = 0
         self.auxiliary_prices: tuple[str, ...] = ()
         self.auxiliary_price_poll = 0
         self.price_missing_polls: set[int] = set()
@@ -262,7 +253,6 @@ class _HuaweiPage(_OfficialFixturePage):
         self.blocker: tuple[float, float, bool] | None = None
         self.remove_color_geometry = False
         self.reject_global_detail_div_scan = False
-        self.reject_dynamic_option_indexes_after_selection = False
 
     @staticmethod
     def _parse(html: str) -> _OfficialNode:
@@ -280,7 +270,7 @@ class _HuaweiPage(_OfficialFixturePage):
 
     def get_by_text(self, value: str, *, exact: bool = False) -> _HuaweiLocator:
         matches = []
-        for node in self.active_root().descendants():
+        for node in self.root.descendants():
             text = node.text.strip()
             if (text == value) if exact else (value in text):
                 matches.append(node)
@@ -314,16 +304,6 @@ class _HuaweiPage(_OfficialFixturePage):
         return None
 
     def locator(self, selector: str) -> _HuaweiLocator:
-        if (
-            self.active == "detail"
-            and selector in {'div[tabindex="0"]', "button"}
-            and self.reject_dynamic_option_indexes_after_selection
-            and self.selected("capacity") == self.target_capacity()
-            and self.selected("color") == "曜石黑"
-        ):
-            raise AssertionError(
-                "VMALL must not reuse globally indexed option locators after selection"
-            )
         if (
             self.active == "detail"
             and selector == "div"
@@ -474,7 +454,6 @@ class _HuaweiPage(_OfficialFixturePage):
                 self.auxiliary_price_poll += 1
                 return value
             return node.text
-        self.price_read_calls += 1
         if self.price_poll in self.price_missing_polls:
             self.price_poll += 1
             return ""
@@ -560,11 +539,18 @@ class _HuaweiPage(_OfficialFixturePage):
             self.light_scrolls.append(delta)
             self.scroll_offset += delta
             return True
-        if "VMALL_CONFIG_CAPACITY_TEXTS" in script:
+        if "VMALL_CONFIG_OPTION_INDEXES" in script:
+            if not isinstance(argument, dict):
+                raise AssertionError("VMALL option query requires a selector and label")
+            selector = argument.get("selector")
+            label = argument.get("label")
+            if selector != "button" or label not in {"版本", "颜色"}:
+                return []
+            group = "capacity" if label == "版本" else "color"
             return [
-                node.text
-                for node in self.options("capacity")
-                if node.attrs.get("hidden") is None
+                index
+                for index, node in enumerate(_official_select(self.detail_root.descendants(), selector))
+                if node in self.options(group) and node.attrs.get("hidden") is None
             ]
         if not isinstance(argument, dict) or tuple(argument) != (
             "title",
@@ -1350,11 +1336,11 @@ def test_huawei_waits_for_target_option_arriving_at_tick_nineteen(group: str) ->
     assert page.option_waits[group] == 19
 
 
-def test_huawei_does_not_repeat_click_preselected_configuration() -> None:
+def test_huawei_explicitly_reconfirms_preselected_capacity() -> None:
     page = _HuaweiPage()
     _preselect_targets(page)
     assert _adapter().observe(_task(), page).outcome is BusinessOutcome.PRICE_FOUND
-    assert page.option_clicks == []
+    assert page.option_clicks == ["capacity"]
 
 
 def test_huawei_product_sold_out_copy_does_not_make_selectable_option_legal_no() -> None:
@@ -1811,16 +1797,6 @@ def test_huawei_verified_capture_does_not_repeat_full_price_discovery(
     ) == ("title", "capacity", "color")
 
 
-def test_huawei_offer_and_capture_do_not_reuse_global_option_indexes_after_selection() -> None:
-    page = _HuaweiPage()
-    page.reject_dynamic_option_indexes_after_selection = True
-
-    observation = _adapter().observe_for_capture(_task(), page)
-
-    assert observation.price == Decimal("4999")
-    assert observation.outcome is BusinessOutcome.PRICE_FOUND
-
-
 def test_huawei_formal_capture_never_reads_the_numeric_price_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1891,31 +1867,23 @@ def test_huawei_waits_for_visual_settle_before_formal_capture() -> None:
 
     adapter.prepare_capture_view(task, page, observation.semantic_state)
 
+    assert 800 in page.wait_timeout_milliseconds
     assert 1200 in page.wait_timeout_milliseconds
-    assert page.wait_timeout_milliseconds.count(1200) == 1
 
 
-def test_huawei_price_wait_does_not_swallow_detail_identity_drift() -> None:
+@pytest.mark.parametrize("drift", ["identity", "configuration"])
+def test_huawei_price_wait_does_not_swallow_identity_or_configuration_drift(drift: str) -> None:
     page = _HuaweiPage()
     for node in page.price_nodes():
         node.attrs["hidden"] = ""
     page.price_visible_after_waits = 4
-    page.identity_drift_after_price_waits = 2
+    if drift == "identity":
+        page.identity_drift_after_price_waits = 2
+    else:
+        page.ambiguous_capacity_after_price_waits = 2
     with pytest.raises((LayoutRecognitionError, CaptureQualityError, NonRetryableTechnicalError)):
         _adapter().observe(_task(), page)
     assert page.price_waits == 2
-
-
-def test_huawei_ignores_unrelated_stale_selected_style_after_target_is_selected() -> None:
-    page = _HuaweiPage()
-    for node in page.price_nodes():
-        node.attrs["hidden"] = ""
-    page.price_visible_after_waits = 4
-    page.ambiguous_capacity_after_price_waits = 2
-
-    observation = _adapter().observe(_task(), page)
-
-    assert observation.price == Decimal("4999")
 
 
 def test_huawei_current_price_node_locks_its_first_visible_amount() -> None:

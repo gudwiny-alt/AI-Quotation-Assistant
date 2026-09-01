@@ -554,19 +554,6 @@ def _website_channel_state(
 ) -> str:
     if waiting_for_manual_verification:
         return CHANNEL_MANUAL_VERIFICATION
-    if (
-        result is not None
-        and result.state is TaskState.TECHNICAL_FAILURE
-        and result.error_code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
-        and result.evidence is not None
-    ):
-        if not accepts_capture_validation(
-            result.evidence.validation_code,
-            policy=capture_acceptance_policy,
-            platform_name=host_platform.system(),
-        ):
-            raise ValueError("capture validation is not accepted for this report")
-        return "截图成功；取价失败"
     if result is not None and result.state is TaskState.SUCCEEDED:
         evidence = result.evidence
         if evidence is None or not accepts_capture_validation(
