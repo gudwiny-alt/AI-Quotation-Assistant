@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -258,6 +259,7 @@ class _XiaomiFixturePage:
         self.price_reads = 0
         self.price_text_search_unavailable = False
         self.wait_calls = 0
+        self.wait_timeout_milliseconds: list[float] = []
         self.goto_calls: list[str] = []
         self.option_clicks: list[str] = []
         self.scrolls: list[str] = []
@@ -291,6 +293,7 @@ class _XiaomiFixturePage:
         return None
 
     def wait_for_timeout(self, _milliseconds: float) -> None:
+        self.wait_timeout_milliseconds.append(_milliseconds)
         self.wait_calls += 1
         for node in self.root.iter():
             threshold = node.get("data-show-after-waits")
@@ -993,7 +996,7 @@ def test_xiaomi_capture_layout_does_not_claim_oversized_proof_fits() -> None:
         ("no_color.html", BusinessOutcome.COLOR_UNAVAILABLE),
     ],
 )
-def test_xiaomi_legal_no_is_revalidated_and_uses_latest_capture_geometry(
+def test_xiaomi_configuration_no_revalidates_while_no_model_reuses_accepted_geometry(
     fixture: str,
     outcome: BusinessOutcome,
 ) -> None:
@@ -1027,7 +1030,10 @@ def test_xiaomi_legal_no_is_revalidated_and_uses_latest_capture_geometry(
     )
 
     assert verified == observation.semantic_state
-    assert rectangles[-1].x == 77
+    if outcome is BusinessOutcome.NO_MODEL:
+        assert rectangles == observation.css_rectangles
+    else:
+        assert rectangles[-1].x == 77
 
 
 def test_xiaomi_no_model_resume_fails_if_exact_card_appears() -> None:
@@ -1142,7 +1148,7 @@ def test_xiaomi_exact_card_does_not_depend_on_blank_header_search_value() -> Non
     assert page.goto_calls[1] == "https://www.mi.com/shop/buy?product_id=24648"
 
 
-def test_xiaomi_no_model_decision_waits_for_full_search_settle_window() -> None:
+def test_xiaomi_search_settle_window_still_accepts_an_early_exact_card() -> None:
     page = _XiaomiFixturePage("normal.html")
     exact = next(
         node
@@ -1151,15 +1157,15 @@ def test_xiaomi_no_model_decision_waits_for_full_search_settle_window() -> None:
         and "Xiaomi 17 Max" == "".join(node.itertext()).strip()
     )
     exact.set("hidden", "")
-    exact.set("data-show-after-waits", "8")
+    exact.set("data-show-after-waits", "2")
 
     observation = _adapter().observe(_task(), page)
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert page.wait_calls >= 8
+    assert page.wait_calls >= 2
 
 
-def test_xiaomi_no_model_waits_full_ten_seconds_for_late_exact_card() -> None:
+def test_xiaomi_stable_unrelated_results_are_captured_without_ten_second_wait() -> None:
     page = _XiaomiFixturePage("normal.html")
     exact = next(
         node
@@ -1167,13 +1173,24 @@ def test_xiaomi_no_model_waits_full_ten_seconds_for_late_exact_card() -> None:
         if node.get("data-xiaomi-role") == "product-link"
         and "Xiaomi 17 Max" == "".join(node.itertext()).strip()
     )
-    exact.set("hidden", "")
-    exact.set("data-show-after-waits", "28")
+    parent = next(candidate for candidate in page.root.iter() if exact in list(candidate))
+    parent.remove(exact)
 
-    observation = _adapter().observe(_task(), page)
+    adapter = _adapter()
+    task = _task()
+    observation = adapter.observe(task, page)
 
-    assert observation.outcome is BusinessOutcome.PRICE_FOUND
-    assert page.wait_calls >= 28
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert page.wait_calls <= 4
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    assert tuple(
+        rectangle.role
+        for rectangle in adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+    ) == ("search_keyword", "result_region")
 
 
 def test_xiaomi_waits_for_delayed_capacity_options_before_writing_legal_no() -> None:
@@ -1309,6 +1326,15 @@ def test_xiaomi_no_model_uses_specific_result_region_instead_of_main() -> None:
     assert observation.css_rectangles[-1].x == 77
 
 
+def test_xiaomi_explicit_empty_result_does_not_wait_full_ten_seconds() -> None:
+    page = _XiaomiFixturePage("empty_results.html")
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert page.wait_calls <= 4
+
+
 def test_xiaomi_duplicate_exact_cards_with_different_product_ids_fail_closed() -> None:
     page = _XiaomiFixturePage("normal.html")
     results = next(
@@ -1352,15 +1378,99 @@ def test_xiaomi_prepare_capture_fails_when_four_proofs_cannot_fit_one_view() -> 
         adapter.prepare_capture_view(task, page, observation.semantic_state)
 
 
-def test_xiaomi_no_model_capture_requires_keyword_and_results_in_one_view() -> None:
+def test_xiaomi_no_model_capture_does_not_repeat_viewport_proof() -> None:
     adapter = _adapter()
     task = _task()
     page = _XiaomiFixturePage("no_model.html")
     observation = adapter.observe(task, page)
     page.evaluate = lambda _script, _handles: False  # type: ignore[attr-defined]
 
-    with pytest.raises(LayoutRecognitionError, match="same viewport"):
-        adapter.prepare_capture_view(task, page, observation.semantic_state)
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert 1200 in page.wait_timeout_milliseconds
+
+
+def test_xiaomi_empty_result_uses_exact_url_and_reuses_observed_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = replace(_task(), model_name="REDMI R70 5G")
+    page = _XiaomiFixturePage("empty_results.html")
+    for node in page.root.iter():
+        if node.get("data-xiaomi-role") == "search-keyword":
+            node.set("value", "空气净化器")
+
+    observation = adapter.observe(task, page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert "REDMI%20R70%205G" in observation.url
+    monkeypatch.setattr(
+        adapter,
+        "_no_model_proof_locators",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("accepted Xiaomi empty result must not be rediscovered")
+        ),
+    )
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    assert tuple(
+        rectangle.role
+        for rectangle in adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+    ) == ("search_keyword", "result_region")
+
+
+def test_xiaomi_empty_result_formal_reader_does_not_rebuild_page_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = replace(_task(), model_name="REDMI R70 5G")
+    page = _XiaomiFixturePage("empty_results.html")
+    observation = adapter.observe(task, page)
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    monkeypatch.setattr(
+        adapter,
+        "_read_business_state",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("accepted Xiaomi empty result must not be rebuilt")
+        ),
+    )
+
+    assert adapter.verified_state_reader(
+        task,
+        page,
+        observation.semantic_state,
+    )() == observation.semantic_state
+    assert 1200 in page.wait_timeout_milliseconds
+
+
+def test_xiaomi_empty_result_capture_survives_stale_observation_locators() -> None:
+    """Formal capture must use the accepted no-result fact, not old DOM handles."""
+
+    adapter = _adapter()
+    task = replace(_task(), model_name="REDMI R70 5G")
+    page = _XiaomiFixturePage("empty_results.html")
+    observation = adapter.observe(task, page)
+
+    # The native capture runtime can activate/resize Chromium between the
+    # observation and screenshot phases, invalidating previously held nodes.
+    page.generation += 1
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    )
+
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    assert 1200 in page.wait_timeout_milliseconds
 
 
 @pytest.mark.parametrize(

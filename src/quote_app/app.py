@@ -42,7 +42,9 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "已验证证据复用修复版（六品牌三渠道）2026.08.30.150"
+APP_BUILD_LABEL = (
+    "华为官网选配即截图与天猫荣耀高亮红框版（六品牌三渠道）2026.09.01.162"
+)
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：选中品牌依次执行全部官网、全部天猫，最后执行全部京东；"
     "京东独立登录状态会持久保留，首次使用无需预先登录；"

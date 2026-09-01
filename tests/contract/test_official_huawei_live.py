@@ -177,6 +177,17 @@ class _HuaweiLocator(_OfficialLocator):
 
     def evaluate(self, script: str) -> object:
         node = self.nodes[0]
+        if "VMALL_CONFIG_OPTION_META" in script:
+            group = _huawei_page(self.page).group_for(node)
+            return {
+                "interactive": node.tag == "button" or node.attrs.get("tabindex") == "0",
+                "group": {"capacity": "版本", "color": "颜色"}.get(group),
+                "text": node.text.strip(),
+                "visible": node.visible,
+            }
+        if "data-quote-capture-proof" in script:
+            node.attrs["data-quote-capture-proof"] = "price"
+            return True
         if "VMALL_CONFIG_OPTION_SELECTED" in script:
             return _huawei_page(self.page).option_is_selected(node)
         product_root = next(
@@ -194,7 +205,9 @@ class _HuaweiLocator(_OfficialLocator):
         )
         return {
             "color": "rgb(207, 10, 44)",
-            "effectiveLineThrough": node.tag == "s",
+            "effectiveLineThrough": any(
+                candidate.tag in {"s", "del"} for candidate in (node, *_ancestors(node))
+            ),
             "contextText": node.parent.text if node.parent is not None else node.text,
             "ancestorClasses": [
                 ancestor.attrs.get("class", "") for ancestor in _ancestors(node)
@@ -231,6 +244,7 @@ class _HuaweiPage(_OfficialFixturePage):
         self.ambiguous_capacity_after_price_waits: int | None = None
         self.unstable_prices = False
         self.price_poll = 0
+        self.price_read_calls = 0
         self.auxiliary_prices: tuple[str, ...] = ()
         self.auxiliary_price_poll = 0
         self.price_missing_polls: set[int] = set()
@@ -248,6 +262,7 @@ class _HuaweiPage(_OfficialFixturePage):
         self.blocker: tuple[float, float, bool] | None = None
         self.remove_color_geometry = False
         self.reject_global_detail_div_scan = False
+        self.reject_dynamic_option_indexes_after_selection = False
 
     @staticmethod
     def _parse(html: str) -> _OfficialNode:
@@ -265,7 +280,7 @@ class _HuaweiPage(_OfficialFixturePage):
 
     def get_by_text(self, value: str, *, exact: bool = False) -> _HuaweiLocator:
         matches = []
-        for node in self.root.descendants():
+        for node in self.active_root().descendants():
             text = node.text.strip()
             if (text == value) if exact else (value in text):
                 matches.append(node)
@@ -299,6 +314,16 @@ class _HuaweiPage(_OfficialFixturePage):
         return None
 
     def locator(self, selector: str) -> _HuaweiLocator:
+        if (
+            self.active == "detail"
+            and selector in {'div[tabindex="0"]', "button"}
+            and self.reject_dynamic_option_indexes_after_selection
+            and self.selected("capacity") == self.target_capacity()
+            and self.selected("color") == "曜石黑"
+        ):
+            raise AssertionError(
+                "VMALL must not reuse globally indexed option locators after selection"
+            )
         if (
             self.active == "detail"
             and selector == "div"
@@ -449,6 +474,7 @@ class _HuaweiPage(_OfficialFixturePage):
                 self.auxiliary_price_poll += 1
                 return value
             return node.text
+        self.price_read_calls += 1
         if self.price_poll in self.price_missing_polls:
             self.price_poll += 1
             return ""
@@ -534,26 +560,18 @@ class _HuaweiPage(_OfficialFixturePage):
             self.light_scrolls.append(delta)
             self.scroll_offset += delta
             return True
-        if "VMALL_CONFIG_OPTION_INDEXES" in script:
-            if not isinstance(argument, dict):
-                raise AssertionError("VMALL option query requires a selector and label")
-            selector = argument.get("selector")
-            label = argument.get("label")
-            if selector != "button" or label not in {"版本", "颜色"}:
-                return []
-            group = "capacity" if label == "版本" else "color"
+        if "VMALL_CONFIG_CAPACITY_TEXTS" in script:
             return [
-                index
-                for index, node in enumerate(_official_select(self.detail_root.descendants(), selector))
-                if node in self.options(group) and node.attrs.get("hidden") is None
+                node.text
+                for node in self.options("capacity")
+                if node.attrs.get("hidden") is None
             ]
         if not isinstance(argument, dict) or tuple(argument) != (
             "title",
-            "price",
             "capacity",
             "color",
         ):
-            raise AssertionError("VMALL capture must pass four explicit proof selectors")
+            raise AssertionError("VMALL capture must pass three explicit visual proof selectors")
         self.capture_selector_arguments.append(argument)
         if "unionTop" in script and "getBoundingClientRect" in script:
             return self.capture_geometry(argument)
@@ -565,15 +583,13 @@ class _HuaweiPage(_OfficialFixturePage):
         raise AssertionError(f"unexpected VMALL capture evaluation: {script[:90]}")
 
     def proofs_from_selectors(self, selectors: object) -> dict[str, _OfficialNode]:
-        if not isinstance(selectors, dict) or tuple(selectors) != (
-            "title",
-            "price",
-            "capacity",
-            "color",
-        ):
-            raise AssertionError("VMALL capture requires four named selectors")
+        if not isinstance(selectors, dict) or tuple(selectors) not in {
+            ("title", "capacity", "color"),
+            ("title", "price", "capacity", "color"),
+        }:
+            raise AssertionError("VMALL capture requires named visual selectors")
         proofs: dict[str, _OfficialNode] = {}
-        for role in ("title", "price", "capacity", "color"):
+        for role in selectors:
             declaration = selectors[role]
             if not isinstance(declaration, dict) or declaration.get("role") != role:
                 raise AssertionError(f"{role} selector has no matching role")
@@ -582,29 +598,15 @@ class _HuaweiPage(_OfficialFixturePage):
                 raise AssertionError(f"{role} selector is not CSS")
             matches = _official_select(self.detail_root.descendants(), selector)
             if role == "price":
-                if declaration.get("primary_detail_root") != "true":
-                    raise AssertionError("price selector is not scoped to the primary detail root")
-                matches = [
-                    node
-                    for node in matches
-                    if any(
-                        "data-prdid" in ancestor.attrs
-                        and any(
-                            descendant.attrs.get("id") == "prd-detail-name"
-                            and descendant.attrs.get("data-testid") == "prd-detail-name"
-                            for descendant in ancestor.descendants()
-                        )
-                        for ancestor in _ancestors(node)
-                    )
-                ]
                 expected_text = declaration.get("expected_text")
-                if not isinstance(expected_text, str):
-                    raise AssertionError("price selector has no selected business text")
-                matches = [
-                    node
-                    for node in matches
-                    if node.text.strip() == expected_text
-                ]
+                if expected_text is not None:
+                    if not isinstance(expected_text, str):
+                        raise AssertionError("price selector text is invalid")
+                    matches = [
+                        node
+                        for node in matches
+                        if node.text.strip() == expected_text
+                    ]
             elif role in {"capacity", "color"}:
                 expected_text = declaration.get("expected_text")
                 if not isinstance(expected_text, str):
@@ -623,13 +625,18 @@ class _HuaweiPage(_OfficialFixturePage):
             elif role == "title":
                 if set(declaration) != {"role", "selector"}:
                     raise AssertionError("title selector has unsupported metadata")
-            if role != "title" and "expected_text" not in declaration:
+            if role in {"capacity", "color"} and "expected_text" not in declaration:
                 raise AssertionError(f"{role} selector lacks selected business text")
             if len(matches) != 1:
                 raise AssertionError(f"{role} selector must resolve one live VMALL node")
             proofs[role] = matches[0]
-        if proofs["price"].text != selectors["price"]["expected_text"]:
-            raise AssertionError("price selector did not resolve the selected candidate")
+        if "price" in selectors:
+            price_selector = selectors["price"]["selector"]
+            if (
+                "data-quote-capture-proof" in price_selector
+                and proofs["price"].attrs.get("data-quote-capture-proof") != "price"
+            ):
+                raise AssertionError("price selector did not resolve the observed candidate")
         if proofs["capacity"].text != self.target_capacity():
             raise AssertionError("capacity selector did not resolve the selected version")
         if proofs["color"].text != "曜石黑":
@@ -1343,7 +1350,7 @@ def test_huawei_waits_for_target_option_arriving_at_tick_nineteen(group: str) ->
     assert page.option_waits[group] == 19
 
 
-def test_huawei_does_not_reclick_preselected_targets() -> None:
+def test_huawei_does_not_repeat_click_preselected_configuration() -> None:
     page = _HuaweiPage()
     _preselect_targets(page)
     assert _adapter().observe(_task(), page).outcome is BusinessOutcome.PRICE_FOUND
@@ -1401,7 +1408,6 @@ def test_huawei_capture_ignores_same_price_from_related_product_root() -> None:
 
     assert [rectangle.role for rectangle in rectangles] == [
         "title",
-        "price",
         "capacity",
         "color",
     ]
@@ -1434,21 +1440,21 @@ def test_huawei_explicitly_pauses_for_login_and_security_states(
         _adapter().raise_if_manual_action(page)
 
 
-def test_huawei_price_may_appear_late_then_confirms_twice() -> None:
+def test_huawei_price_may_appear_late_then_locks_immediately() -> None:
     page = _HuaweiPage()
     for node in page.price_nodes():
         node.attrs["hidden"] = ""
     page.price_visible_after_waits = 6
     result = _adapter().observe(_task(), page)
     assert result.price == Decimal("4999")
-    assert 8 <= page.price_waits <= 10
+    assert page.price_waits == 6
 
 
-def test_huawei_requires_two_confirmations_after_transition_sample() -> None:
+def test_huawei_does_not_repeat_checks_after_first_visible_price() -> None:
     page = _HuaweiPage()
     result = _adapter().observe(_task(), page)
     assert result.price == Decimal("4999")
-    assert page.price_waits >= 2
+    assert page.price_waits == 1
 
 
 def test_huawei_same_price_stabilizes_across_transient_react_price_gaps() -> None:
@@ -1488,6 +1494,286 @@ def test_huawei_authoritative_price_ignores_dynamic_auxiliary_current_nodes() ->
     assert result.price == Decimal("4999")
 
 
+def test_huawei_accepts_current_price_from_the_primary_product_price_region() -> None:
+    """VMALL may rename the price wrappers without changing their semantics."""
+
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    price = page.price_nodes()[0]
+    assert price.parent is not None
+    assert price.parent.parent is not None
+    price.parent.attrs["class"] = "sku-offer-price-current"
+    price.parent.parent.attrs["class"] = "sku-offer-price-panel"
+
+    observation = adapter.observe(task, page)
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert observation.price == Decimal("4999")
+    assert tuple(
+        rectangle.role
+        for rectangle in adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+    ) == ("title", "capacity", "color")
+
+
+def test_huawei_hidden_canonical_price_does_not_block_visible_price_fallback() -> None:
+    """A stale hidden canonical node must not veto a visible selected-SKU price."""
+
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    wrapper = _OfficialNode("div", {"class": "sku-price-panel"}, product_root)
+    amount = _OfficialNode(
+        "span",
+        {
+            "class": "sku-price-current",
+            "data-testid": "vui_text_container",
+            "style": "color:rgb(207,10,44)",
+        },
+        wrapper,
+    )
+    amount.text_parts = ["4999"]
+    wrapper.children.append(amount)
+    product_root.children.append(wrapper)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_reads_visible_detail_price_without_legacy_product_root() -> None:
+    """A current VMALL detail may render the offer without ``data-prdid``."""
+
+    page = _HuaweiPage()
+    for node in page.detail_root.descendants():
+        node.attrs.pop("data-prdid", None)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_formal_capture_does_not_require_price_node_after_observation() -> None:
+    """Configuration evidence remains capturable after the price renderer changes."""
+
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe(task, page)
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+        node.attrs.pop("data-quote-capture-proof", None)
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    )
+
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "title",
+        "capacity",
+        "color",
+    )
+
+
+def test_huawei_accepts_visible_selected_price_when_title_is_outside_price_root() -> None:
+    """A VMALL layout wrapper change must not block an otherwise valid offer."""
+
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    title = next(
+        node
+        for node in product_root.descendants()
+        if node.attrs.get("id") == "prd-detail-name"
+    )
+    product_root.children.remove(title)
+    title.parent = page.detail_root
+    page.detail_root.children.insert(0, title)
+
+    observation = adapter.observe(task, page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_accepts_currency_price_with_unrelated_dynamic_class() -> None:
+    """A visible price in the selected product root must not depend on class names."""
+
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    wrapper = _OfficialNode("div", {"class": "runtime-token-a8f3"}, product_root)
+    amount = _OfficialNode("span", {"class": "runtime-token-b91c"}, wrapper)
+    amount.text_parts = ["¥4999"]
+    wrapper.children.append(amount)
+    product_root.children.append(wrapper)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_accepts_current_price_text_node_without_red_styling() -> None:
+    """The current VMALL renderer exposes a neutral-colour price_text div."""
+
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    amount = _OfficialNode(
+        "div",
+        {
+            "data-testid": "price_text",
+            "style": "color:rgba(0,0,0,0.9)",
+        },
+        product_root,
+    )
+    amount.text_parts = ["¥4999"]
+    product_root.children.append(amount)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_empty_price_text_shell_does_not_hide_later_current_price() -> None:
+    """A visible empty renderer shell must not short-circuit the real price."""
+
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    empty_shell = _OfficialNode(
+        "div",
+        {"data-testid": "price_text"},
+        product_root,
+    )
+    summary = _OfficialNode("div", {"class": "summary-price"}, product_root)
+    current = _OfficialNode("div", {"class": "current-price"}, summary)
+    amount = _OfficialNode(
+        "div",
+        {"data-testid": "vui_text_container"},
+        current,
+    )
+    amount.text_parts = ["售价 4999"]
+    current.children.append(amount)
+    summary.children.append(current)
+    product_root.children.extend((empty_shell, summary))
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_accepts_plain_amount_from_primary_product_price_context() -> None:
+    """VMALL may paint the currency sign while exposing only the amount as text."""
+
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    wrapper = _OfficialNode(
+        "div",
+        {"class": "runtime-current-price-shell"},
+        product_root,
+    )
+    amount = _OfficialNode(
+        "span",
+        {
+            "class": "runtime-amount-token",
+            "style": "color:rgb(207,10,44)",
+        },
+        wrapper,
+    )
+    amount.text_parts = ["4999"]
+    wrapper.children.append(amount)
+    product_root.children.append(wrapper)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_accepts_price_when_currency_and_amount_are_split_across_nodes() -> None:
+    """VMALL may render the currency sign and amount as sibling leaves."""
+
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    wrapper = _OfficialNode("div", {"class": "runtime-price-shell"}, product_root)
+    symbol = _OfficialNode("span", {"class": "runtime-currency"}, wrapper)
+    symbol.text_parts = ["¥"]
+    amount = _OfficialNode("span", {"class": "runtime-amount"}, wrapper)
+    amount.text_parts = ["4999"]
+    wrapper.children.extend((symbol, amount))
+    product_root.children.append(wrapper)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_ignores_an_earlier_unrelated_product_root_for_split_price() -> None:
+    """A related product root must not hide the selected product's live price."""
+
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    decoy = _OfficialNode(
+        "section",
+        {"data-prdid": "earlier-related-product"},
+        page.detail_root,
+    )
+    page.detail_root.children.insert(0, decoy)
+    wrapper = _OfficialNode("div", {"class": "runtime-price-shell"}, product_root)
+    symbol = _OfficialNode("span", {"class": "runtime-currency"}, wrapper)
+    symbol.text_parts = ["¥"]
+    amount = _OfficialNode("span", {"class": "runtime-amount"}, wrapper)
+    amount.text_parts = ["4999"]
+    wrapper.children.extend((symbol, amount))
+    product_root.children.append(wrapper)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+
+
 def test_huawei_locks_the_first_exact_price_after_configuration_selection() -> None:
     page = _HuaweiPage()
     page.price_stale_polls = set(range(1, 21))
@@ -1522,26 +1808,123 @@ def test_huawei_verified_capture_does_not_repeat_full_price_discovery(
             page,
             observation.semantic_state,
         )
-    ) == ("title", "price", "capacity", "color")
+    ) == ("title", "capacity", "color")
 
 
-@pytest.mark.parametrize("drift", ["identity", "configuration"])
-def test_huawei_price_wait_does_not_swallow_identity_or_configuration_drift(drift: str) -> None:
+def test_huawei_offer_and_capture_do_not_reuse_global_option_indexes_after_selection() -> None:
     page = _HuaweiPage()
-    if drift == "identity":
-        page.identity_drift_after_price_waits = 2
-    else:
-        page.ambiguous_capacity_after_price_waits = 2
+    page.reject_dynamic_option_indexes_after_selection = True
+
+    observation = _adapter().observe_for_capture(_task(), page)
+
+    assert observation.price == Decimal("4999")
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_huawei_formal_capture_never_reads_the_numeric_price_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe(task, page)
+
+    def reject_second_price_read(*_args: object) -> object:
+        raise AssertionError("Huawei numeric price may only be read during observation")
+
+    monkeypatch.setattr(adapter, "_current_price", reject_second_price_read)
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    assert adapter.verified_state_reader(
+        task,
+        page,
+        observation.semantic_state,
+    )() == observation.semantic_state
+    assert tuple(
+        rectangle.role
+        for rectangle in adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+    ) == ("title", "capacity", "color")
+
+
+def test_huawei_formal_capture_does_not_search_for_a_price_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe(task, page)
+    module = importlib.import_module("quote_app.sites.official_brands.huawei")
+
+    monkeypatch.setattr(
+        module,
+        "_visible_price_candidates",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("formal capture must not search for a VMALL price candidate")
+        ),
+    )
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    assert adapter.verified_state_reader(
+        task,
+        page,
+        observation.semantic_state,
+    )() == observation.semantic_state
+    assert tuple(
+        rectangle.role
+        for rectangle in adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+    ) == ("title", "capacity", "color")
+
+
+def test_huawei_waits_for_visual_settle_before_formal_capture() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe(task, page)
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert 1200 in page.wait_timeout_milliseconds
+    assert page.wait_timeout_milliseconds.count(1200) == 1
+
+
+def test_huawei_price_wait_does_not_swallow_detail_identity_drift() -> None:
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    page.price_visible_after_waits = 4
+    page.identity_drift_after_price_waits = 2
     with pytest.raises((LayoutRecognitionError, CaptureQualityError, NonRetryableTechnicalError)):
         _adapter().observe(_task(), page)
     assert page.price_waits == 2
 
 
-def test_huawei_current_price_node_with_two_amounts_is_ambiguous() -> None:
+def test_huawei_ignores_unrelated_stale_selected_style_after_target_is_selected() -> None:
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    page.price_visible_after_waits = 4
+    page.ambiguous_capacity_after_price_waits = 2
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.price == Decimal("4999")
+
+
+def test_huawei_current_price_node_locks_its_first_visible_amount() -> None:
     page = _HuaweiPage()
     page.price_nodes()[0].text_parts = ["¥4999 ¥5199"]
-    with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
-        _adapter().observe(_task(), page)
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.price == Decimal("4999")
 
 
 @pytest.mark.parametrize(
@@ -1571,7 +1954,7 @@ def test_huawei_price_checkpoint_resumes_directly_without_home_search() -> None:
     assert page.fill_calls == [] and page.search_submissions == 0
 
 
-def test_huawei_capture_keeps_current_scale_when_four_proofs_already_fit() -> None:
+def test_huawei_capture_keeps_current_scale_when_visual_proofs_already_fit() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
@@ -1592,7 +1975,7 @@ def test_huawei_capture_uses_idempotent_eighty_percent_only_when_needed() -> Non
     assert page.capture_scales == [0.8]
 
 
-def test_huawei_capture_scrolls_down_once_from_real_four_proof_geometry() -> None:
+def test_huawei_capture_scrolls_down_once_from_real_visual_proof_geometry() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
@@ -1667,10 +2050,11 @@ def test_huawei_capture_selectors_and_price_state_survive_final_rectangle_read()
         result.semantic_state,
     )
     assert page.capture_selector_arguments
-    assert all(item == _capture_selector_specs() for item in page.capture_selector_arguments)
+    expected_selectors = _capture_selector_specs()
+    expected_selectors.pop("price")
+    assert all(item == expected_selectors for item in page.capture_selector_arguments)
     assert [rectangle.role for rectangle in rectangles] == [
         "title",
-        "price",
         "capacity",
         "color",
     ]

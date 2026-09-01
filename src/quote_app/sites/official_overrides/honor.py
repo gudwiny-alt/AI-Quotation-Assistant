@@ -413,9 +413,14 @@ class HonorOfficialOverride:
     @classmethod
     def attached_address_root(cls, page: Any) -> Any:
         address = page.locator(cls.address_roots[0])
-        if address.count() != 1:
+        count = address.count()
+        if count == 0:
             raise LayoutRecognitionError(
-                "Official HONOR product address region is missing or ambiguous"
+                "Official HONOR product address region is missing"
+            )
+        if count > 1:
+            raise LayoutRecognitionError(
+                "Official HONOR product address region is ambiguous"
             )
         return address.nth(0)
 

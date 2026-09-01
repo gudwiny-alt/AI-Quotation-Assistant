@@ -35,6 +35,47 @@ _SMALL_UPWARD_NUDGE_IN_NEAREST_SCROLL_AREA = """
   return window.scrollY !== before;
 }
 """
+_TITLE_VISUALLY_CLIPPED = """
+(element) => {
+  // quotationTitleClipped: inspect rendered text, clipping ancestors and
+  // sticky/fixed headers rather than trusting only the element rectangle.
+  const elementRect = element.getBoundingClientRect();
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  const textRect = range.getBoundingClientRect();
+  let visibleTop = 0;
+  let visibleBottom = window.innerHeight;
+  let current = element.parentElement;
+  while (current) {
+    const style = getComputedStyle(current);
+    if (/(hidden|clip|auto|scroll|overlay)/.test(
+      `${style.overflow} ${style.overflowY}`
+    )) {
+      const rect = current.getBoundingClientRect();
+      visibleTop = Math.max(visibleTop, rect.top);
+      visibleBottom = Math.min(visibleBottom, rect.bottom);
+    }
+    current = current.parentElement;
+  }
+  for (const candidate of document.querySelectorAll('body *')) {
+    if (candidate === element || candidate.contains(element)) continue;
+    const style = getComputedStyle(candidate);
+    if (!['fixed', 'sticky'].includes(style.position)) continue;
+    const rect = candidate.getBoundingClientRect();
+    const overlapsHorizontally = rect.left < textRect.right
+      && rect.right > textRect.left;
+    if (overlapsHorizontally && rect.top <= visibleTop + 2
+        && rect.bottom < window.innerHeight / 2) {
+      visibleTop = Math.max(visibleTop, rect.bottom);
+    }
+  }
+  const contentTop = Math.min(elementRect.top, textRect.top);
+  const contentBottom = Math.max(elementRect.bottom, textRect.bottom);
+  return contentTop < visibleTop + 2
+    || contentBottom > visibleBottom - 2
+    || element.scrollHeight > element.clientHeight + 1;
+}
+"""
 _IN_VIEWPORT = """
 (element) => {
   const rect = element.getBoundingClientRect();
@@ -174,6 +215,8 @@ def position_detail_for_capture(
     site_name: str,
     upward_recovery_steps: int = 0,
     preserve_ready_position: bool = False,
+    minimum_upward_nudges: int = 0,
+    reveal_clipped_title: bool = False,
 ) -> None:
     """Keep one detail page and find a viewport suitable for formal capture.
 
@@ -191,17 +234,37 @@ def position_detail_for_capture(
 
     if not 0 <= upward_recovery_steps <= 8:
         raise ValueError("upward recovery steps must be between 0 and 8")
+    if not 0 <= minimum_upward_nudges <= 2:
+        raise ValueError("minimum upward nudges must be between 0 and 2")
 
     # A valid frame must never be moved away before capture.  This is
     # particularly important on JD, whose independently scrollable SKU panel
     # can already be perfectly positioned by the product page itself.
-    if preserve_ready_position and _detail_capture_ready(
+    ready_before_positioning = _detail_capture_ready(
         title=title,
         prices=prices,
         capacity=capacity,
         color=color,
-    ):
-        return
+    )
+    if preserve_ready_position and ready_before_positioning:
+        if reveal_clipped_title and _reveal_clipped_title(
+            page,
+            title=title,
+            prices=prices,
+            capacity=capacity,
+            color=color,
+        ):
+            return
+        for _ in range(minimum_upward_nudges):
+            capacity.evaluate(_SMALL_UPWARD_NUDGE_IN_NEAREST_SCROLL_AREA)
+            page.wait_for_timeout(_SMALL_NUDGE_WAIT_MS)
+        if _detail_capture_ready(
+            title=title,
+            prices=prices,
+            capacity=capacity,
+            color=color,
+        ):
+            return
 
     # Capacity is the lowest required SKU field on the current marketplace
     # layouts.  Center it once: with the fixed tall Mac browser frame this
@@ -215,6 +278,33 @@ def position_detail_for_capture(
         capacity=capacity,
         color=color,
     ):
+        if reveal_clipped_title:
+            if _reveal_clipped_title(
+                page,
+                title=title,
+                prices=prices,
+                capacity=capacity,
+                color=color,
+            ):
+                return
+            raise CaptureViewGeometryError(
+                f"{site_name} product title remains clipped after bounded recovery",
+                safe_stage="结果区域定位",
+            )
+        for _ in range(minimum_upward_nudges):
+            capacity.evaluate(_SMALL_UPWARD_NUDGE_IN_NEAREST_SCROLL_AREA)
+            page.wait_for_timeout(_SMALL_NUDGE_WAIT_MS)
+        if minimum_upward_nudges and not _detail_capture_ready(
+            title=title,
+            prices=prices,
+            capacity=capacity,
+            color=color,
+        ):
+            raise CaptureViewGeometryError(
+                f"{site_name} title-reveal adjustment moved required detail proofs "
+                "outside the viewport",
+                safe_stage="结果区域定位",
+            )
         return
 
     # JD detail pages sometimes centre the capacity correctly but leave the
@@ -236,6 +326,36 @@ def position_detail_for_capture(
         "in the same viewport",
         safe_stage="结果区域定位",
     )
+
+
+def _reveal_clipped_title(
+    page: Any,
+    *,
+    title: Any,
+    prices: Sequence[Any],
+    capacity: Any,
+    color: Any,
+) -> bool:
+    """Reveal a clipped title without moving an already complete frame."""
+
+    for _ in range(2):
+        if title.evaluate(_TITLE_VISUALLY_CLIPPED) is not True:
+            return _detail_capture_ready(
+                title=title,
+                prices=prices,
+                capacity=capacity,
+                color=color,
+            )
+        capacity.evaluate(_SMALL_UPWARD_NUDGE_IN_NEAREST_SCROLL_AREA)
+        page.wait_for_timeout(_SMALL_NUDGE_WAIT_MS)
+        if not _detail_capture_ready(
+            title=title,
+            prices=prices,
+            capacity=capacity,
+            color=color,
+        ):
+            return False
+    return title.evaluate(_TITLE_VISUALLY_CLIPPED) is not True
 
 
 def fit_search_results_for_capture(

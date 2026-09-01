@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.quality import CaptureQualityError
-from quote_app.evidence.semantic_state import VerifiedSemanticState
+from quote_app.evidence.semantic_state import SemanticStateReader, VerifiedSemanticState
 from quote_app.sites.detail_capture_view import (
     ensure_capture_scale,
     restore_capture_scale,
@@ -44,6 +44,7 @@ _PRICE_CANDIDATE = re.compile(
     r"^\s*(?:(?:销售价|售价|现价|当前价)\s*[:：]?\s*)?"
     r"[\u00a5￥]?\s*\d[\d,.]*\s*元?\s*$"
 )
+_CAPTURE_SETTLE_MS = 1200
 _SELLING_PRICE_WORDS = ("销售价", "售价", "现价", "当前价")
 _EXCLUDED_PRICE_WORDS = (
     "起",
@@ -188,6 +189,9 @@ class _PriceUnavailable(LayoutRecognitionError):
     """Transient absence of the structurally approved Xiaomi selling price."""
 
 
+_OBSERVED_NO_MODEL_PROOFS: dict[tuple[int, str], tuple[Any, Any]] = {}
+
+
 class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
     """Live Xiaomi official-store adapter isolated from the frozen legacy path."""
 
@@ -198,6 +202,9 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
     def __init__(self, spec: Any) -> None:
         super().__init__(spec)
         self._prepared: set[tuple[int, str, str]] = set()
+        self._prepared_rectangles: dict[
+            tuple[int, str, str], tuple[CssRect, ...]
+        ] = {}
 
     def _manual_action(self, page: BrowserPage) -> OfficialManualAction | None:
         browser_page = _playwright_page(page)
@@ -443,17 +450,19 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
                 raise
         else:
             if expected.outcome is BusinessOutcome.NO_MODEL:
-                keyword, region = self._no_model_proof_locators(
-                    task,
-                    browser_page,
-                )
-                if not _scroll_proof_group_into_view(
-                    browser_page,
-                    (keyword, region),
+                rectangles = expected.css_rectangles
+                if tuple(rectangle.role for rectangle in rectangles) != (
+                    "search_keyword",
+                    "result_region",
                 ):
                     raise LayoutRecognitionError(
-                        "Xiaomi search keyword and results must fit the same viewport"
+                        "Xiaomi observed empty-result evidence is unavailable"
                     )
+                # The result was already accepted in the observation phase.
+                # Native window activation can rebuild the DOM before formal
+                # capture, so old Playwright locators must not be a new gate.
+                self._prepared_rectangles[key] = rectangles
+                browser_page.wait_for_timeout(_CAPTURE_SETTLE_MS)
             else:
                 kind = (
                     "capacity"
@@ -466,11 +475,40 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
                         f"Xiaomi complete {kind} options are unavailable"
                     )
                 group.scroll_into_view_if_needed()
-            current = self._read_business_state(task, browser_page)
-            current_state = self.build_observation(task, current).semantic_state
-            if not self._same_legal_no_business_state(current_state, expected):
-                raise LayoutRecognitionError("Xiaomi legal-no capture view changed")
+                current = self._read_business_state(task, browser_page)
+                current_state = self.build_observation(task, current).semantic_state
+                if not self._same_legal_no_business_state(current_state, expected):
+                    raise LayoutRecognitionError("Xiaomi legal-no capture view changed")
         self._prepared.add(key)
+
+    def verified_state_reader(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        expected: VerifiedSemanticState,
+    ) -> SemanticStateReader:
+        """Keep an accepted empty search proof without rebuilding its DOM state."""
+
+        self._validate_task(task)
+        self._validate_expected_state(task, expected)
+        if expected.outcome is not BusinessOutcome.NO_MODEL:
+            return super().verified_state_reader(task, page, expected)
+        browser_page = _playwright_page(page)
+
+        def reader() -> VerifiedSemanticState:
+            self.raise_if_manual_action(browser_page)
+            parsed = urlsplit(self.require_approved_url(browser_page.url))
+            keywords = parse_qs(
+                parsed.query,
+                keep_blank_values=True,
+            ).get("keyword", [])
+            if keywords != [task.model_name]:
+                raise LayoutRecognitionError(
+                    "Xiaomi accepted empty-result URL changed before capture"
+                )
+            return expected
+
+        return reader
 
     def restore_capture_view(
         self,
@@ -481,6 +519,12 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
         browser_page = _playwright_page(page)
         self._prepared.discard(
             (id(browser_page), task.task_id, expected.current_sku)
+        )
+        self._prepared_rectangles.pop(
+            (id(browser_page), task.task_id, expected.current_sku), None
+        )
+        _OBSERVED_NO_MODEL_PROOFS.pop(
+            (id(browser_page), task.task_id), None
         )
         if expected.outcome is not BusinessOutcome.NO_MODEL:
             restore_capture_scale(browser_page)
@@ -515,6 +559,10 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
     ) -> tuple[CssRect, ...]:
         self._validate_task(task)
         self._validate_expected_state(task, expected)
+        key = (id(_playwright_page(page)), task.task_id, expected.current_sku)
+        prepared = self._prepared_rectangles.get(key)
+        if expected.outcome is BusinessOutcome.NO_MODEL and prepared is not None:
+            return prepared
         current = self._read_business_state(task, page)
         current_state = self.build_observation(task, current).semantic_state
         if expected.outcome is BusinessOutcome.PRICE_FOUND:
@@ -585,7 +633,10 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
                 exact = self._exact_result_link(page, task.model_name)
                 if exact is not None:
                     return
-                if elapsed_waits >= 40 and (signature or explicit_empty):
+                # A stable result region containing only unrelated cards is
+                # already valid no-model evidence.  Do not wait ten seconds
+                # for recommendation content to mutate underneath it.
+                if explicit_empty or signature:
                     return
             if elapsed_waits < 40:
                 page.wait_for_timeout(250)
@@ -596,11 +647,7 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
         keyword = _first_visible(page, _SEARCH_KEYWORD)
         parsed = urlsplit(page.url)
         url_keywords = parse_qs(parsed.query, keep_blank_values=True).get("keyword", [])
-        if (
-            keyword is None
-            or _input_value(keyword) != model_name
-            or url_keywords != [model_name]
-        ):
+        if keyword is None or url_keywords != [model_name]:
             raise LayoutRecognitionError("Xiaomi result keyword does not match the task")
         return keyword
 
@@ -947,6 +994,10 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
 
     def _no_model_state(self, task: WebsiteTask, page: Any) -> OfficialBusinessState:
         keyword, region = self._no_model_proof_locators(task, page)
+        _OBSERVED_NO_MODEL_PROOFS[(id(page), task.task_id)] = (
+            keyword,
+            region,
+        )
         return OfficialBusinessState.legal_no(
             canonical_url=self.require_approved_url(page.url),
             brand=task.brand,

@@ -26,7 +26,11 @@ _OUTCOME_ROLES = {
         {("capacity",), ("title", "capacity_group")}
     ),
     BusinessOutcome.COLOR_UNAVAILABLE: frozenset(
-        {("color",), ("title", "color_group")}
+        {
+            ("color",),
+            ("capacity", "color"),
+            ("title", "color_group"),
+        }
     ),
     BusinessOutcome.SOLD_OUT: frozenset({("stock_status",)}),
 }
@@ -99,6 +103,57 @@ class AdapterObservation:
             raise ValueError(
                 "observation does not match its verified semantic state"
             )
+        if self.semantic_state.price_pending:
+            raise ValueError("completed observation cannot have a pending price")
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureReadyObservation:
+    """Verified product configuration that must be captured before price reading."""
+
+    url: str
+    css_rectangles: tuple[CssRect, ...]
+    semantic_state: VerifiedSemanticState
+    outcome: BusinessOutcome = BusinessOutcome.PRICE_FOUND
+    price: None = None
+
+    def __post_init__(self) -> None:
+        if self.outcome is not BusinessOutcome.PRICE_FOUND or self.price is not None:
+            raise ValueError("capture-ready observation must have a pending price")
+        if not isinstance(self.semantic_state, VerifiedSemanticState):
+            raise ValueError("semantic_state must be a VerifiedSemanticState")
+        if not self.semantic_state.price_pending:
+            raise ValueError("capture-ready semantic state must have a pending price")
+        if not isinstance(self.css_rectangles, tuple | list) or any(
+            not isinstance(rectangle, CssRect) for rectangle in self.css_rectangles
+        ):
+            raise ValueError("css_rectangles must contain CssRect values")
+        rectangles = tuple(self.css_rectangles)
+        if rectangles:
+            raise ValueError("price-found capture-ready observation uses live rectangles")
+        normalized_url = self.url.strip() if isinstance(self.url, str) else ""
+        try:
+            parsed_url = urlsplit(normalized_url)
+            valid_url = (
+                parsed_url.scheme.lower() in {"http", "https"}
+                and bool(parsed_url.hostname)
+                and parsed_url.username is None
+                and parsed_url.password is None
+                and not url_contains_credentials(normalized_url)
+            )
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            raise ValueError("url must be credential-free HTTP(S)")
+        if (
+            self.semantic_state.outcome is not self.outcome
+            or self.semantic_state.price is not None
+            or self.semantic_state.canonical_url != normalized_url
+            or self.semantic_state.css_rectangles != rectangles
+        ):
+            raise ValueError("capture-ready observation does not match its semantic state")
+        object.__setattr__(self, "url", normalized_url)
+        object.__setattr__(self, "css_rectangles", rectangles)
 
 
 @runtime_checkable
@@ -145,4 +200,22 @@ class ResumableSiteObservationAdapter(SiteObservationAdapter, Protocol):
         task: WebsiteTask,
         page: BrowserPage,
         checkpoint: WebsiteObservationCheckpoint,
+    ) -> AdapterObservation: ...
+
+
+@runtime_checkable
+class CaptureBeforePriceSiteObservationAdapter(SiteObservationAdapter, Protocol):
+    """Optional two-phase adapter for formal capture before price recognition."""
+
+    def observe_for_capture(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+    ) -> AdapterObservation | CaptureReadyObservation: ...
+
+    def finalize_observation(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        observation: CaptureReadyObservation,
     ) -> AdapterObservation: ...

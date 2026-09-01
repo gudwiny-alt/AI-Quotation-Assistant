@@ -192,6 +192,18 @@ _TMALL_CURRENT_SELLING_PRICE_CONTAINERS = (
 )
 _TMALL_CURRENT_SELLING_PRICE_VALUES = (
     '[class^="highlightPrice--"]',
+    '[class*="selectedAmount"]',
+    '[class*="SelectedAmount"]',
+    '[class*="currentAmount"]',
+    '[class*="CurrentAmount"]',
+    '[class*="currentPrice"]',
+    '[class*="CurrentPrice"]',
+    '[class*="sellingPrice"]',
+    '[class*="SellingPrice"]',
+    '[class*="skuPrice"]',
+    '[class*="SkuPrice"]',
+    '[class*="priceValue"]',
+    '[class*="PriceValue"]',
 )
 _TMALL_CURRENT_PRE_DISCOUNT_PRICE_VALUES = (
     '[class^="subPrice--"]',
@@ -200,6 +212,9 @@ _TMALL_PRE_DISCOUNT_PRICE = re.compile(
     r"^优惠前(?:价)?(?P<amount>[¥￥](?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
     r"(?:\.[0-9]{1,2})?(?:元)?)$"
 )
+_TMALL_EXACT_CURRENCY_AMOUNT = re.compile(
+    r"^\s*[¥￥]\s*\d[\d,]*(?:\.\d{1,2})?\s*(?:元)?\s*$"
+)
 _POLL_INTERVAL_MS = 100
 _PRICE_STABILITY_TIMEOUT_MS = 5_000
 _PRICE_POLL_INTERVAL_MS = 250
@@ -207,9 +222,59 @@ _MAX_PRICE_POLLS = (
     _PRICE_STABILITY_TIMEOUT_MS // _PRICE_POLL_INTERVAL_MS
 ) + 1
 _STORE_READY_INTERVAL_MS = 500
+_CONFIGURATION_SETTLE_MS = 800
+_CAPTURE_SETTLE_MS = 1200
+_MARK_UNAVAILABLE_OPTION_OUTLINE = r"""
+element => {
+  // TMALL_UNAVAILABLE_OPTION_OUTLINE: preserve the disabled appearance and
+  // draw only a thick hollow frame outside the requested option.
+  if (!element.hasAttribute('data-quote-unavailable-outline')) {
+    element.setAttribute('data-quote-unavailable-outline', 'true');
+    element.setAttribute(
+      'data-quote-previous-outline',
+      element.style.outline || ''
+    );
+    element.setAttribute(
+      'data-quote-previous-outline-offset',
+      element.style.outlineOffset || ''
+    );
+  }
+  element.style.setProperty(
+    'outline',
+    '5px solid rgb(255, 0, 0)',
+    'important'
+  );
+  element.style.setProperty('outline-offset', '3px', 'important');
+  return true;
+}
+"""
+_CLEAR_UNAVAILABLE_OPTION_OUTLINES = r"""
+() => {
+  // TMALL_UNAVAILABLE_OPTION_OUTLINE_CLEAR
+  document.querySelectorAll('[data-quote-unavailable-outline="true"]')
+    .forEach(element => {
+      const outline = element.getAttribute('data-quote-previous-outline') || '';
+      const offset = element.getAttribute(
+        'data-quote-previous-outline-offset'
+      ) || '';
+      if (outline) element.style.outline = outline;
+      else element.style.removeProperty('outline');
+      if (offset) element.style.outlineOffset = offset;
+      else element.style.removeProperty('outline-offset');
+      element.removeAttribute('data-quote-unavailable-outline');
+      element.removeAttribute('data-quote-previous-outline');
+      element.removeAttribute('data-quote-previous-outline-offset');
+    });
+  return true;
+}
+"""
 _OBSERVED_SUBSIDY_PRICE_MARKER = "平台加补后"
 _STORE_LOGIN_BENEFIT_GATE = "登录后可查看完整店铺优惠权益"
 _TMALL_QUOTATION_REGION = "not-required-for-quotation"
+
+
+class _LockedPriceNotReady(LayoutRecognitionError):
+    """Selected configuration is valid but its price node is still hydrating."""
 _TMALL_QUOTATION_STOCK = "not-required-for-quotation"
 _PRICE_STYLE_SCRIPT = """
 (element) => {
@@ -419,15 +484,6 @@ class TmallAdapter:
             ),
             semantic_name="capacity",
         )
-        if _is_explicitly_disabled(capacity):
-            self._require_exact_detail_url(browser_page, detail_url)
-            return self._legal_no(
-                task,
-                BusinessOutcome.CAPACITY_UNAVAILABLE,
-                browser_page,
-                (_css_rect(capacity, "capacity"),),
-            )
-        self._prepare_exact_option(capacity)
         def retry_capacity() -> Any:
             current_group = self._sku_option_group(
                 browser_page,
@@ -444,12 +500,30 @@ class TmallAdapter:
                 semantic_name="capacity",
             )
 
-        self._wait_for_selected(
-            browser_page,
-            capacity,
-            "capacity",
-            retry_resolver=retry_capacity,
-        )
+        honor_selection = _uses_honor_visual_selection(task)
+        if honor_selection:
+            capacity_available = self._try_select_honor_option(
+                browser_page,
+                capacity,
+                retry_resolver=retry_capacity,
+            )
+        else:
+            if _is_explicitly_disabled(capacity):
+                self._require_exact_detail_url(browser_page, detail_url)
+                return self._legal_no(
+                    task,
+                    BusinessOutcome.CAPACITY_UNAVAILABLE,
+                    browser_page,
+                    (_css_rect(capacity, "capacity"),),
+                )
+            self._prepare_exact_option(capacity)
+            self._wait_for_selected(
+                browser_page,
+                capacity,
+                "capacity",
+                retry_resolver=retry_capacity,
+            )
+            capacity_available = True
         self._raise_if_blocked_or_error(browser_page)
         self._require_exact_detail_url(browser_page, detail_url)
 
@@ -463,28 +537,77 @@ class TmallAdapter:
             lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
-        if _is_explicitly_disabled(color):
-            self._unique_selected_option(
-                capacity_group,
+        def retry_color() -> Any:
+            return self._exact_option(
+                self._sku_option_group(browser_page, "机身颜色"),
                 TMALL_SKU_VALUES,
-                lambda label: self._capacity_label_matches(
-                    capacity_group,
-                    task,
-                    label,
-                ),
-                semantic_name="capacity",
+                lambda label: _tmall_color_matches(task.color, label),
+                semantic_name="color",
             )
-            self._require_exact_detail_url(browser_page, detail_url)
-            return self._legal_no(
-                task,
-                BusinessOutcome.COLOR_UNAVAILABLE,
+
+        if honor_selection:
+            color_available = self._try_select_honor_option(
                 browser_page,
-                (_css_rect(color, "color"),),
+                color,
+                retry_resolver=retry_color,
             )
-        self._prepare_exact_option(color)
-        self._wait_for_selected(browser_page, color, "color")
+            if not capacity_available or not color_available:
+                current_capacity = retry_capacity()
+                current_color = retry_color()
+                rectangles = tuple(
+                    rectangle
+                    for unavailable, rectangle in (
+                        (
+                            not capacity_available,
+                            _css_rect(current_capacity, "capacity"),
+                        ),
+                        (
+                            not color_available,
+                            _css_rect(current_color, "color"),
+                        ),
+                    )
+                    if unavailable
+                )
+                outcome = (
+                    BusinessOutcome.COLOR_UNAVAILABLE
+                    if not color_available
+                    else BusinessOutcome.CAPACITY_UNAVAILABLE
+                )
+                self._require_exact_detail_url(browser_page, detail_url)
+                return self._legal_no(
+                    task,
+                    outcome,
+                    browser_page,
+                    rectangles,
+                )
+        else:
+            if _is_explicitly_disabled(color):
+                self._unique_selected_option(
+                    capacity_group,
+                    TMALL_SKU_VALUES,
+                    lambda label: self._capacity_label_matches(
+                        capacity_group,
+                        task,
+                        label,
+                    ),
+                    semantic_name="capacity",
+                )
+                self._require_exact_detail_url(browser_page, detail_url)
+                return self._legal_no(
+                    task,
+                    BusinessOutcome.COLOR_UNAVAILABLE,
+                    browser_page,
+                    (_css_rect(color, "color"),),
+                )
+            self._prepare_exact_option(color)
+            self._wait_for_selected(
+                browser_page,
+                color,
+                "color",
+            )
         self._raise_if_blocked_or_error(browser_page)
         self._require_exact_detail_url(browser_page, detail_url)
+        browser_page.wait_for_timeout(_CONFIGURATION_SETTLE_MS)
 
         configuration = self._selected_configuration_snapshot(
             browser_page,
@@ -576,13 +699,16 @@ class TmallAdapter:
             )
             return
         if expected.outcome is not BusinessOutcome.PRICE_FOUND:
+            self._read_legal_no_state(task, browser_page, expected)
+            if _uses_honor_visual_selection(task):
+                self._outline_unavailable_targets(
+                    task,
+                    browser_page,
+                    expected,
+                )
+            browser_page.wait_for_timeout(_CAPTURE_SETTLE_MS)
             return
         self._require_exact_detail_url(browser_page, expected.canonical_url)
-        self._require_approved_detail_seller(
-            browser_page,
-            task=task,
-            detail_url=expected.canonical_url,
-        )
         title = self._matching_detail_titles(browser_page, task)[0]
         capacity_group = self._sku_option_group(browser_page, "存储容量")
         capacity = self._exact_option(
@@ -601,34 +727,39 @@ class TmallAdapter:
             lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
-        if not _is_approved_selected(capacity) or not _is_approved_selected(color):
+        allow_visual_selected = _uses_honor_visual_selection(task)
+        if not _is_approved_selected(
+            capacity,
+            allow_visual_selected=allow_visual_selected,
+        ) or not _is_approved_selected(
+            color,
+            allow_visual_selected=allow_visual_selected,
+        ):
             raise LayoutRecognitionError(
                 "Tmall selected configuration changed before formal capture"
             )
         configuration = self._selected_configuration_snapshot(browser_page, task)
-        if self._uses_locked_price_evidence(task):
-            price = expected.price
-        else:
+        if not self._uses_locked_price_evidence(task):
             price = self._stable_visible_price(
                 browser_page,
                 task,
                 configuration,
             )
-        current_sku = f"visible:{configuration[0]}|{configuration[1]}"
-        current = self._semantic_state(
-            task,
-            browser_page,
-            outcome=BusinessOutcome.PRICE_FOUND,
-            price=price,
-            rectangles=(),
-            current_sku=current_sku,
-            region=_TMALL_QUOTATION_REGION,
-            stock_state=_TMALL_QUOTATION_STOCK,
-        )
-        if current != expected:
-            raise LayoutRecognitionError(
-                "Tmall verified offer changed before formal capture"
+            current_sku = f"visible:{configuration[0]}|{configuration[1]}"
+            current = self._semantic_state(
+                task,
+                browser_page,
+                outcome=BusinessOutcome.PRICE_FOUND,
+                price=price,
+                rectangles=(),
+                current_sku=current_sku,
+                region=_TMALL_QUOTATION_REGION,
+                stock_state=_TMALL_QUOTATION_STOCK,
             )
+            if current != expected:
+                raise LayoutRecognitionError(
+                    "Tmall verified offer changed before formal capture"
+                )
         position_detail_for_capture(
             browser_page,
             title=title,
@@ -637,12 +768,19 @@ class TmallAdapter:
             color=color,
             site_name="Tmall",
             preserve_ready_position=(
-                normalize_product_text(task.brand) == "华为"
+                normalize_product_text(task.brand) in {"华为", "HONOR"}
             ),
             upward_recovery_steps=(
-                2 if normalize_product_text(task.brand) == "华为" else 0
+                4 if normalize_product_text(task.brand) == "华为" else 0
+            ),
+            minimum_upward_nudges=(
+                0
+            ),
+            reveal_clipped_title=(
+                normalize_product_text(task.brand) in {"华为", "HONOR"}
             ),
         )
+        browser_page.wait_for_timeout(_CAPTURE_SETTLE_MS)
 
     def restore_capture_view(
         self,
@@ -657,7 +795,45 @@ class TmallAdapter:
             raise LayoutRecognitionError(
                 "Tmall capture state is unavailable for restoration"
             )
-        restore_capture_scale(_playwright_page(page))
+        browser_page = _playwright_page(page)
+        browser_page.evaluate(_CLEAR_UNAVAILABLE_OPTION_OUTLINES)
+        restore_capture_scale(browser_page)
+
+    def _outline_unavailable_targets(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        """Render visible, hollow evidence frames for unavailable HONOR SKUs."""
+
+        roles = {rectangle.role for rectangle in expected.css_rectangles}
+        targets: list[Any] = []
+        if "capacity" in roles:
+            capacity_group = self._sku_option_group(page, "存储容量")
+            targets.append(
+                self._exact_option(
+                    capacity_group,
+                    TMALL_SKU_VALUES,
+                    lambda label: self._capacity_label_matches(
+                        capacity_group,
+                        task,
+                        label,
+                    ),
+                    semantic_name="capacity",
+                )
+            )
+        if "color" in roles:
+            targets.append(
+                self._exact_option(
+                    self._sku_option_group(page, "机身颜色"),
+                    TMALL_SKU_VALUES,
+                    lambda label: _tmall_color_matches(task.color, label),
+                    semantic_name="color",
+                )
+            )
+        for target in targets:
+            target.evaluate(_MARK_UNAVAILABLE_OPTION_OUTLINE)
 
     def resume(
         self,
@@ -754,24 +930,23 @@ class TmallAdapter:
                 browser_page,
                 expected.canonical_url,
             )
-            self._require_approved_detail_seller(
-                browser_page,
-                task=task,
-                detail_url=expected.canonical_url,
-            )
             self._matching_detail_titles(browser_page, task)
             configuration = self._selected_configuration_snapshot(
                 browser_page,
                 task,
             )
             if self._uses_locked_price_evidence(task):
-                price = expected.price
-            else:
-                price = self._stable_visible_price(
-                    browser_page,
-                    task,
-                    configuration,
-                )
+                current_sku = f"visible:{configuration[0]}|{configuration[1]}"
+                if current_sku != expected.current_sku:
+                    raise LayoutRecognitionError(
+                        "Tmall selected configuration changed before formal capture"
+                    )
+                return expected
+            price = self._stable_visible_price(
+                browser_page,
+                task,
+                configuration,
+            )
             self._require_exact_detail_url(
                 browser_page,
                 expected.canonical_url,
@@ -882,8 +1057,12 @@ class TmallAdapter:
             ),
             semantic_name="capacity",
         )
+        allow_visual_selected = _uses_honor_visual_selection(task)
         if expected.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE:
-            if not _is_explicitly_disabled(capacity):
+            if _is_approved_selected(
+                capacity,
+                allow_visual_selected=allow_visual_selected,
+            ):
                 raise LayoutRecognitionError(
                     "Tmall unavailable capacity changed before capture"
                 )
@@ -893,38 +1072,63 @@ class TmallAdapter:
                 page,
                 (_css_rect(capacity, "capacity"),),
             ).semantic_state
-        if (
-            expected.outcome is not BusinessOutcome.COLOR_UNAVAILABLE
-            or not _is_approved_selected(capacity)
-        ):
+        expected_roles = tuple(
+            rectangle.role for rectangle in expected.css_rectangles
+        )
+        if expected.outcome is not BusinessOutcome.COLOR_UNAVAILABLE:
             raise LayoutRecognitionError(
                 "Tmall capacity changed before legal-no capture"
             )
-        self._unique_selected_option(
-            capacity_group,
-            TMALL_SKU_VALUES,
-            lambda label: self._capacity_label_matches(
+        if expected_roles == ("capacity", "color"):
+            if _is_approved_selected(
+                capacity,
+                allow_visual_selected=allow_visual_selected,
+            ):
+                raise LayoutRecognitionError(
+                    "Tmall unavailable capacity changed before capture"
+                )
+        else:
+            if expected_roles != ("color",):
+                raise LayoutRecognitionError(
+                    "Tmall legal-no evidence roles changed before capture"
+                )
+            self._unique_selected_option(
                 capacity_group,
-                task,
-                label,
-            ),
-            semantic_name="capacity",
-        )
+                TMALL_SKU_VALUES,
+                lambda label: self._capacity_label_matches(
+                    capacity_group,
+                    task,
+                    label,
+                ),
+                semantic_name="capacity",
+                allow_visual_selected=allow_visual_selected,
+            )
         color = self._exact_option(
             self._sku_option_group(page, "机身颜色"),
             TMALL_SKU_VALUES,
             lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
         )
-        if not _is_explicitly_disabled(color):
+        if _is_approved_selected(
+            color,
+            allow_visual_selected=allow_visual_selected,
+        ):
             raise LayoutRecognitionError(
                 "Tmall unavailable color changed before capture"
             )
+        rectangles = (
+            (
+                _css_rect(capacity, "capacity"),
+                _css_rect(color, "color"),
+            )
+            if expected_roles == ("capacity", "color")
+            else (_css_rect(color, "color"),)
+        )
         return self._legal_no(
             task,
             expected.outcome,
             page,
-            (_css_rect(color, "color"),),
+            rectangles,
         ).semantic_state
 
     def _validate_task(self, task: WebsiteTask) -> None:
@@ -1318,6 +1522,31 @@ class TmallAdapter:
         option.scroll_into_view_if_needed()
         option.click()
 
+    def _try_select_honor_option(
+        self,
+        page: Any,
+        option: Any,
+        *,
+        retry_resolver: Callable[[], Any],
+    ) -> bool:
+        """Select one HONOR option once, or record it as unavailable."""
+
+        if _is_explicitly_disabled(option):
+            return False
+        self._prepare_exact_option(option)
+        for _ in range(_MAX_SELECTION_POLLS):
+            current = retry_resolver()
+            if _is_approved_selected(
+                current,
+                allow_visual_selected=True,
+            ):
+                return True
+            if _is_explicitly_disabled(current):
+                return False
+            page.wait_for_timeout(_POLL_INTERVAL_MS)
+            self._raise_if_blocked_or_error(page)
+        return False
+
     def _sku_option_group(self, page: Any, label_text: str) -> Any:
         option_root = _unique_visible_locator(
             page,
@@ -1347,9 +1576,13 @@ class TmallAdapter:
         semantic_name: str,
         *,
         retry_resolver: Callable[[], Any] | None = None,
+        allow_visual_selected: bool = False,
     ) -> None:
         for _ in range(_MAX_SELECTION_POLLS):
-            if _is_approved_selected(option):
+            if _is_approved_selected(
+                option,
+                allow_visual_selected=allow_visual_selected,
+            ):
                 return
             page.wait_for_timeout(_POLL_INTERVAL_MS)
             self._raise_if_blocked_or_error(page)
@@ -1357,7 +1590,10 @@ class TmallAdapter:
             option = retry_resolver()
             self._prepare_exact_option(option)
             for _ in range(_MAX_SELECTION_POLLS):
-                if _is_approved_selected(option):
+                if _is_approved_selected(
+                    option,
+                    allow_visual_selected=allow_visual_selected,
+                ):
                     return
                 page.wait_for_timeout(_POLL_INTERVAL_MS)
                 self._raise_if_blocked_or_error(page)
@@ -1432,12 +1668,14 @@ class TmallAdapter:
                 label,
             ),
             semantic_name="capacity",
+            allow_visual_selected=_uses_honor_visual_selection(task),
         )
         color = self._unique_selected_option(
             self._sku_option_group(page, "机身颜色"),
             TMALL_SKU_VALUES,
             lambda label: _tmall_color_matches(task.color, label),
             semantic_name="color",
+            allow_visual_selected=_uses_honor_visual_selection(task),
         )
         return (
             normalize_product_text(capacity.inner_text()),
@@ -1465,10 +1703,16 @@ class TmallAdapter:
         matches: Any,
         *,
         semantic_name: str,
+        allow_visual_selected: bool = False,
     ) -> Any:
         options = visible_locators(page, selectors)
         selected = tuple(
-            option for option in options if _is_approved_selected(option)
+            option
+            for option in options
+            if _is_approved_selected(
+                option,
+                allow_visual_selected=allow_visual_selected,
+            )
         )
         if len(selected) != 1 or not matches(selected[0].inner_text()):
             raise LayoutRecognitionError(
@@ -1482,9 +1726,23 @@ class TmallAdapter:
             _TMALL_CURRENT_SELLING_PRICE_CONTAINERS,
             semantic_name="current selling price container",
         )
-        return visible_locators(
+        candidates = visible_locators(
             container,
             _TMALL_CURRENT_SELLING_PRICE_VALUES,
+        )
+        if candidates:
+            return candidates
+        # Tmall can split the sign and numeric amount into sibling leaves.
+        # Their smallest visible parent still contains one exact currency
+        # amount, so accept that parent without depending on hashed classes.
+        return tuple(
+            candidate
+            for selector in ("span", "div", "strong", "em", "p")
+            for candidate in visible_locators(container, (selector,))
+            if _TMALL_EXACT_CURRENCY_AMOUNT.fullmatch(
+                unicodedata.normalize("NFKC", candidate.inner_text())
+            )
+            is not None
         )
 
     def _price_candidates(
@@ -1650,27 +1908,72 @@ class TmallAdapter:
         task: WebsiteTask,
         configuration: tuple[str, str],
     ) -> Decimal:
-        snapshot = self._visible_configuration_evidence(page, task)
-        if snapshot.configuration != configuration:
+        self._matching_detail_title_snapshot(page, task)
+        if self._selected_configuration_snapshot(page, task) != configuration:
             raise LayoutRecognitionError(
                 "Tmall selected visible configuration changed before formal capture"
             )
         if self._uses_authoritative_price_evidence(task):
-            selected = self._authoritative_price_evidence(snapshot.price_candidates)
-            if selected is None:
-                raise LayoutRecognitionError(
-                    "Tmall authoritative price is unavailable before formal capture"
-                )
-            return selected.amount
-        selected_amount = choose_price(
-            snapshot.price_candidates,
-            self.spec.price_policy,
-        )
+            pre_discount = self._direct_pre_discount_price(page)
+            if pre_discount is not None:
+                return pre_discount
+        selected_amount = self._direct_current_price(page)
         if selected_amount is None:
-            raise LayoutRecognitionError(
-                "Tmall selected variant price is unavailable before formal capture"
+            raise _LockedPriceNotReady(
+                "Tmall selected variant price is not available after selection"
             )
         return selected_amount
+
+    def _direct_pre_discount_price(self, page: Any) -> Decimal | None:
+        container = _unique_visible_locator(
+            page,
+            _TMALL_CURRENT_SELLING_PRICE_CONTAINERS,
+            semantic_name="current selling price container",
+        )
+        amounts: list[Decimal] = []
+        for locator in visible_locators(
+            container,
+            _TMALL_CURRENT_PRE_DISCOUNT_PRICE_VALUES,
+        ):
+            normalized = "".join(
+                unicodedata.normalize("NFKC", locator.inner_text()).split()
+            )
+            match = _TMALL_PRE_DISCOUNT_PRICE.fullmatch(normalized)
+            if match is not None and (amount := parse_price(match.group("amount"))) is not None:
+                amounts.append(amount)
+        return max(amounts) if amounts else None
+
+    def _direct_current_price(self, page: Any) -> Decimal | None:
+        amounts: list[Decimal] = []
+        for locator in self._visible_current_price_locators(page):
+            style = locator.evaluate(_PRICE_STYLE_SCRIPT)
+            if not isinstance(style, dict) or style.get("effectiveLineThrough") is True:
+                continue
+            amount = parse_price(locator.inner_text())
+            if amount is not None:
+                amounts.append(amount)
+        return max(amounts) if amounts else None
+
+    def _first_available_locked_price(
+        self,
+        page: Any,
+        task: WebsiteTask,
+        configuration: tuple[str, str],
+    ) -> Decimal:
+        """Lock the first usable selected-SKU price without stability rereads."""
+
+        last_error: _LockedPriceNotReady | None = None
+        for poll in range(_MAX_PRICE_POLLS):
+            try:
+                return self._locked_price_snapshot(page, task, configuration)
+            except _LockedPriceNotReady as error:
+                last_error = error
+            if poll < _MAX_PRICE_POLLS - 1:
+                page.wait_for_timeout(_PRICE_POLL_INTERVAL_MS)
+                self._raise_if_blocked_or_error(page)
+        if last_error is None:
+            raise AssertionError("Tmall locked price polling ended without an error")
+        raise last_error
 
     def _stable_visible_price(
         self,
@@ -1679,7 +1982,7 @@ class TmallAdapter:
         configuration: tuple[str, str],
     ) -> Decimal:
         if self._uses_locked_price_evidence(task):
-            return self._locked_price_snapshot(page, task, configuration)
+            return self._first_available_locked_price(page, task, configuration)
         title = self._matching_detail_title_snapshot(page, task)
         transition_sample = self._visible_configuration_evidence(page, task)
         if transition_sample.configuration != configuration:
@@ -1949,7 +2252,38 @@ def _tmall_color_matches(target: str, candidate: str) -> bool:
     )
 
 
-def _is_approved_selected(locator: Any) -> bool:
+_TMALL_VISUAL_SELECTED = r"""
+element => {
+  // TMALL_OPTION_VISUAL_SELECTED: HONOR's live renderer may expose the
+  // selected state only through the orange/red tile treatment.
+  const nodes = [element, ...element.querySelectorAll('*')];
+  const accent = value => {
+    const compact = String(value || '').replace(/\s/g, '').toLowerCase();
+    return [
+      'rgb(255,80,0)', 'rgba(255,80,0,1)', '#ff5000',
+      'rgb(255,0,54)', 'rgba(255,0,54,1)', '#ff0036'
+    ].includes(compact);
+  };
+  const hasBorder = nodes.some(node => {
+    const style = getComputedStyle(node);
+    return accent(style.borderTopColor) || accent(style.borderRightColor)
+      || accent(style.borderBottomColor) || accent(style.borderLeftColor);
+  });
+  const hasText = nodes.some(node => accent(getComputedStyle(node).color));
+  return hasBorder && hasText;
+}
+"""
+
+
+def _uses_honor_visual_selection(task: WebsiteTask) -> bool:
+    return normalize_product_text(task.brand) in {"荣耀", "HONOR"}
+
+
+def _is_approved_selected(
+    locator: Any,
+    *,
+    allow_visual_selected: bool = False,
+) -> bool:
     if locator.get_attribute("aria-selected") == "true":
         return True
     if locator.get_attribute("aria-checked") == "true":
@@ -1960,11 +2294,24 @@ def _is_approved_selected(locator: Any) -> bool:
     ):
         return True
     try:
-        return locator.evaluate(
+        selected = locator.evaluate(
             """
             element => {
               // TMALL_OPTION_SELECTED: the live SKU renderer may put the
               // selected marker on the immediate value wrapper.
+              // TMALL_OPTION_SELECTED_DESCENDANTS: some HONOR SKU options
+              // put that marker on an inner value node instead.
+              const descendants = Array.from(element.querySelectorAll('*')).slice(0, 16);
+              for (const descendant of descendants) {
+                if (descendant.getAttribute('aria-selected') === 'true' ||
+                    descendant.getAttribute('aria-checked') === 'true') return true;
+                const descendantClasses = Array.from(descendant.classList || [])
+                  .map(value => String(value).toLowerCase());
+                if (descendantClasses.some(value =>
+                    ['selected', 'checked', 'active'].includes(value) ||
+                    value.startsWith('isselected--') ||
+                    value.startsWith('valueitemselected--'))) return true;
+              }
               let current = element;
               for (let depth = 0; current && depth < 2; depth += 1) {
                 if (current.getAttribute('aria-selected') === 'true' ||
@@ -1981,6 +2328,14 @@ def _is_approved_selected(locator: Any) -> bool:
             }
             """
         ) is True
+    except (AttributeError, RuntimeError):
+        selected = False
+    if selected:
+        return True
+    if not allow_visual_selected:
+        return False
+    try:
+        return locator.evaluate(_TMALL_VISUAL_SELECTED) is True
     except (AttributeError, RuntimeError):
         return False
 

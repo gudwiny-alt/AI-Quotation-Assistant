@@ -338,7 +338,11 @@ def _run(tmp_path: Path) -> RunRecord:
     )
 
 
-def _observation(outcome: BusinessOutcome) -> AdapterObservation:
+def _observation(
+    outcome: BusinessOutcome,
+    *,
+    rectangles_override: tuple[CssRect, ...] | None = None,
+) -> AdapterObservation:
     rectangles = {
         BusinessOutcome.PRICE_FOUND: (),
         BusinessOutcome.NO_MODEL: (
@@ -355,6 +359,8 @@ def _observation(outcome: BusinessOutcome) -> AdapterObservation:
             CssRect(1, 1, 10, 10, "stock_status"),
         ),
     }
+    if rectangles_override is not None:
+        rectangles[outcome] = rectangles_override
     price = Decimal("3999") if outcome is BusinessOutcome.PRICE_FOUND else None
     is_not_applicable = outcome in {
         BusinessOutcome.NO_MODEL,
@@ -832,6 +838,36 @@ def test_runner_registry_path_maps_each_legal_no_to_exact_evidence_contract(
 
     assert capture.requests[0].state is state
     assert capture.requests[0].expected_roles == roles
+
+
+def test_runner_accepts_capacity_and_color_frames_for_combined_unavailability(
+    tmp_path: Path,
+) -> None:
+    rectangles = (
+        CssRect(1, 1, 10, 10, "capacity"),
+        CssRect(20, 1, 10, 10, "color"),
+    )
+    spec = _xiaomi_jd_spec()
+    capture = _RecordingCapture()
+    with SQLiteTaskRepository(tmp_path / "state.sqlite3") as repository:
+        repository.create_run(_run(tmp_path))
+        _runner(
+            repository,
+            tmp_path,
+            adapter_registry=_registry(
+                _ObservationAdapter(
+                    spec,
+                    _observation(
+                        BusinessOutcome.COLOR_UNAVAILABLE,
+                        rectangles_override=rectangles,
+                    ),
+                )
+            ),
+            capture=capture,
+        ).run((_task(),))
+
+    assert capture.requests[0].state is EvidenceState.COLOR_UNAVAILABLE
+    assert capture.requests[0].expected_roles == ("capacity", "color")
 
 
 def test_runner_registry_path_rejects_execute_only_adapter_before_capture(

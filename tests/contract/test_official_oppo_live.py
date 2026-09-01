@@ -731,6 +731,29 @@ def test_oppo_accepts_visible_search_query_when_result_input_value_is_cleared() 
     assert len(page.wait_timeout_milliseconds) <= 4
 
 
+def test_oppo_accepts_stable_related_results_without_waiting_for_footer_marker() -> None:
+    page = _OppoNoModelPageWithVisibleQuery()
+    empty_result = next(
+        node
+        for node in page.root.descendants()
+        if node.attrs.get("data-oppo-role") == "empty-results"
+    )
+    empty_result.text_parts = []
+    _set_result_cards(
+        page,
+        (
+            ("OPPO A6i+ 8GB+256GB 冰川蓝", "/cn/web/products/40101.html"),
+            ("OPPO A6 Pro 12GB+256GB 流光白", "/cn/web/products/40102.html"),
+            ("OPPO A6 GT 12GB+512GB 流光白", "/cn/web/products/40103.html"),
+        ),
+    )
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert len(page.wait_timeout_milliseconds) <= 4
+
+
 def test_oppo_accepts_visible_vuetify_field_when_result_input_value_is_cleared() -> None:
     page = _OppoNoModelPageWithVisibleQuery()
     query = next(
@@ -848,7 +871,7 @@ def test_oppo_no_model_capture_uses_80_percent_and_restores_after_capture() -> N
     assert page.capture_scale == 1.0
 
 
-def test_oppo_no_model_capture_positions_query_and_complete_results_after_scale() -> None:
+def test_oppo_no_model_capture_keeps_the_observed_search_view_after_scale() -> None:
     adapter = _adapter()
     task = _task()
     page = _OppoNoModelPageWithVisibleQuery()
@@ -861,7 +884,27 @@ def test_oppo_no_model_capture_positions_query_and_complete_results_after_scale(
     adapter.prepare_capture_view(task, page, observation.semantic_state)
 
     assert page.capture_scale == 0.8
-    assert page.position_attempts == 1
+    assert page.position_attempts == 0
+    assert tuple(
+        rect.role
+        for rect in adapter.capture_rectangles_for_capture(
+            task, page, observation.semantic_state
+        )
+    ) == ("search_keyword", "result_region")
+
+
+def test_oppo_no_model_formal_capture_is_not_rejected_by_a_second_geometry_gate() -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _OppoNoModelPageWithVisibleQuery()
+    observation = adapter.observe(task, page)
+    page.proofs_fit = False
+    page.proofs_fit_after_scale = False
+    page.proofs_fit_after_position = False
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert page.capture_scale == 0.8
     assert tuple(
         rect.role
         for rect in adapter.capture_rectangles_for_capture(
@@ -955,6 +998,42 @@ def test_oppo_no_model_capture_reader_reuses_the_prepared_search_evidence(
         page,
         observation.semantic_state,
     )() == observation.semantic_state
+
+
+def test_oppo_no_model_prepare_uses_observed_evidence_without_rediscovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observer = _adapter()
+    task = _task()
+    page = _OppoNoModelPageWithVisibleQuery()
+    observation = observer.observe(task, page)
+    adapter = _adapter()
+
+    monkeypatch.setattr(
+        adapter,
+        "_preferred_exact_result_link",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("accepted OPPO no-model result must not be classified again")
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_no_model_capture_proof_locators",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("accepted OPPO no-model evidence must not be found again")
+        ),
+    )
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+
+    assert tuple(
+        rectangle.role
+        for rectangle in adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+    ) == ("search_keyword", "result_region")
 
 
 def test_oppo_homepage_product_links_do_not_bypass_the_real_search_submission() -> None:

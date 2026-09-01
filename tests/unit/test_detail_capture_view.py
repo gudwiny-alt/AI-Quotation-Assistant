@@ -22,6 +22,8 @@ class _Page:
         viewport_scale_thresholds: dict[str, float] | None = None,
         scale_samples: tuple[tuple[float, float], ...] | None = None,
         upward_recovery_ready_after: int | None = None,
+        title_clipped: bool = False,
+        title_unclipped_after: int | None = None,
     ) -> None:
         self.in_viewport = {
             "title": False,
@@ -46,6 +48,8 @@ class _Page:
         self.scale_sample_index = 0
         self.upward_recovery_ready_after = upward_recovery_ready_after
         self.upward_scrolls = 0
+        self.title_clipped = title_clipped
+        self.title_unclipped_after = title_unclipped_after
 
     def evaluate(
         self,
@@ -106,6 +110,11 @@ class _Page:
     def nudge_up(self) -> None:
         self.upward_scrolls += 1
         if (
+            self.title_unclipped_after is not None
+            and self.upward_scrolls >= self.title_unclipped_after
+        ):
+            self.title_clipped = False
+        if (
             self.upward_recovery_ready_after is not None
             and self.upward_scrolls >= self.upward_recovery_ready_after
         ):
@@ -126,6 +135,8 @@ class _Locator:
             self.page.position_scripts.append(script)
             self.page.nudge_up()
             return True
+        if "quotationTitleClipped" in script:
+            return self.page.title_clipped
         if "getBoundingClientRect" in script:
             return self.page.in_viewport[self.name]
         raise AssertionError(f"unexpected locator script: {script}")
@@ -162,6 +173,48 @@ def test_keeps_an_already_valid_detail_capture_view_still() -> None:
         site_name="JD",
         upward_recovery_steps=6,
         preserve_ready_position=True,
+    )
+
+    assert page.centered == []
+    assert page.upward_scrolls == 0
+    assert page.waits == []
+
+
+def test_tmall_detail_only_nudges_until_a_clipped_title_is_fully_revealed() -> None:
+    page = _Page(title_clipped=True, title_unclipped_after=2)
+    for key in ("title", "price", "capacity", "color"):
+        page.in_viewport[key] = True
+
+    position_detail_for_capture(
+        page,
+        title=_Locator(page, "title"),
+        prices=(_Locator(page, "price"),),
+        capacity=_Locator(page, "capacity"),
+        color=_Locator(page, "color"),
+        site_name="Tmall",
+        preserve_ready_position=True,
+        reveal_clipped_title=True,
+    )
+
+    assert page.centered == []
+    assert page.upward_scrolls == 2
+    assert page.waits == [120, 120]
+
+
+def test_tmall_detail_does_not_move_a_fully_visible_title() -> None:
+    page = _Page(title_clipped=False)
+    for key in ("title", "price", "capacity", "color"):
+        page.in_viewport[key] = True
+
+    position_detail_for_capture(
+        page,
+        title=_Locator(page, "title"),
+        prices=(_Locator(page, "price"),),
+        capacity=_Locator(page, "capacity"),
+        color=_Locator(page, "color"),
+        site_name="Tmall",
+        preserve_ready_position=True,
+        reveal_clipped_title=True,
     )
 
     assert page.centered == []

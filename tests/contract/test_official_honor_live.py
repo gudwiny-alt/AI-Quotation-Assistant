@@ -781,6 +781,68 @@ def test_honor_live_waits_for_attached_address_root_to_hydrate(
     assert page.wait_timeout_milliseconds[:3] == [500, 500, 500]
 
 
+def test_honor_live_waits_when_offer_context_is_temporarily_missing(
+    official_case: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selected SKU must not fail while its delivery widget is hydrating."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(),
+    )
+    override = adapter._honor_override
+    assert override is not None
+    original = override.offer_context
+    reads = 0
+
+    def temporarily_missing(current_page: Any) -> Any:
+        nonlocal reads
+        reads += 1
+        if reads <= 2:
+            raise LayoutRecognitionError(
+                "Official HONOR product address region is missing"
+            )
+        return original(current_page)
+
+    monkeypatch.setattr(override, "offer_context", temporarily_missing)
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert reads >= 3
+
+
+def test_honor_live_waits_when_selected_offer_widget_remounts(
+    official_case: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delivery widget may remount after configuration is selected."""
+    adapter, task, page = _live_case(
+        official_case,
+        html=_live_honor_html(),
+    )
+    override = adapter._honor_override
+    assert override is not None
+    original = override.offer_context
+    reads = 0
+
+    def remounting(current_page: Any) -> Any:
+        nonlocal reads
+        reads += 1
+        if reads in {2, 3}:
+            raise LayoutRecognitionError(
+                "Official HONOR product address region is missing"
+            )
+        return original(current_page)
+
+    monkeypatch.setattr(override, "offer_context", remounting)
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert reads >= 4
+
+
 def test_honor_live_bounds_wait_for_address_root_hydration(
     official_case: Any,
 ) -> None:
@@ -795,9 +857,13 @@ def test_honor_live_bounds_wait_for_address_root_hydration(
     assert page.wait_timeout_milliseconds == [500] * 12
 
 
-@pytest.mark.parametrize("address_root_count", [0, 2])
-def test_honor_live_rejects_missing_or_multiple_attached_address_roots_without_wait(
+@pytest.mark.parametrize(
+    ("address_root_count", "expected_waits"),
+    [(0, 12), (2, 0)],
+)
+def test_honor_live_bounds_missing_address_but_rejects_ambiguous_address_immediately(
     address_root_count: int,
+    expected_waits: int,
     official_case: Any,
 ) -> None:
     adapter, task, page = _live_case(
@@ -808,7 +874,7 @@ def test_honor_live_rejects_missing_or_multiple_attached_address_roots_without_w
     with pytest.raises(LayoutRecognitionError, match="address|region"):
         adapter.observe(task, cast(Any, page))
 
-    assert page.wait_timeout_milliseconds == []
+    assert page.wait_timeout_milliseconds == [500] * expected_waits
 
 
 def test_honor_live_rechecks_risk_control_after_each_hydration_wait(

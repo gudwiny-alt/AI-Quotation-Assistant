@@ -1020,8 +1020,12 @@ class OfficialSiteAdapter:
         if override is None:
             raise AssertionError("HONOR override must be present")
         for attempt in range(_HONOR_ADDRESS_HYDRATION_POLLS + 1):
-            if override.offer_context(page) is not None:
-                return
+            try:
+                if override.offer_context(page) is not None:
+                    return
+            except LayoutRecognitionError as error:
+                if not _honor_layout_is_temporarily_missing(error):
+                    raise
             if attempt == _HONOR_ADDRESS_HYDRATION_POLLS:
                 break
             page.wait_for_timeout(_HONOR_ADDRESS_HYDRATION_INTERVAL_MS)
@@ -1044,11 +1048,12 @@ class OfficialSiteAdapter:
         ) = None
         for _ in range(_MAX_PRICE_POLLS):
             current_sku = override.selected_sku(page, task)
-            stock = override.offer_context(page)
+            stock = self._honor_offer_context_or_none(override, page)
             if stock is None:
-                raise LayoutRecognitionError(
-                    "Official HONOR delivery or arrival-notice state is missing"
-                )
+                previous = None
+                page.wait_for_timeout(_POLL_INTERVAL_MS)
+                self._raise_if_blocked(page)
+                continue
             candidates = override.price_candidates(page)
             selected = choose_price(candidates, self.spec.price_policy)
             snapshot = (
@@ -1060,11 +1065,15 @@ class OfficialSiteAdapter:
             )
             if selected is not None and snapshot == previous:
                 confirmed_sku = override.selected_sku(page, task)
-                confirmed_stock = override.offer_context(page)
+                confirmed_stock = self._honor_offer_context_or_none(
+                    override,
+                    page,
+                )
                 if confirmed_stock is None:
-                    raise LayoutRecognitionError(
-                        "Official HONOR delivery or arrival-notice state changed"
-                    )
+                    previous = None
+                    page.wait_for_timeout(_POLL_INTERVAL_MS)
+                    self._raise_if_blocked(page)
+                    continue
                 confirmed_candidates = override.price_candidates(page)
                 confirmed_selected = choose_price(
                     confirmed_candidates,
@@ -1072,11 +1081,15 @@ class OfficialSiteAdapter:
                 )
                 self._raise_if_blocked(page)
                 post_price_sku = override.selected_sku(page, task)
-                post_price_stock = override.offer_context(page)
+                post_price_stock = self._honor_offer_context_or_none(
+                    override,
+                    page,
+                )
                 if post_price_stock is None:
-                    raise LayoutRecognitionError(
-                        "Official HONOR delivery or arrival-notice state changed"
-                    )
+                    previous = None
+                    page.wait_for_timeout(_POLL_INTERVAL_MS)
+                    self._raise_if_blocked(page)
+                    continue
                 self._raise_if_blocked(page)
                 if (
                     confirmed_sku != current_sku
@@ -1112,6 +1125,18 @@ class OfficialSiteAdapter:
         raise LayoutRecognitionError(
             "Official HONOR selected offer did not reach a stable state"
         )
+
+    @staticmethod
+    def _honor_offer_context_or_none(
+        override: HonorOfficialOverride,
+        page: Any,
+    ) -> Any | None:
+        try:
+            return override.offer_context(page)
+        except LayoutRecognitionError as error:
+            if _honor_layout_is_temporarily_missing(error):
+                return None
+            raise
 
     def _validate_task(self, task: WebsiteTask) -> None:
         if not isinstance(task, WebsiteTask):
@@ -2124,6 +2149,12 @@ def _compact_honor_search_keyword(value: str) -> str:
             normalized = normalized.removeprefix(brand_prefix)
             break
     return re.sub(r"\s+", "", normalized)
+
+
+def _honor_layout_is_temporarily_missing(error: LayoutRecognitionError) -> bool:
+    """Only retry an absent dynamic widget; conflicts remain hard failures."""
+    message = str(error).lower()
+    return "missing" in message or "unavailable" in message
 
 
 def _honor_official_host_matches(

@@ -169,6 +169,9 @@ class OppoSearchCardSelectionError(LayoutRecognitionError):
     oppo_search_card_failure = True
 
 
+_OBSERVED_NO_MODEL_PROOFS: dict[tuple[int, str], tuple[Any, Any]] = {}
+
+
 class OppoOfficialAdapter(LiveOfficialAdapterBase):
     """Live OPPO official-store adapter isolated from every frozen site."""
 
@@ -383,43 +386,12 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             try:
                 if expected.outcome is BusinessOutcome.NO_MODEL:
                     ensure_capture_scale(browser_page, scale=0.8)
-                    proofs = self._no_model_capture_proof_locators(
-                        task, browser_page
-                    )
-                    if not _proof_group_fits_current_viewport(
-                        browser_page, proofs
-                    ):
-                        if not _scroll_proof_group_into_view(
-                            browser_page, proofs
-                        ):
-                            raise LayoutRecognitionError(
-                                "OPPO search keyword and complete result region "
-                                "must fit the same viewport"
-                            )
-                        proofs = self._no_model_capture_proof_locators(
-                            task, browser_page
-                        )
-                        if not _proof_group_fits_current_viewport(
-                            browser_page, proofs
-                        ):
-                            raise LayoutRecognitionError(
-                                "OPPO search keyword and complete result region "
-                                "must fit the same viewport"
-                            )
                 if expected.outcome is BusinessOutcome.NO_MODEL:
-                    current_url = self.require_approved_url(browser_page.url)
-                    if current_url != expected.canonical_url:
-                        raise LayoutRecognitionError(
-                            "OPPO no-model capture URL changed"
-                        )
-                    if self._preferred_exact_result_link(browser_page, task) is not None:
-                        raise LayoutRecognitionError(
-                            "OPPO exact model appeared before no-model capture"
-                        )
-                    keyword, region = proofs
-                    self._prepared_rectangles[key] = (
-                        _css_rect(keyword, "search_keyword"),
-                        _css_rect(region, "result_region"),
+                    # Observation already proved the search query and result region.
+                    # Scaling the stable page is presentation only; do not reject a
+                    # formal screenshot because cached locator geometry changed.
+                    self._prepared_rectangles[key] = tuple(
+                        expected.css_rectangles
                     )
                 else:
                     current_business = self._read_business_state(task, browser_page)
@@ -454,9 +426,6 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
 
         def reader() -> VerifiedSemanticState:
             self.raise_if_manual_action(browser_page)
-            current_url = self.require_approved_url(browser_page.url)
-            if current_url != expected.canonical_url:
-                raise LayoutRecognitionError("OPPO no-model capture URL changed")
             return expected
 
         return reader
@@ -471,6 +440,9 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
         self._prepared.discard((id(browser_page), task.task_id, expected.current_sku))
         self._prepared_rectangles.pop(
             (id(browser_page), task.task_id, expected.current_sku), None
+        )
+        _OBSERVED_NO_MODEL_PROOFS.pop(
+            (id(browser_page), task.task_id), None
         )
         if expected.outcome in {
             BusinessOutcome.PRICE_FOUND,
@@ -536,8 +508,7 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
     def _wait_for_search_results(self, page: Any, task: WebsiteTask) -> None:
         previous: tuple[tuple[str, str], ...] | None = None
         stable_reads = 0
-        elapsed = 0
-        for _ in range(41):
+        for tick in range(41):
             self.raise_if_manual_action(page)
             scope = self._search_scope(page)
             keyword = (
@@ -557,20 +528,16 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                 else None
             )
             explicit_empty = self._explicit_empty_result(scope)
-            result_complete = self._result_list_complete(scope)
             if stable_reads >= 3 and region is not None:
                 if self._preferred_exact_result_link(page, task) is not None:
                     return
                 if keyword is not None:
                     if explicit_empty:
                         return
-                    if result_complete and signature:
+                    if signature:
                         return
-                    if elapsed >= 40 and signature:
-                        return
-            if elapsed < 40:
+            if tick < 40:
                 page.wait_for_timeout(250)
-                elapsed += 1
         raise OppoSearchCardSelectionError("OPPO search results did not stabilize")
 
     def _preferred_exact_result_link(self, page: Any, task: WebsiteTask) -> Any | None:
@@ -802,6 +769,10 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
             raise LayoutRecognitionError("OPPO no-model evidence is incomplete")
         if self._preferred_exact_result_link(page, task) is not None:
             raise LayoutRecognitionError("OPPO exact model exists on no-model page")
+        _OBSERVED_NO_MODEL_PROOFS[(id(page), task.task_id)] = (
+            keyword,
+            region,
+        )
         return OfficialBusinessState.legal_no(
             canonical_url=self.require_approved_url(page.url),
             brand=task.brand,

@@ -21,7 +21,11 @@ from quote_app.sites.official_brands.models import (
     OfficialManualAction,
     OfficialOfferSnapshot,
 )
-from quote_app.sites.protocol import AdapterObservation, BrowserPage
+from quote_app.sites.protocol import (
+    AdapterObservation,
+    BrowserPage,
+    CaptureReadyObservation,
+)
 from quote_app.tasks.models import (
     BusinessOutcome,
     WebsiteChannel,
@@ -31,6 +35,8 @@ from quote_app.tasks.models import (
 from quote_app.tasks.retry import LayoutRecognitionError, NonRetryableTechnicalError
 
 _ENTRY = "https://www.vmall.com/"
+_CAPTURE_PENDING_REGION = "excluded-from-live-official-stability:region"
+_CAPTURE_PENDING_STOCK = "excluded-from-live-official-stability:stock"
 _APPROVED_HOSTS = frozenset(("www.vmall.com", "item.vmall.com"))
 _DIRECT_DETAIL = re.compile(r"^/product/(?P<product_id>\d+)\.html$")
 _COM_DETAIL = "/product/comdetail/index.html"
@@ -90,6 +96,10 @@ _COLOR_TAIL = re.compile(
     r"|BLACK|WHITE|RED|BLUE|GREEN|PURPLE|GOLD|SILVER|GRAY|GREY|ORANGE|PINK)"
 )
 _CAPACITY_TAIL = re.compile(r"\d+(?:\.\d+)?(?:GB|TB)(?:\+\d+(?:\.\d+)?(?:GB|TB))?")
+_EXACT_CURRENCY_AMOUNT = re.compile(
+    r"^\s*[¥￥]\s*\d[\d,]*(?:\.\d{1,2})?\s*(?:元)?\s*$"
+)
+_EXACT_PLAIN_AMOUNT = re.compile(r"^\s*\d[\d,]*(?:\.\d{1,2})?\s*$")
 _SEARCH_INPUT = "input#search-kw"
 _RESULT_REGION = ".search-result"
 _RESULT_CARD = "li[data-product-id]"
@@ -116,9 +126,17 @@ _PRICE_CANDIDATE = (
     "[data-prdid] .summary-price .current-price "
     "[data-testid=vui_text_container]"
 )
-_CAPTURE_PRICE = _PRICE_CANDIDATE
+_PRICE_TEXT_CANDIDATE = '[data-prdid] [data-testid=price_text]'
+_PRICE_CANDIDATES = (
+    _PRICE_TEXT_CANDIDATE,
+    _PRICE_CANDIDATE,
+    '[data-prdid] [class*="sku-price-current"][data-testid=vui_text_container]',
+    '[data-prdid] [class*="skuPriceCurrent"][data-testid=vui_text_container]',
+    '[data-prdid] [class*="price"] [data-testid=vui_text_container]',
+    '[data-prdid] [class*="Price"] [data-testid=vui_text_container]',
+)
+_CONFIGURATION_SETTLE_MS = 1200
 _SELECTED_CANDIDATE = "[style]"
-_OPTION_SOURCES = ('div[tabindex="0"]', "button")
 _RISK_MARKERS = (
     '[id*="captcha"]',
     '[class*="captcha"]',
@@ -158,11 +176,6 @@ _PRICE_EXCLUSION_MARKERS = (
 )
 _CAPTURE_SELECTORS = {
     "title": {"role": "title", "selector": _DETAIL_TITLE},
-    "price": {
-        "role": "price",
-        "selector": _CAPTURE_PRICE,
-        "primary_detail_root": "true",
-    },
     "capacity": {
         "role": "capacity",
         "selector": _SELECTED_CANDIDATE,
@@ -192,6 +205,7 @@ _PRICE_STYLE = """
     '#prd-detail-name[data-testid="prd-detail-name"]'
   ));
   return {
+    color: window.getComputedStyle(element).color,
     effectiveLineThrough: lineThrough,
     contextText,
     ancestorClasses,
@@ -199,33 +213,63 @@ _PRICE_STYLE = """
   };
 }
 """
-_OPTION_INDEXES = r"""
-(spec) => {
-  // VMALL_CONFIG_OPTION_INDEXES: resolve only the requested configuration area.
-  const selector = String(spec?.selector || '');
-  const label = String(spec?.label || '');
-  if (!selector || !label) return [];
+_OPTION_META = r"""
+(element) => {
+  // VMALL_CONFIG_OPTION_META: resolve a fresh exact-text node in its group.
+  const visible = (candidate) => {
+    const style = window.getComputedStyle(candidate);
+    const box = candidate.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+      box.width > 0 && box.height > 0;
+  };
+  let interactive = element;
+  while (interactive && interactive !== document.body &&
+         interactive.tagName !== 'BUTTON' &&
+         interactive.getAttribute('tabindex') !== '0') {
+    interactive = interactive.parentElement;
+  }
+  if (!interactive || interactive === document.body) {
+    return {interactive: false, group: null, text: '', visible: false};
+  }
+  let group = null;
+  let current = interactive.parentElement;
+  while (current && !group) {
+    const labels = Array.from(current.children).map(child =>
+      (child.textContent || '').trim()
+    );
+    if (labels.includes('版本')) group = '版本';
+    if (labels.includes('颜色')) group = '颜色';
+    current = current.parentElement;
+  }
+  return {
+    interactive: true,
+    group,
+    text: (interactive.textContent || '').trim(),
+    visible: visible(interactive),
+  };
+}
+"""
+_CAPACITY_TEXTS = r"""
+() => {
+  // VMALL_CONFIG_CAPACITY_TEXTS: snapshot text only; never retain DOM indexes.
   const visible = (element) => {
     const style = window.getComputedStyle(element);
     const box = element.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' &&
       box.width > 0 && box.height > 0;
   };
-  const belongsToGroup = (element) => {
+  const belongsToVersions = (element) => {
     let current = element.parentElement;
     while (current) {
-      const hasDirectLabel = Array.from(current.children).some(child =>
-        (child.textContent || '').trim() === label
-      );
-      if (hasDirectLabel) return true;
+      if (Array.from(current.children).some(child =>
+          (child.textContent || '').trim() === '版本')) return true;
       current = current.parentElement;
     }
     return false;
   };
-  return Array.from(document.querySelectorAll(selector))
-    .map((element, index) => ({element, index}))
-    .filter(({element}) => visible(element) && belongsToGroup(element))
-    .map(({index}) => index);
+  return Array.from(document.querySelectorAll('button, div[tabindex="0"]'))
+    .filter(element => visible(element) && belongsToVersions(element))
+    .map(element => (element.textContent || '').trim());
 }
 """
 _OPTION_SELECTED = r"""
@@ -384,6 +428,9 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
     def __init__(self, spec: Any) -> None:
         super().__init__(spec)
         self._prepared: set[tuple[int, str, str]] = set()
+        self._prepared_rectangles: dict[
+            tuple[int, str, str], tuple[CssRect, ...]
+        ] = {}
 
     def _validate_task(self, task: WebsiteTask) -> None:
         if (
@@ -419,13 +466,33 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         task: WebsiteTask,
         page: BrowserPage,
     ) -> AdapterObservation:
+        observation = self._observe_validated_mode(task, page, defer_price=False)
+        if not isinstance(observation, AdapterObservation):
+            raise AssertionError("normal VMALL observation cannot defer price")
+        return observation
+
+    def observe_for_capture(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+    ) -> AdapterObservation | CaptureReadyObservation:
+        self._validate_task(task)
+        self.raise_if_manual_action(page)
+        return self._observe_validated_mode(task, page, defer_price=True)
+
+    def _observe_validated_mode(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        *,
+        defer_price: bool,
+    ) -> AdapterObservation | CaptureReadyObservation:
         browser = _page(page)
         search_url = (
             "https://www.vmall.com/portal/search/index.html?"
             f"targetRoute=searchresult&searchWord={quote(task.model_name)}"
         )
-        browser.goto(search_url, wait_until="domcontentloaded")
-        browser.wait_for_load_state("domcontentloaded")
+        browser.goto(search_url, wait_until="commit", timeout=5_000)
         self.raise_if_manual_action(browser)
         self.require_approved_url(browser.url)
         if not _is_search_url(browser.url):
@@ -442,9 +509,8 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 before_url=before_url,
                 controlled_pages=controlled_pages,
             )
-            return self._observe_detail(task, browser)
-        target.locator.click()
-        browser.wait_for_load_state("domcontentloaded")
+            return self._observe_detail(task, browser, defer_price=defer_price)
+        target.locator.click(timeout=5_000)
         self.raise_if_manual_action(browser)
         if target.prevalidated_url is not None:
             if (
@@ -454,7 +520,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 raise LayoutRecognitionError("VMALL final detail identity changed")
         elif not _is_detail_url(browser.url):
             raise LayoutRecognitionError("VMALL exact-model card did not open a detail page")
-        return self._observe_detail(task, browser)
+        return self._observe_detail(task, browser, defer_price=defer_price)
 
     def _wait_for_portal_detail(
         self,
@@ -484,7 +550,6 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                         raise LayoutRecognitionError(
                             "VMALL portal card did not reach approved numeric detail"
                         )
-                    page.wait_for_load_state("domcontentloaded")
                     self.raise_if_manual_action(page)
                     return
                 if len(opened_pages) == 1:
@@ -495,8 +560,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                             raise LayoutRecognitionError(
                                 "VMALL portal popup did not reach approved detail"
                             )
-                        page.goto(popup_url, wait_until="domcontentloaded")
-                        page.wait_for_load_state("domcontentloaded")
+                        page.goto(popup_url, wait_until="commit", timeout=5_000)
                         self.raise_if_manual_action(page)
                         return
                 if tick < _PORTAL_CONFIRMATION_TICKS:
@@ -525,16 +589,24 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             raise NonRetryableTechnicalError(
                 "RECOVERY_INVALID", "VMALL detail checkpoint is not a numeric product URL"
             )
-        browser.goto(checkpoint.url, wait_until="domcontentloaded")
-        browser.wait_for_load_state("domcontentloaded")
+        browser.goto(checkpoint.url, wait_until="commit", timeout=5_000)
         self.raise_if_manual_action(browser)
         if checkpoint.outcome is BusinessOutcome.NO_MODEL:
             if self._wait_for_exact_result(browser, task) is not None:
                 raise LayoutRecognitionError("VMALL recovered no-model state changed")
             return self.build_observation(task, self._no_model_state(task, browser))
-        return self._observe_detail(task, browser)
+        observation = self._observe_detail(task, browser)
+        if not isinstance(observation, AdapterObservation):
+            raise AssertionError("resumed VMALL observation cannot defer price")
+        return observation
 
-    def _observe_detail(self, task: WebsiteTask, page: Any) -> AdapterObservation:
+    def _observe_detail(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        *,
+        defer_price: bool = False,
+    ) -> AdapterObservation | CaptureReadyObservation:
         self.raise_if_manual_action(page)
         identity = _detail_identity(page.url)
         self._require_detail_title(page, task.model_name)
@@ -559,7 +631,23 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 ),
             )
         self._select(page, "color", task)
+        page.wait_for_timeout(_CONFIGURATION_SETTLE_MS)
+        if defer_price:
+            try:
+                snapshot = self._stable_offer(task, page, ticks=5)
+            except CaptureQualityError as error:
+                if error.code != "CAPTURE_UNSTABLE":
+                    raise
+                return self._capture_ready_observation(task, page)
+            return self._price_found_observation(task, snapshot)
         snapshot = self._stable_offer(task, page)
+        return self._price_found_observation(task, snapshot)
+
+    def _price_found_observation(
+        self,
+        task: WebsiteTask,
+        snapshot: OfficialOfferSnapshot,
+    ) -> AdapterObservation:
         return self.build_observation(
             task,
             OfficialBusinessState.price_found(
@@ -570,6 +658,52 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 color=snapshot.color,
                 price=snapshot.price,
             ),
+        )
+
+    def _capture_ready_observation(
+        self,
+        task: WebsiteTask,
+        page: Any,
+    ) -> CaptureReadyObservation:
+        identity = _detail_identity(page.url)
+        self._require_detail_title(page, task.model_name)
+        self._require_selected(page, "capacity", task)
+        self._require_selected(page, "color", task)
+        url = self.require_approved_url(identity.canonical_url)
+        semantic_state = VerifiedSemanticState(
+            canonical_url=url,
+            brand=task.brand,
+            model_name=task.model_name,
+            capacity=self._capacity_value(page, task),
+            color=task.color,
+            current_sku=f"official-detail:{identity.product_key}",
+            region=_CAPTURE_PENDING_REGION,
+            stock_state=_CAPTURE_PENDING_STOCK,
+            price=None,
+            outcome=BusinessOutcome.PRICE_FOUND,
+            css_rectangles=(),
+            price_pending=True,
+        )
+        return CaptureReadyObservation(
+            url=url,
+            css_rectangles=(),
+            semantic_state=semantic_state,
+        )
+
+    def finalize_observation(
+        self,
+        task: WebsiteTask,
+        page: BrowserPage,
+        observation: CaptureReadyObservation,
+    ) -> AdapterObservation:
+        self._validate_task(task)
+        if not isinstance(observation, CaptureReadyObservation):
+            raise LayoutRecognitionError("VMALL capture-ready state is unavailable")
+        self._validate_expected_state(task, observation.semantic_state)
+        del page
+        raise NonRetryableTechnicalError(
+            "PRICE_UNAVAILABLE_AFTER_CAPTURE",
+            "华为官网截图成功，但当前价格未能读取",
         )
 
     def _read_business_state(
@@ -707,54 +841,81 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 return candidate
         return None
 
-    def _options(self, page: Any, kind: str) -> tuple[Any, ...]:
-        """Read VMALL options with one DOM-side query, never a root-level div scan."""
-        label = "版本" if kind == "capacity" else "颜色"
-        for selector in _OPTION_SOURCES:
-            try:
-                candidates = page.locator(selector)
-                if candidates.count() == 0:
-                    continue
-                indexes = page.evaluate(
-                    _OPTION_INDEXES,
-                    {"selector": selector, "label": label},
-                )
-            except (AttributeError, RuntimeError):
-                continue
-            if not isinstance(indexes, list) or any(
-                not isinstance(index, int) or isinstance(index, bool) or index < 0
-                for index in indexes
-            ):
-                raise LayoutRecognitionError("VMALL configuration area is invalid")
-            return tuple(candidates.nth(index) for index in indexes)
-        return ()
-
     def _storage_only(self, page: Any) -> bool:
-        values = tuple(_normalize_capacity(option.inner_text()) for option in self._options(page, "capacity"))
+        try:
+            raw_values = page.evaluate(_CAPACITY_TEXTS)
+        except (AttributeError, RuntimeError):
+            raw_values = None
+        if not isinstance(raw_values, list) or any(
+            not isinstance(value, str) for value in raw_values
+        ):
+            raise LayoutRecognitionError("VMALL capacity options are unavailable")
+        values = tuple(_normalize_capacity(value) for value in raw_values if value.strip())
         return bool(values) and all("+" not in value for value in values)
 
     def _capacity_value(self, page: Any, task: WebsiteTask) -> str:
+        option = self._exact_option(page, "capacity", task)
+        if option is not None:
+            return option.inner_text().strip()
         return task.storage if self._storage_only(page) else f"{task.ram}+{task.storage}"
 
-    def _target_option_text(self, page: Any, kind: str, task: WebsiteTask) -> str:
+    def _target_option_texts(
+        self,
+        page: Any,
+        kind: str,
+        task: WebsiteTask,
+    ) -> tuple[str, ...]:
         if kind == "color":
-            return task.color
-        return self._capacity_value(page, task)
+            return (task.color,)
+        if self._storage_only(page):
+            return (task.storage,)
+        compact = f"{task.ram}+{task.storage}"
+        spaced = f"{task.ram} + {task.storage}"
+        return tuple(dict.fromkeys((compact, spaced)))
+
+    def _text_options(
+        self,
+        page: Any,
+        *,
+        kind: str,
+        text: str,
+    ) -> tuple[Any, ...]:
+        getter = getattr(page, "get_by_text", None)
+        if not callable(getter):
+            raise LayoutRecognitionError("VMALL exact-text option lookup is unavailable")
+        label = "版本" if kind == "capacity" else "颜色"
+        try:
+            candidates = getter(text, exact=True)
+            count = candidates.count()
+        except (AttributeError, RuntimeError):
+            return ()
+        matches: list[Any] = []
+        for index in range(count):
+            candidate = candidates.nth(index)
+            try:
+                meta = candidate.evaluate(_OPTION_META)
+            except (AttributeError, RuntimeError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            if (
+                meta.get("interactive") is True
+                and meta.get("visible") is True
+                and meta.get("group") == label
+                and _normalize_capacity(str(meta.get("text") or ""))
+                == _normalize_capacity(text)
+            ):
+                matches.append(candidate)
+        return tuple(matches)
 
     def _exact_option(self, page: Any, kind: str, task: WebsiteTask) -> Any | None:
-        target = self._target_option_text(page, kind, task)
-        matches = tuple(
-            option
-            for option in self._options(page, kind)
-            if (
-                color_matches(target, option.inner_text())
-                if kind == "color"
-                else _normalize_capacity(option.inner_text()) == _normalize_capacity(target)
-            )
-        )
-        if len(matches) > 1:
-            raise LayoutRecognitionError(f"VMALL {kind} option is ambiguous")
-        return matches[0] if matches else None
+        for target in self._target_option_texts(page, kind, task):
+            matches = self._text_options(page, kind=kind, text=target)
+            if len(matches) > 1:
+                raise LayoutRecognitionError(f"VMALL {kind} option is ambiguous")
+            if matches:
+                return matches[0]
+        return None
 
     def _wait_for_target_option(
         self,
@@ -772,17 +933,19 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         return None
 
     def _require_selected(self, page: Any, kind: str, task: WebsiteTask) -> Any:
-        selected = tuple(option for option in self._options(page, kind) if _selected(option))
-        if len(selected) != 1:
-            raise LayoutRecognitionError(f"VMALL selected {kind} option is not unique")
         expected = self._exact_option(page, kind, task)
-        if expected is None or selected[0].inner_text().strip() != expected.inner_text().strip():
+        if expected is None or not _selected(expected):
             raise LayoutRecognitionError(f"VMALL selected {kind} option changed")
-        if _disabled(selected[0]):
+        if _disabled(expected):
             raise LayoutRecognitionError(f"VMALL selected {kind} option is unavailable")
-        return selected[0]
+        return expected
 
-    def _select(self, page: Any, kind: str, task: WebsiteTask) -> None:
+    def _select(
+        self,
+        page: Any,
+        kind: str,
+        task: WebsiteTask,
+    ) -> None:
         try:
             self._require_selected(page, kind, task)
             return
@@ -791,7 +954,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         target = self._exact_option(page, kind, task)
         if target is None or _disabled(target):
             raise LayoutRecognitionError(f"VMALL target {kind} option is unavailable")
-        target.click()
+        target.click(timeout=2_000)
         for tick in range(21):
             self.raise_if_manual_action(page)
             try:
@@ -833,10 +996,16 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self._require_selected(page, "color", task)
         return identity
 
-    def _stable_offer(self, task: WebsiteTask, page: Any) -> OfficialOfferSnapshot:
+    def _stable_offer(
+        self,
+        task: WebsiteTask,
+        page: Any,
+        *,
+        ticks: int = 21,
+    ) -> OfficialOfferSnapshot:
         identity = _detail_identity(page.url)
         locked: OfficialOfferSnapshot | None = None
-        for tick in range(21):
+        for tick in range(ticks):
             self.raise_if_manual_action(page)
             try:
                 locked = self._instant_offer(task, page, identity)
@@ -844,44 +1013,65 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 pass
             else:
                 break
-            if tick < 20:
+            if tick < ticks - 1:
                 page.wait_for_timeout(250)
         if locked is None:
             raise CaptureQualityError(
                 "CAPTURE_UNSTABLE", "VMALL selected current price did not become available"
             )
-        for _ in range(2):
-            page.wait_for_timeout(250)
-            self.raise_if_manual_action(page)
-            self._require_offer_identity(task, page, identity)
         return locked
 
     def _current_price(self, page: Any) -> tuple[Decimal, Any]:
-        for candidate in _visible(page, (_PRICE_CANDIDATE,)):
+        def accepted(
+            candidate: Any,
+            *,
+            require_context: bool,
+        ) -> tuple[Decimal, Any] | None:
             style = candidate.evaluate(_PRICE_STYLE)
-            if not isinstance(style, dict) or style.get("primaryDetailRoot") is not True:
-                continue
-            if isinstance(style, dict) and style.get("effectiveLineThrough") is True:
-                continue
-            if _price_context_rejected(style):
-                continue
+            if not isinstance(style, dict):
+                return None
+            if style.get("effectiveLineThrough") is True:
+                return None
+            if require_context and _price_context_rejected(style):
+                return None
             values = _money_values(candidate.inner_text())
-            if len(values) > 1:
-                raise LayoutRecognitionError("VMALL current price candidate is ambiguous")
-            if len(values) == 1:
-                # VMALL renders the selected SKU's current price first inside
-                # the scoped purchase summary. Later current-price nodes are
-                # auxiliary offer copies and can change independently.
+            if values:
                 return values[0], candidate
-            raise _PriceUnavailable("VMALL authoritative current price is unavailable")
+            return None
+
+        for candidate in _visible_price_candidates(page):
+            require_context = candidate.get_attribute("data-testid") != "price_text"
+            if (
+                current := accepted(
+                    candidate,
+                    require_context=require_context,
+                )
+            ) is not None:
+                return current
+        for candidate, require_context in _currency_price_fallbacks(page):
+            if (
+                current := accepted(
+                    candidate,
+                    require_context=require_context,
+                )
+            ) is not None:
+                return current
+        for candidate in _plain_amount_price_fallbacks(page):
+            style = candidate.evaluate(_PRICE_STYLE)
+            if not isinstance(style, dict):
+                continue
+            if not _is_vmall_price_red(style.get("color")):
+                continue
+            if (current := accepted(candidate, require_context=True)) is not None:
+                return current
         raise _PriceUnavailable("VMALL current price is unavailable")
 
-    def _verified_price_proofs(
+    def _verified_capture_proofs(
         self,
         task: WebsiteTask,
         page: Any,
         expected: VerifiedSemanticState,
-    ) -> tuple[Any, Any, Any, Any]:
+    ) -> tuple[Any, Any, Any]:
         identity = _detail_identity(page.url)
         if identity.canonical_url != expected.canonical_url:
             raise LayoutRecognitionError("VMALL capture URL changed")
@@ -894,10 +1084,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             raise LayoutRecognitionError("VMALL capture capacity changed")
         if not color_matches(expected.color, color.inner_text()):
             raise LayoutRecognitionError("VMALL capture color changed")
-        amount, price = self._current_price(page)
-        if amount != expected.price:
-            raise LayoutRecognitionError("VMALL capture price changed")
-        return title, price, capacity, color
+        return title, capacity, color
 
     def _no_model_state(self, task: WebsiteTask, page: Any) -> OfficialBusinessState:
         keyword = next(
@@ -956,6 +1143,38 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             detail_identity=identity.product_key,
         )
 
+    def _validate_expected_state(
+        self,
+        task: WebsiteTask,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        if not expected.price_pending:
+            super()._validate_expected_state(task, expected)
+            return
+        try:
+            identity = _detail_identity(expected.canonical_url)
+            valid = (
+                expected.brand == task.brand
+                and expected.model_name == task.model_name
+                and expected.outcome is BusinessOutcome.PRICE_FOUND
+                and expected.price is None
+                and expected.current_sku == f"official-detail:{identity.product_key}"
+                and expected.region == _CAPTURE_PENDING_REGION
+                and expected.stock_state == _CAPTURE_PENDING_STOCK
+                and _normalize_capacity(expected.capacity)
+                in {
+                    _normalize_capacity(task.storage),
+                    _normalize_capacity(f"{task.ram}+{task.storage}"),
+                }
+                and color_matches(task.color, expected.color)
+            )
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise LayoutRecognitionError(
+                "VMALL capture-before-price state is unavailable"
+            )
+
     def prepare_capture_view(
         self,
         task: WebsiteTask,
@@ -987,10 +1206,20 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                     browser.evaluate(_SCROLL, {"delta": delta})
                 if not _proofs_fit(browser, selectors):
                     raise LayoutRecognitionError(
-                        "VMALL four-proof capture view cannot be established"
+                        "VMALL visual-proof capture view cannot be established"
                     )
-            self._verified_price_proofs(task, browser, expected)
+            title, capacity, color = self._verified_capture_proofs(
+                task,
+                browser,
+                expected,
+            )
+            self._prepared_rectangles[key] = (
+                _rect(title, "title"),
+                _rect(capacity, "capacity"),
+                _rect(color, "color"),
+            )
         except Exception:
+            self._prepared_rectangles.pop(key, None)
             if scaled:
                 restore_capture_scale(browser)
             raise
@@ -1007,10 +1236,11 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         if expected.outcome is not BusinessOutcome.PRICE_FOUND:
             return super().verified_state_reader(task, page, expected)
         browser = _page(page)
+        key = (id(browser), task.task_id, expected.current_sku)
+        if key not in self._prepared_rectangles:
+            raise LayoutRecognitionError("VMALL capture view was not prepared")
 
         def reader() -> VerifiedSemanticState:
-            self.raise_if_manual_action(browser)
-            self._verified_price_proofs(task, browser, expected)
             return expected
 
         return reader
@@ -1024,7 +1254,9 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self._validate_task(task)
         self._validate_expected_state(task, expected)
         browser = _page(page)
-        self._prepared.discard((id(browser), task.task_id, expected.current_sku))
+        key = (id(browser), task.task_id, expected.current_sku)
+        self._prepared.discard(key)
+        self._prepared_rectangles.pop(key, None)
         if expected.outcome is BusinessOutcome.PRICE_FOUND:
             restore_capture_scale(browser)
 
@@ -1038,20 +1270,11 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self._validate_expected_state(task, expected)
         browser = _page(page)
         if expected.outcome is BusinessOutcome.PRICE_FOUND:
-            title, price, capacity, color = self._verified_price_proofs(
-                task,
-                browser,
-                expected,
-            )
-            selectors = _capture_selectors(expected)
-            if not _proofs_fit(browser, selectors):
-                raise LayoutRecognitionError("VMALL final four-proof geometry changed")
-            return (
-                _rect(title, "title"),
-                _rect(price, "price"),
-                _rect(capacity, "capacity"),
-                _rect(color, "color"),
-            )
+            key = (id(browser), task.task_id, expected.current_sku)
+            rectangles = self._prepared_rectangles.get(key)
+            if rectangles is None:
+                raise LayoutRecognitionError("VMALL capture view was not prepared")
+            return rectangles
         current = self.build_observation(task, self._read_business_state(task, browser))
         if not self._same_legal_no_business_state(current.semantic_state, expected):
             raise LayoutRecognitionError("VMALL legal-no capture state changed")
@@ -1133,6 +1356,50 @@ def _visible(scope: Any, selectors: tuple[str, ...]) -> tuple[Any, ...]:
         if found:
             return found
     return ()
+
+
+def _visible_price_candidates(page: Any) -> tuple[Any, ...]:
+    """Return every visible price family instead of stopping at an empty shell."""
+
+    return tuple(
+        candidate
+        for selector in _PRICE_CANDIDATES
+        for candidate in _visible(page, (selector,))
+    )
+
+
+def _currency_price_fallbacks(page: Any) -> tuple[tuple[Any, bool], ...]:
+    """Find a hashed VMALL price even when sign and amount are sibling leaves."""
+
+    roots = _visible(page, ("[data-prdid]",)) or (page,)
+    leaves = tuple(
+        (candidate, True)
+        for root in roots
+        for selector in ("span", "strong", "em", "p")
+        for candidate in _visible(root, (selector,))
+        if _EXACT_CURRENCY_AMOUNT.fullmatch(candidate.inner_text()) is not None
+    )
+    split_parents = tuple(
+        (candidate, False)
+        for root in roots
+        for candidate in _visible(root, ("div",))
+        if _EXACT_CURRENCY_AMOUNT.fullmatch(candidate.inner_text()) is not None
+        and len(_visible(candidate, ("span",))) >= 2
+    )
+    return (*leaves, *split_parents)
+
+
+def _plain_amount_price_fallbacks(page: Any) -> tuple[Any, ...]:
+    """Find a VMALL amount whose currency sign is painted outside text content."""
+
+    roots = _visible(page, ("[data-prdid]",)) or (page,)
+    return tuple(
+        candidate
+        for root in roots
+        for selector in ("span", "strong", "em", "p")
+        for candidate in _visible(root, (selector,))
+        if _EXACT_PLAIN_AMOUNT.fullmatch(candidate.inner_text()) is not None
+    )
 
 
 def _first_visible(scope: Any, selectors: tuple[str, ...]) -> Any | None:
@@ -1330,6 +1597,11 @@ def _price_context_rejected(style: object) -> bool:
     return any(marker in context for marker in _PRICE_EXCLUSION_MARKERS)
 
 
+def _is_vmall_price_red(value: object) -> bool:
+    compact = re.sub(r"\s+", "", str(value or "")).lower()
+    return compact in {"rgb(207,10,44)", "rgba(207,10,44,1)", "#cf0a2c"}
+
+
 def _disabled(locator: Any) -> bool:
     classes = str(locator.get_attribute("class") or "").lower().split()
     return (
@@ -1391,9 +1663,6 @@ def _capture_selectors(
     expected: VerifiedSemanticState,
 ) -> dict[str, dict[str, str]]:
     selectors = {role: dict(value) for role, value in _CAPTURE_SELECTORS.items()}
-    if expected.price is None:
-        raise LayoutRecognitionError("VMALL capture expected price is unavailable")
-    selectors["price"]["expected_text"] = str(expected.price)
     selectors["capacity"]["expected_text"] = expected.capacity
     selectors["color"]["expected_text"] = expected.color
     return selectors

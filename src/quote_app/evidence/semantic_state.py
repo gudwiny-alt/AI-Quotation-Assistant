@@ -15,8 +15,8 @@ from quote_app.tasks.models import (
 
 _OUTCOME_ROLES = {
     # Business observations carry no price-found rectangles.  A formal live
-    # capture reader may additionally return the four final on-screen proofs
-    # so semantic stability includes the exact frame that will be captured.
+    # capture readers may additionally return the final on-screen visual
+    # proofs so semantic stability includes the exact frame being captured.
     BusinessOutcome.PRICE_FOUND: frozenset(
         {(), ("title", "price", "capacity", "color")}
     ),
@@ -27,7 +27,11 @@ _OUTCOME_ROLES = {
         {("capacity",), ("title", "capacity_group")}
     ),
     BusinessOutcome.COLOR_UNAVAILABLE: frozenset(
-        {("color",), ("title", "color_group")}
+        {
+            ("color",),
+            ("capacity", "color"),
+            ("title", "color_group"),
+        }
     ),
     BusinessOutcome.SOLD_OUT: frozenset({("stock_status",)}),
 }
@@ -55,6 +59,7 @@ class VerifiedSemanticState:
     price: Decimal | None
     outcome: BusinessOutcome
     css_rectangles: tuple[CssRect, ...]
+    price_pending: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -91,6 +96,8 @@ class VerifiedSemanticState:
             raise ValueError("outcome must be a BusinessOutcome")
         if self.price is not None and not isinstance(self.price, Decimal):
             raise ValueError("price must be a Decimal")
+        if type(self.price_pending) is not bool:
+            raise ValueError("price_pending must be a bool")
         if not isinstance(self.css_rectangles, tuple | list) or not all(
             isinstance(rectangle, CssRect)
             for rectangle in self.css_rectangles
@@ -104,7 +111,10 @@ class VerifiedSemanticState:
                 "rectangle roles do not match the business outcome"
             )
         if self.outcome is BusinessOutcome.PRICE_FOUND:
-            if (
+            if self.price_pending:
+                if self.price is not None:
+                    raise ValueError("price-pending state cannot carry a price")
+            elif (
                 self.price is None
                 or not self.price.is_finite()
                 or self.price < 0
@@ -112,8 +122,8 @@ class VerifiedSemanticState:
                 raise ValueError(
                     "price-found state requires a non-negative finite price"
                 )
-        elif self.price is not None:
-            raise ValueError("legal no state requires price to be None")
+        elif self.price is not None or self.price_pending:
+            raise ValueError("legal no state requires price to be None and settled")
         self._validate_applicability()
         object.__setattr__(self, "css_rectangles", rectangles)
 
@@ -175,6 +185,7 @@ class VerifiedPageStateProbe:
             state.region,
             state.stock_state,
             str(state.price) if state.price is not None else None,
+            state.price_pending,
             state.outcome.value,
             tuple(
                 (

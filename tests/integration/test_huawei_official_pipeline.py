@@ -4,6 +4,7 @@ import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
 from openpyxl import load_workbook
@@ -121,14 +122,22 @@ class _HuaweiSession:
 
 
 class _FormalCapture:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        on_capture: Callable[[], None] | None = None,
+    ) -> None:
         self.fail = fail
+        self.on_capture = on_capture
         self.requests: list[CaptureRequest] = []
 
     def capture(self, request: CaptureRequest) -> EvidenceRecord:
         self.requests.append(request)
         if self.fail:
             raise make_capture_error("CAPTURE_FAILED", "fixture capture failed")
+        if self.on_capture is not None:
+            self.on_capture()
         request.destination.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (320, 180), (190, 25, 56)).save(request.destination)
         return EvidenceRecord(
@@ -336,12 +345,104 @@ def test_huawei_price_capture_checkpoint_reaches_excel_ak_and_an(
     assert len(capture.requests) == 1
     assert [rectangle.role for rectangle in capture.requests[0].css_rectangles] == [
         "title",
-        "price",
         "capacity",
         "color",
     ]
     assert result.summary.completed_rows == 1
     assert result.summary.failed_rows == 0
+
+
+def test_huawei_price_timeout_keeps_the_formal_capture_without_late_reread(
+    tmp_path: Path,
+) -> None:
+    """A missing price must not delete the already accepted formal screenshot."""
+
+    page = _HuaweiPage()
+    price_nodes = page.price_nodes()
+    assert price_nodes
+    for node in price_nodes:
+        node.attrs["hidden"] = ""
+
+    def hydrate_price_after_capture() -> None:
+        for node in price_nodes:
+            node.attrs.pop("hidden", None)
+
+    capture = _FormalCapture(on_capture=hydrate_price_after_capture)
+    audit = _RunnerAudit()
+
+    run_full_pipeline(
+        _full_request(_huawei_inputs(tmp_path), tmp_path),
+        website_runner=lambda request: _run_real_runner(
+            request,
+            capture=capture,
+            session=_HuaweiSession(page),
+            audit=audit,
+        ),
+    )
+
+    assert len(capture.requests) == 1
+    assert audit.observations == []
+    assert audit.results[0].state is TaskState.TECHNICAL_FAILURE
+    assert audit.results[0].error_code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
+    assert audit.results[0].evidence is not None
+
+
+def test_huawei_reads_price_before_formal_capture_when_it_is_available(
+    tmp_path: Path,
+) -> None:
+    page = _HuaweiPage()
+    price_polls_at_capture: list[int] = []
+    capture = _FormalCapture(
+        on_capture=lambda: price_polls_at_capture.append(page.price_read_calls)
+    )
+    audit = _RunnerAudit()
+
+    run_full_pipeline(
+        _full_request(_huawei_inputs(tmp_path), tmp_path),
+        website_runner=lambda request: _run_real_runner(
+            request,
+            capture=capture,
+            session=_HuaweiSession(page),
+            audit=audit,
+        ),
+    )
+
+    assert price_polls_at_capture == [1]
+    assert audit.results[0].state is TaskState.SUCCEEDED
+    assert audit.results[0].price == Decimal("4999")
+
+
+def test_huawei_price_failure_still_publishes_and_keeps_formal_screenshot(
+    tmp_path: Path,
+) -> None:
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    capture = _FormalCapture()
+    audit = _RunnerAudit()
+
+    result = run_full_pipeline(
+        _full_request(_huawei_inputs(tmp_path), tmp_path),
+        website_runner=lambda request: _run_real_runner(
+            request,
+            capture=capture,
+            session=_HuaweiSession(page),
+            audit=audit,
+        ),
+    )
+
+    quote = load_workbook(result.quote_path, data_only=False)
+    try:
+        sheet = quote["5G手机"]
+        assert sheet["AK2"].value is None
+        assert _image_anchors(sheet) == {"AN2"}
+    finally:
+        quote.close()
+    assert len(capture.requests) == 1
+    assert audit.results[0].state is TaskState.TECHNICAL_FAILURE
+    assert audit.results[0].error_code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
+    assert audit.results[0].evidence is not None
+    assert audit.results[0].evidence.path.is_file()
 
 
 @pytest.mark.parametrize(
@@ -397,7 +498,7 @@ def test_huawei_each_legal_no_state_reaches_formal_capture(
     assert result.summary.failed_rows == 0
 
 
-def test_huawei_capture_failure_keeps_checkpoint_price_url_and_excel_ak(
+def test_huawei_capture_failure_keeps_the_pre_capture_price_checkpoint(
     tmp_path: Path,
 ) -> None:
     seen_tasks: list[WebsiteTask] = []
@@ -427,6 +528,7 @@ def test_huawei_capture_failure_keeps_checkpoint_price_url_and_excel_ak(
             for row in overview.iter_rows(min_col=1, max_col=2)
         }
         assert totals["部分完成"] == 1
+        assert totals["处理失败"] == 0
     finally:
         report.close()
     with SQLiteTaskRepository(tmp_path / "tasks.sqlite3") as repository:
@@ -435,11 +537,11 @@ def test_huawei_capture_failure_keeps_checkpoint_price_url_and_excel_ak(
         saved_result = repository.load_result(seen_tasks[0].task_id)
         assert checkpoint is not None
         assert checkpoint.price == Decimal("4999")
-        _assert_numeric_huawei_detail(checkpoint.url)
         assert saved_result is not None
         assert saved_result.state is TaskState.TECHNICAL_FAILURE
     assert result.summary.completed_rows == 0
     assert result.summary.partial_rows == 1
+    assert result.summary.failed_rows == 0
     assert len(capture.requests) == 3
 
 
@@ -491,7 +593,7 @@ def test_huawei_two_rows_keep_input_order_and_report_consistent_counts(
         report.close()
 
 
-def test_huawei_restart_resumes_detail_checkpoint_without_repeating_search(
+def test_huawei_restart_before_capture_resumes_from_the_saved_price_checkpoint(
     tmp_path: Path,
 ) -> None:
     run_id = "huawei-resume"
@@ -500,7 +602,7 @@ def test_huawei_restart_resumes_detail_checkpoint_without_repeating_search(
 
     class InterruptCapture:
         def capture(self, _request: CaptureRequest) -> EvidenceRecord:
-            raise SystemExit("stop after checkpoint")
+            raise SystemExit("stop before price finalization")
 
     first_page = _HuaweiPage()
     with SQLiteTaskRepository(database) as repository:
@@ -515,12 +617,11 @@ def test_huawei_restart_resumes_detail_checkpoint_without_repeating_search(
             evidence_capture=InterruptCapture(),
             evidence_dir=tmp_path / "resume-evidence",
         )
-        with pytest.raises(SystemExit, match="stop after checkpoint"):
+        with pytest.raises(SystemExit, match="stop before price finalization"):
             runner.run((task,))
         checkpoint = repository.load_observation(task.task_id)
         assert checkpoint is not None
-        _assert_numeric_huawei_detail(checkpoint.url)
-        checkpoint_url = checkpoint.url
+        assert checkpoint.price == Decimal("4999")
 
     resumed_page = _HuaweiPage()
     with SQLiteTaskRepository(database) as repository:
@@ -539,8 +640,11 @@ def test_huawei_restart_resumes_detail_checkpoint_without_repeating_search(
     assert results[0].state is TaskState.SUCCEEDED
     assert resumed_page.fill_calls == []
     assert resumed_page.search_submissions == 0
-    assert resumed_page.goto_calls == [checkpoint_url]
-    _assert_numeric_huawei_detail(resumed_page.goto_calls[0])
+    assert len(resumed_page.goto_calls) == 1
+    search_result = urlsplit(resumed_page.goto_calls[0])
+    assert search_result.hostname == "item.vmall.com"
+    assert search_result.path == "/product/comdetail/index.html"
+    assert parse_qs(search_result.query).get("prdId", [""])[0].isdigit()
 
 
 def test_huawei_sold_out_card_still_prices_and_captures_through_real_runner(

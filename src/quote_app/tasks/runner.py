@@ -29,6 +29,8 @@ from quote_app.evidence.quality import SemanticHashProbe
 from quote_app.evidence.semantic_state import VerifiedSemanticState
 from quote_app.sites.protocol import (
     AdapterObservation,
+    CaptureBeforePriceSiteObservationAdapter,
+    CaptureReadyObservation,
     ResumableSiteObservationAdapter,
     SiteObservationAdapter,
 )
@@ -76,7 +78,11 @@ _OUTCOME_ROLES = {
         {("capacity",), ("title", "capacity_group")}
     ),
     BusinessOutcome.COLOR_UNAVAILABLE: frozenset(
-        {("color",), ("title", "color_group")}
+        {
+            ("color",),
+            ("capacity", "color"),
+            ("title", "color_group"),
+        }
     ),
     BusinessOutcome.SOLD_OUT: frozenset({("stock_status",)}),
 }
@@ -344,7 +350,12 @@ class WebsiteTaskRunner:
                     raise ValueError("site family resolver returned invalid data")
                 self._close_unassigned_pages()
                 page = self._automation_page()
-                observation: FixtureObservation | AdapterObservation
+                observation: (
+                    FixtureObservation
+                    | AdapterObservation
+                    | CaptureReadyObservation
+                )
+                deferred_adapter: CaptureBeforePriceSiteObservationAdapter | None = None
                 saved_checkpoint = self.repository.load_observation(task.task_id)
                 if self.adapter_registry is None:
                     if saved_checkpoint is not None:
@@ -356,16 +367,30 @@ class WebsiteTaskRunner:
                     else:
                         observation = self._fixture_observation(task, page)
                 else:
-                    observation = (
-                        self._resume_site_observation(
+                    if saved_checkpoint is not None:
+                        observation = self._resume_site_observation(
                             task,
                             page,
                             saved_checkpoint,
                         )
-                        if saved_checkpoint is not None
-                        else self._site_observation(task, page)
-                    )
-                if saved_checkpoint is None:
+                    else:
+                        candidate = self.adapter_registry.adapter_for(
+                            task.brand,
+                            task.channel,
+                        )
+                        if isinstance(
+                            candidate,
+                            CaptureBeforePriceSiteObservationAdapter,
+                        ):
+                            observation = candidate.observe_for_capture(task, page)
+                            if isinstance(observation, CaptureReadyObservation):
+                                deferred_adapter = candidate
+                        else:
+                            observation = self._site_observation(task, page)
+                if saved_checkpoint is None and not isinstance(
+                    observation,
+                    CaptureReadyObservation,
+                ):
                     checkpoint = WebsiteObservationCheckpoint(
                         task_id=task.task_id,
                         outcome=observation.outcome,
@@ -381,6 +406,51 @@ class WebsiteTaskRunner:
                     observation,
                     destination,
                 )
+                if isinstance(observation, CaptureReadyObservation):
+                    if deferred_adapter is None:
+                        raise AssertionError("capture-ready adapter is unavailable")
+                    try:
+                        completed = deferred_adapter.finalize_observation(
+                            task,
+                            page,
+                            observation,
+                        )
+                    except NonRetryableTechnicalError as error:
+                        if error.code != "PRICE_UNAVAILABLE_AFTER_CAPTURE":
+                            raise
+                        return WebsiteResult(
+                            task_id=task.task_id,
+                            state=TaskState.TECHNICAL_FAILURE,
+                            outcome=None,
+                            price=None,
+                            url=observation.url,
+                            evidence=evidence,
+                            diagnostic_path=None,
+                            error_code=error.code,
+                            error_message=error.message,
+                        )
+                    if not isinstance(completed, AdapterObservation):
+                        raise ValueError(
+                            "capture-before-price adapter returned an invalid observation"
+                        )
+                    if (
+                        completed.outcome is not observation.outcome
+                        or completed.url != observation.url
+                        or completed.semantic_state.price_pending
+                    ):
+                        raise ValueError(
+                            "capture-before-price final observation changed identity"
+                        )
+                    observation = completed
+                    checkpoint = WebsiteObservationCheckpoint(
+                        task_id=task.task_id,
+                        outcome=observation.outcome,
+                        price=observation.price,
+                        url=observation.url,
+                        observed_at=datetime.now(timezone.utc),
+                    )
+                    self.repository.save_observation(checkpoint, token=token)
+                    self.scheduler.publish_observation(task, checkpoint)
                 return WebsiteResult(
                     task_id=task.task_id,
                     state=TaskState.SUCCEEDED,
@@ -555,7 +625,9 @@ class WebsiteTaskRunner:
         self,
         task: WebsiteTask,
         page: Any,
-        observation: FixtureObservation | AdapterObservation,
+        observation: (
+            FixtureObservation | AdapterObservation | CaptureReadyObservation
+        ),
         destination: Path,
     ) -> EvidenceRecord:
         for capture_attempt in range(3):
@@ -593,7 +665,9 @@ class WebsiteTaskRunner:
         self,
         task: WebsiteTask,
         page: Any,
-        observation: FixtureObservation | AdapterObservation,
+        observation: (
+            FixtureObservation | AdapterObservation | CaptureReadyObservation
+        ),
         destination: Path,
     ) -> CaptureRequest:
         if isinstance(observation, FixtureObservation):

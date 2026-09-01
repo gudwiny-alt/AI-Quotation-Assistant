@@ -203,7 +203,39 @@ class _Locator:
 
     def evaluate(self, script: str) -> dict[str, object] | str | bool:
         node = self.nodes[0]
+        if "TMALL_UNAVAILABLE_OPTION_OUTLINE" in script:
+            node.attrs["data-quote-unavailable-outline"] = "true"
+            existing = node.attrs.get("style", "").rstrip("; ")
+            node.attrs["style"] = (
+                f"{existing};" if existing else ""
+            ) + (
+                "outline:5px solid rgb(255, 0, 0);"
+                "outline-offset:3px"
+            )
+            return True
+        if "TMALL_OPTION_VISUAL_SELECTED" in script:
+            styles = _style(node.attrs.get("style", ""))
+            accent = {"rgb(255, 80, 0)", "rgb(255, 0, 54)"}
+            return (
+                styles.get("border-color") in accent
+                and styles.get("color") in accent
+            )
         if "TMALL_OPTION_SELECTED" in script:
+            if "TMALL_OPTION_SELECTED_DESCENDANTS" in script:
+                for descendant in node.descendants():
+                    classes = descendant.attrs.get("class", "").lower().split()
+                    if any(
+                        name in {"selected", "checked", "active"}
+                        or name.startswith(
+                            ("isselected--", "valueitemselected--")
+                        )
+                        for name in classes
+                    ):
+                        return True
+                    if descendant.attrs.get("aria-selected") == "true":
+                        return True
+                    if descendant.attrs.get("aria-checked") == "true":
+                        return True
             current: _Node | None = node
             while current is not None:
                 classes = current.attrs.get("class", "").lower().split()
@@ -228,6 +260,17 @@ class _Locator:
                 if option_kind == "capacity":
                     self.page.capture_centered = True
             return ""
+        if "quotationSmallUpwardNudge" in script:
+            self.page.capture_upward_nudges += 1
+            if (
+                self.page.capture_title_unclipped_after is not None
+                and self.page.capture_upward_nudges
+                >= self.page.capture_title_unclipped_after
+            ):
+                self.page.capture_title_clipped = False
+            return True
+        if "quotationTitleClipped" in script:
+            return self.page.capture_title_clipped
         if "getBoundingClientRect" in script:
             if self.page.capture_position_mode == "ready_then_center_breaks":
                 return not self.page.capture_centered
@@ -330,6 +373,9 @@ class _FixturePage:
         self.option_scrolls: list[str] = []
         self.option_events: list[str] = []
         self.capture_view_positions: list[str] = []
+        self.capture_upward_nudges = 0
+        self.capture_title_clipped = False
+        self.capture_title_unclipped_after: int | None = None
         self.capture_scales: list[float] = []
         self.capture_scale = 1.0
         self.capture_scale_restore_count = 0
@@ -535,6 +581,20 @@ class _FixturePage:
         script: str,
         value: float | None = None,
     ) -> dict[str, float] | bool | None:
+        if "TMALL_UNAVAILABLE_OPTION_OUTLINE_CLEAR" in script:
+            for node in self.root.descendants():
+                if node.attrs.pop("data-quote-unavailable-outline", None) is None:
+                    continue
+                style = re.sub(
+                    r"(?:^|;)\s*outline(?:-offset)?\s*:[^;]*",
+                    "",
+                    node.attrs.get("style", ""),
+                ).strip("; ")
+                if style:
+                    node.attrs["style"] = style
+                else:
+                    node.attrs.pop("style", None)
+            return True
         if (
             "quotation-capture-scale" in script
             or "computedZoom: getComputedStyle(root).zoom" in script
@@ -667,6 +727,18 @@ class _FixturePage:
             node.attrs["class"] = (
                 node.attrs.get("class", "") + " valueItemSelected--live"
             ).strip()
+            return
+        if (
+            self.selection_mode == "capacity_descendant_selected_class"
+            and option_kind == "capacity"
+        ):
+            marker = _Node("span", {"class": "valueItemSelected--live"}, node)
+            node.children.append(marker)
+            return
+        if self.selection_mode == "visual_style_only":
+            node.attrs["style"] = (
+                "border-color:rgb(255, 80, 0);color:rgb(255, 80, 0)"
+            )
             return
         if self.selection_mode == "async":
             self.pending_selections[node] = 2
@@ -1250,7 +1322,7 @@ def test_honor_re_resolves_capacity_after_sku_dom_rebuild() -> None:
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.price == Decimal("4399")
-    assert page.option_click_counts["capacity"] == 2
+    assert page.option_click_counts["capacity"] == 1
 
 
 def test_honor_accepts_capacity_generated_selected_class() -> None:
@@ -1270,6 +1342,49 @@ def test_honor_accepts_capacity_generated_selected_class() -> None:
     )
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_honor_accepts_capacity_selected_marker_on_option_descendant() -> None:
+    """The live SKU renderer may mark an inner value node instead of its option."""
+
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    page = _FixturePage(
+        html=html,
+        after_search_url=_honor_power2_result_url(),
+        selection_mode="capacity_descendant_selected_class",
+    )
+
+    observation = TmallAdapter(_honor_spec()).observe(
+        _task(brand="HONOR", model_name="荣耀Power2"), cast(Any, page)
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_honor_accepts_exact_options_with_live_visual_selected_state() -> None:
+    """HONOR may expose selection only as the visible orange tile treatment."""
+
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Power2")
+    html = html.replace("小米15", "荣耀Power2")
+    page = _FixturePage(
+        html=html,
+        after_search_url=_honor_power2_result_url(),
+        selection_mode="visual_style_only",
+    )
+
+    observation = TmallAdapter(_honor_spec()).observe(
+        _task(brand="HONOR", model_name="荣耀Power2"), cast(Any, page)
+    )
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.option_click_counts == {"capacity": 1, "color": 1}
 
 
 def test_honor_power2_uses_stable_visible_configuration_without_hidden_sku_attributes(
@@ -2459,6 +2574,34 @@ def test_apple_formal_capture_does_not_repeat_selected_price_stability_polling()
     assert page.price_snapshot_reads == 2
 
 
+def test_apple_formal_capture_in_a_fresh_adapter_keeps_verified_observation() -> None:
+    """The capture adapter must not demand volatile seller markup a second time."""
+
+    page = _apple_controlled_page(None)
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    observation = TmallAdapter(_apple_spec()).observe(task, cast(Any, page))
+    capture_adapter = TmallAdapter(_apple_spec())
+
+    capture_adapter.prepare_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    reread = capture_adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )()
+
+    assert reread == observation.semantic_state
+
+
 def test_apple_controlled_result_rejects_explicit_conflicting_detail_seller() -> None:
     page = _apple_controlled_page("其他数码专营店")
     task = _task(
@@ -2811,6 +2954,36 @@ def test_huawei_tmall_keeps_an_already_complete_four_proof_capture_frame() -> No
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.capture_view_positions == []
+    assert page.capture_upward_nudges == 0
+
+
+def test_huawei_tmall_nudges_only_until_a_clipped_title_is_revealed() -> None:
+    task = _task(
+        brand="华为",
+        model_name="华为畅享 90 Pro Max",
+        ram="8GB",
+        storage="256GB",
+        color="白色",
+    )
+    page = _FixturePage(
+        html=_huawei_storage_only_html(),
+        after_search_url=(
+            "https://huaweistore.tmall.com/"
+            "?q=%E5%8D%8E%E4%B8%BA%E7%95%85%E4%BA%AB%2090%20Pro%20Max"
+            + _LIVE_RESULTS_STATIC_QUERY
+        ),
+        capture_position_mode="ready_then_center_breaks",
+    )
+    page.capture_title_clipped = True
+    page.capture_title_unclipped_after = 2
+    adapter = TmallAdapter(_huawei_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.capture_view_positions == []
+    assert page.capture_upward_nudges == 2
 
 
 def test_tmall_detail_scales_before_selection_and_positions_only_for_capture() -> None:
@@ -3014,6 +3187,94 @@ def test_click_without_approved_selected_state_fails_closed() -> None:
         _observe(selection_mode="never")
 
 
+def test_honor_unselectable_capacity_and_color_return_two_red_frame_targets() -> None:
+    """Magic8 must record every requested option that cannot be selected."""
+
+    html = _live_observed_html()
+    html = html.replace("小米官方旗舰店", "荣耀官方旗舰店")
+    html = html.replace("xiaomi.tmall.com", "hihonor.tmall.com")
+    html = html.replace("小米 15", "荣耀Magic8").replace(
+        "小米15",
+        "荣耀Magic8",
+    )
+    html = html.replace("12GB + 256GB", "16GB + 512GB")
+    html = html.replace("黑色", "天青釉")
+    task = _task(
+        brand="HONOR",
+        model_name="荣耀Magic8",
+        ram="16GB",
+        storage="512GB",
+        color="天青釉",
+    )
+    page = _FixturePage(
+        html=html,
+        after_search_url=(
+            "https://hihonor.tmall.com/?q=%E8%8D%A3%E8%80%80Magic8"
+            + _LIVE_RESULTS_STATIC_QUERY
+        ),
+        selection_mode="never",
+    )
+
+    adapter = TmallAdapter(_honor_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.COLOR_UNAVAILABLE
+    assert observation.price is None
+    assert tuple(rect.role for rect in observation.css_rectangles) == (
+        "capacity",
+        "color",
+    )
+    assert page.option_events.count("click:capacity") == 1
+    assert page.option_events.count("click:color") == 1
+    adapter.prepare_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    unavailable_targets = {
+        node.text: node
+        for node in page.root.descendants()
+        if node.text in {"天青釉", "16GB + 512GB"}
+        and any(
+            class_name.startswith(("tmall-option", "valueItem--"))
+            for class_name in node.attrs.get("class", "").split()
+        )
+    }
+    assert set(unavailable_targets) == {"天青釉", "16GB + 512GB"}
+    for node in unavailable_targets.values():
+        styles = _style(node.attrs.get("style", ""))
+        assert node.attrs.get("data-quote-unavailable-outline") == "true"
+        assert styles.get("outline") == "5px solid rgb(255, 0, 0)"
+        assert styles.get("outline-offset") == "3px"
+        assert "background" not in styles
+        assert "opacity" not in styles
+    reader = adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    assert reader() == observation.semantic_state
+    assert 1200 in page.wait_timeout_milliseconds
+    assert tuple(
+        rect.role
+        for rect in adapter.capture_rectangles_for_capture(
+            task,
+            cast(Any, page),
+            observation.semantic_state,
+        )
+    ) == ("capacity", "color")
+    adapter.restore_capture_view(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+    for node in unavailable_targets.values():
+        styles = _style(node.attrs.get("style", ""))
+        assert "data-quote-unavailable-outline" not in node.attrs
+        assert "outline" not in styles
+        assert "outline-offset" not in styles
+
+
 def test_old_old_new_new_visible_price_waits_for_post_transition_stability() -> None:
     observation = _observe(
         price_snapshots=(
@@ -3092,7 +3353,258 @@ def test_tmall_target_brand_locks_the_first_exact_authoritative_price_snapshot(
     assert page.pre_discount_snapshot_reads == 1
 
 
-def test_tmall_target_brand_conflicting_pre_discount_prices_fail_closed() -> None:
+@pytest.mark.parametrize("brand", ["华为", "HONOR"])
+def test_tmall_target_brand_waits_only_until_the_first_price_is_available(
+    brand: str,
+) -> None:
+    spec, task, html, result_url = _target_tmall_case(brand)
+    page = _FixturePage(
+        html=html,
+        after_search_url=result_url,
+        pre_discount_snapshots=(
+            ("优惠前",),
+            ("优惠前",),
+            ("优惠前 ¥4,999",),
+        ),
+        price_snapshots=(
+            ("加载中", "加载中", "加载中"),
+            ("加载中", "加载中", "加载中"),
+            ("¥5,099", "¥4,399", "¥9,999"),
+        ),
+    )
+
+    observation = TmallAdapter(spec).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4999")
+    assert page.pre_discount_snapshot_reads == 3
+
+
+def test_tmall_apple_waits_only_until_the_first_selected_price_is_available() -> None:
+    page = _apple_controlled_page(
+        None,
+        price_snapshots=(
+            ("加载中", "加载中", "加载中"),
+            ("加载中", "加载中", "加载中"),
+            ("¥4,099", "¥4,399", "¥9,999"),
+        ),
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+
+    observation = TmallAdapter(_apple_spec()).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == Decimal("4399")
+    assert page.price_snapshot_reads == 3
+
+
+@pytest.mark.parametrize("brand", ["华为", "HONOR", "苹果"])
+def test_tmall_target_detail_accepts_visible_price_after_hashed_class_changes(
+    brand: str,
+) -> None:
+    if brand == "苹果":
+        page = _apple_controlled_page(None)
+        spec = _apple_spec()
+        task = _task(
+            brand="苹果",
+            model_name="iPhone 17",
+            ram="8GB",
+            storage="256GB",
+            color="黑色",
+        )
+    else:
+        spec, task, html, result_url = _target_tmall_case(brand)
+        html = re.sub(
+            r'<span class="subPrice--fixture".*?</span>',
+            "",
+            html,
+            flags=re.DOTALL,
+        ).replace("highlightPrice--fixture", "selectedAmount--current")
+        page = _FixturePage(html=html, after_search_url=result_url)
+    if brand == "苹果":
+        for node in page.root.descendants():
+            classes = node.attrs.get("class", "").split()
+            if "highlightPrice--fixture" in classes:
+                node.attrs["class"] = "selectedAmount--current"
+
+    observation = TmallAdapter(spec).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price is not None
+
+
+@pytest.mark.parametrize("brand", ["华为", "HONOR", "苹果"])
+def test_tmall_target_detail_accepts_unfamiliar_visible_price_class(
+    brand: str,
+) -> None:
+    if brand == "苹果":
+        page = _apple_controlled_page(None)
+        spec = _apple_spec()
+        task = _task(
+            brand="苹果",
+            model_name="iPhone 17",
+            ram="8GB",
+            storage="256GB",
+            color="黑色",
+        )
+    else:
+        spec, task, html, result_url = _target_tmall_case(brand)
+        page = _FixturePage(html=html, after_search_url=result_url)
+    for node in page.root.descendants():
+        classes = node.attrs.get("class", "").split()
+        if "highlightPrice--fixture" in classes:
+            node.attrs["class"] = "skuPriceValue--current"
+
+    observation = TmallAdapter(spec).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price is not None
+
+
+@pytest.mark.parametrize("brand", ["华为", "HONOR", "苹果"])
+def test_tmall_target_detail_accepts_currency_price_with_unrelated_dynamic_class(
+    brand: str,
+) -> None:
+    if brand == "苹果":
+        page = _apple_controlled_page(None)
+        spec = _apple_spec()
+        task = _task(
+            brand="苹果",
+            model_name="iPhone 17",
+            ram="8GB",
+            storage="256GB",
+            color="黑色",
+        )
+    else:
+        spec, task, html, result_url = _target_tmall_case(brand)
+        html = re.sub(
+            r'<span class="subPrice--fixture".*?</span>',
+            "",
+            html,
+            flags=re.DOTALL,
+        )
+        page = _FixturePage(html=html, after_search_url=result_url)
+    for node in page.root.descendants():
+        classes = node.attrs.get("class", "").split()
+        if "highlightPrice--fixture" in classes:
+            node.attrs["class"] = "runtime-token-c7d9"
+
+    observation = TmallAdapter(spec).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price is not None
+
+
+def test_tmall_target_detail_accepts_split_currency_and_amount_nodes() -> None:
+    """The selected price may be split into sibling leaves by the live UI."""
+
+    spec, task, html, result_url = _target_tmall_case("HONOR")
+    html = re.sub(
+        r'<span class="subPrice--fixture".*?</span>',
+        "",
+        html,
+        flags=re.DOTALL,
+    )
+    page = _FixturePage(html=html, after_search_url=result_url)
+    prices = [
+        node
+        for node in page.root.descendants()
+        if "highlightPrice--fixture" in node.attrs.get("class", "").split()
+    ]
+    assert prices
+    price = prices[0]
+    for stale in prices[1:]:
+        stale.attrs["hidden"] = ""
+    for node in page.root.descendants():
+        if any(
+            name.startswith("subPrice--")
+            for name in node.attrs.get("class", "").split()
+        ):
+            node.attrs["hidden"] = ""
+    parent = price.parent
+    assert parent is not None
+    wrapper = _Node("div", {"class": "runtime-price-shell"}, parent)
+    symbol = _Node("span", {"class": "runtime-currency"}, wrapper)
+    symbol.text_parts = ["¥"]
+    amount = _Node("span", {"class": "runtime-amount"}, wrapper)
+    amount.text_parts = [re.sub(r"[^0-9.]", "", price.text)]
+    wrapper.children.extend((symbol, amount))
+    parent.children[parent.children.index(price)] = wrapper
+
+    observation = TmallAdapter(spec).observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price is not None
+
+
+@pytest.mark.parametrize("brand", ["华为", "HONOR", "苹果"])
+def test_tmall_locked_target_formal_capture_never_rechecks_price(
+    brand: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if brand == "苹果":
+        page = _apple_controlled_page(None)
+        spec = _apple_spec()
+        task = _task(
+            brand="苹果",
+            model_name="iPhone 17",
+            ram="8GB",
+            storage="256GB",
+            color="黑色",
+        )
+    else:
+        spec, task, html, result_url = _target_tmall_case(brand)
+        page = _FixturePage(html=html, after_search_url=result_url)
+    adapter = TmallAdapter(spec)
+    observation = adapter.observe(task, cast(Any, page))
+
+    monkeypatch.setattr(
+        adapter,
+        "_stable_visible_price",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("formal Tmall capture must not recheck the locked price")
+        ),
+    )
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    assert adapter.verified_state_reader(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )() == observation.semantic_state
+
+
+@pytest.mark.parametrize("brand", ["华为", "HONOR", "苹果"])
+def test_tmall_target_detail_waits_for_visual_settle_before_capture(brand: str) -> None:
+    if brand == "苹果":
+        page = _apple_controlled_page(None)
+        spec = _apple_spec()
+        task = _task(
+            brand="苹果",
+            model_name="iPhone 17",
+            ram="8GB",
+            storage="256GB",
+            color="黑色",
+        )
+    else:
+        spec, task, html, result_url = _target_tmall_case(brand)
+        page = _FixturePage(html=html, after_search_url=result_url)
+    adapter = TmallAdapter(spec)
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert 800 in page.wait_timeout_milliseconds
+    assert 1200 in page.wait_timeout_milliseconds
+
+
+def test_tmall_target_brand_uses_catalog_policy_for_visible_pre_discount_prices() -> None:
     spec, task, html, result_url = _target_tmall_case(
         "华为",
         pre_discount_amounts=("4,999", "5,199"),
@@ -3105,8 +3617,9 @@ def test_tmall_target_brand_conflicting_pre_discount_prices_fail_closed() -> Non
         ),
     )
 
-    with pytest.raises(LayoutRecognitionError, match="authoritative price"):
-        TmallAdapter(spec).observe(task, cast(Any, page))
+    observation = TmallAdapter(spec).observe(task, cast(Any, page))
+
+    assert observation.price == Decimal("5199")
 
 
 def test_tmall_target_brand_formal_capture_uses_one_locked_price_snapshot() -> None:
