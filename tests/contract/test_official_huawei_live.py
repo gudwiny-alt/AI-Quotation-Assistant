@@ -11,6 +11,7 @@ import pytest
 
 from quote_app.evidence.quality import CaptureQualityError
 from quote_app.sites.catalog import load_site_catalog
+from quote_app.sites.protocol import CaptureReadyObservation
 from quote_app.tasks.models import (
     BusinessOutcome,
     WebsiteChannel,
@@ -1392,11 +1393,7 @@ def test_huawei_capture_ignores_same_price_from_related_product_root() -> None:
         result.semantic_state,
     )
 
-    assert [rectangle.role for rectangle in rectangles] == [
-        "title",
-        "capacity",
-        "color",
-    ]
+    assert rectangles == ()
 
 
 @pytest.mark.parametrize(
@@ -1496,14 +1493,11 @@ def test_huawei_accepts_current_price_from_the_primary_product_price_region() ->
     adapter.prepare_capture_view(task, page, observation.semantic_state)
 
     assert observation.price == Decimal("4999")
-    assert tuple(
-        rectangle.role
-        for rectangle in adapter.capture_rectangles_for_capture(
-            task,
-            page,
-            observation.semantic_state,
-        )
-    ) == ("title", "capacity", "color")
+    assert adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    ) == ()
 
 
 def test_huawei_hidden_canonical_price_does_not_block_visible_price_fallback() -> None:
@@ -1566,11 +1560,7 @@ def test_huawei_formal_capture_does_not_require_price_node_after_observation() -
         observation.semantic_state,
     )
 
-    assert tuple(rectangle.role for rectangle in rectangles) == (
-        "title",
-        "capacity",
-        "color",
-    )
+    assert rectangles == ()
 
 
 def test_huawei_accepts_visible_selected_price_when_title_is_outside_price_root() -> None:
@@ -1787,14 +1777,11 @@ def test_huawei_verified_capture_does_not_repeat_full_price_discovery(
     reader = adapter.verified_state_reader(task, page, observation.semantic_state)
 
     assert reader() == observation.semantic_state
-    assert tuple(
-        rectangle.role
-        for rectangle in adapter.capture_rectangles_for_capture(
-            task,
-            page,
-            observation.semantic_state,
-        )
-    ) == ("title", "capacity", "color")
+    assert adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    ) == ()
 
 
 def test_huawei_formal_capture_never_reads_the_numeric_price_again(
@@ -1816,14 +1803,11 @@ def test_huawei_formal_capture_never_reads_the_numeric_price_again(
         page,
         observation.semantic_state,
     )() == observation.semantic_state
-    assert tuple(
-        rectangle.role
-        for rectangle in adapter.capture_rectangles_for_capture(
-            task,
-            page,
-            observation.semantic_state,
-        )
-    ) == ("title", "capacity", "color")
+    assert adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    ) == ()
 
 
 def test_huawei_formal_capture_does_not_search_for_a_price_candidate(
@@ -1849,26 +1833,101 @@ def test_huawei_formal_capture_does_not_search_for_a_price_candidate(
         page,
         observation.semantic_state,
     )() == observation.semantic_state
-    assert tuple(
-        rectangle.role
-        for rectangle in adapter.capture_rectangles_for_capture(
-            task,
-            page,
-            observation.semantic_state,
-        )
-    ) == ("title", "capacity", "color")
+    assert adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    ) == ()
 
 
 def test_huawei_waits_for_visual_settle_before_formal_capture() -> None:
     adapter = _adapter()
     task = _task()
     page = _HuaweiPage()
-    observation = adapter.observe(task, page)
+    observation = adapter.observe_for_capture(task, page)
+    assert isinstance(observation, CaptureReadyObservation)
 
     adapter.prepare_capture_view(task, page, observation.semantic_state)
 
-    assert 800 in page.wait_timeout_milliseconds
     assert 1200 in page.wait_timeout_milliseconds
+
+
+def test_huawei_capture_boundary_never_touches_the_page_after_configuration_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe_for_capture(task, page)
+    assert isinstance(observation, CaptureReadyObservation)
+
+    def reject_page_access(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(
+            "Huawei formal capture must not touch the page after configuration settles"
+        )
+
+    monkeypatch.setattr(page, "locator", reject_page_access)
+    monkeypatch.setattr(page, "evaluate", reject_page_access)
+    monkeypatch.setattr(page, "get_by_text", reject_page_access)
+    monkeypatch.setattr(page, "wait_for_timeout", reject_page_access)
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    reader = adapter.verified_state_reader(task, page, observation.semantic_state)
+
+    assert reader() == observation.semantic_state
+    assert (
+        adapter.capture_rectangles_for_capture(
+            task,
+            page,
+            observation.semantic_state,
+        )
+        == ()
+    )
+
+
+def test_huawei_post_capture_price_read_has_a_two_second_browser_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe_for_capture(task, page)
+    assert isinstance(observation, CaptureReadyObservation)
+    timeouts: list[float] = []
+    monkeypatch.setattr(
+        page,
+        "set_default_timeout",
+        lambda milliseconds: timeouts.append(milliseconds),
+        raising=False,
+    )
+
+    completed = adapter.finalize_observation(task, page, observation)
+
+    assert completed.price == Decimal("4999")
+    assert timeouts == [2000, 30000]
+
+
+def test_huawei_any_post_capture_price_exception_preserves_capture_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe_for_capture(task, page)
+    assert isinstance(observation, CaptureReadyObservation)
+    monkeypatch.setattr(
+        adapter,
+        "_current_price",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("stale VMALL price node")),
+    )
+
+    with pytest.raises(
+        NonRetryableTechnicalError,
+        match="截图成功",
+    ) as captured:
+        adapter.finalize_observation(task, page, observation)
+
+    assert captured.value.code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
 
 
 @pytest.mark.parametrize("drift", ["identity", "configuration"])
@@ -1931,83 +1990,73 @@ def test_huawei_capture_keeps_current_scale_when_visual_proofs_already_fit() -> 
     assert page.capture_scales == [] and page.light_scrolls == []
 
 
-def test_huawei_capture_uses_idempotent_eighty_percent_only_when_needed() -> None:
+def test_huawei_capture_never_changes_scale_when_the_view_is_short() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
     page.viewport_height = 340
     adapter.prepare_capture_view(_task(), page, result.semantic_state)
-    assert page.capture_scale == 0.8
-    assert page.capture_scales == [0.8]
+    assert page.capture_scale == 1.0
+    assert page.capture_scales == []
     adapter.prepare_capture_view(_task(), page, result.semantic_state)
-    assert page.capture_scales == [0.8]
+    assert page.capture_scales == []
 
 
-def test_huawei_capture_scrolls_down_once_from_real_visual_proof_geometry() -> None:
+def test_huawei_capture_never_scrolls_down_after_configuration() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
     page.viewport_height = 280
     adapter.prepare_capture_view(_task(), page, result.semantic_state)
-    assert len(page.light_scrolls) == 1
-    assert 0 < page.light_scrolls[0] <= 160
+    assert page.light_scrolls == []
 
 
-def test_huawei_capture_can_scroll_up_once_from_real_geometry() -> None:
+def test_huawei_capture_never_scrolls_up_after_configuration() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
     page.viewport_height = 300
     page.scroll_offset = 120
     adapter.prepare_capture_view(_task(), page, result.semantic_state)
-    assert len(page.light_scrolls) == 1
-    assert -160 <= page.light_scrolls[0] < 0
+    assert page.light_scrolls == []
 
 
-def test_huawei_fixed_overlay_over_any_proof_is_cleared_by_one_geometry_scroll() -> None:
+def test_huawei_capture_does_not_inspect_or_move_for_a_fixed_overlay() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
     page.viewport_height = 340
     page.blocker = (280, 330, True)
     adapter.prepare_capture_view(_task(), page, result.semantic_state)
-    assert len(page.light_scrolls) == 1
-    assert all(
-        page.visible_and_unobscured(node)
-        for node in page.proofs_from_selectors(_capture_selector_specs()).values()
-    )
+    assert page.light_scrolls == []
 
 
-def test_huawei_persistent_overlay_or_missing_geometry_fails_closed() -> None:
+def test_huawei_persistent_overlay_or_missing_geometry_cannot_block_capture() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
     page.viewport_height = 340
     page.blocker = (280, 330, False)
-    with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
-        adapter.prepare_capture_view(_task(), page, result.semantic_state)
-    assert len(page.light_scrolls) <= 1
+    adapter.prepare_capture_view(_task(), page, result.semantic_state)
+    assert page.light_scrolls == []
     missing = _HuaweiPage()
     second = _adapter()
     state = second.observe(_task(), missing)
     missing.remove_color_geometry = True
-    with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
-        second.prepare_capture_view(_task(), missing, state.semantic_state)
+    second.prepare_capture_view(_task(), missing, state.semantic_state)
 
 
-def test_huawei_capture_never_scrolls_more_than_once_or_beyond_160_pixels() -> None:
+def test_huawei_capture_never_scrolls_even_when_geometry_would_previously_fail() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
     page.viewport_height = 300
     page.scroll_offset = 300
-    with pytest.raises((LayoutRecognitionError, CaptureQualityError)):
-        adapter.prepare_capture_view(_task(), page, result.semantic_state)
-    assert len(page.light_scrolls) <= 1
-    assert all(abs(delta) <= 160 for delta in page.light_scrolls)
+    adapter.prepare_capture_view(_task(), page, result.semantic_state)
+    assert page.light_scrolls == []
 
 
-def test_huawei_capture_selectors_and_price_state_survive_final_rectangle_read() -> None:
+def test_huawei_final_rectangle_read_does_not_query_capture_selectors() -> None:
     page = _HuaweiPage()
     adapter = _adapter()
     result = adapter.observe(_task(), page)
@@ -2017,12 +2066,5 @@ def test_huawei_capture_selectors_and_price_state_survive_final_rectangle_read()
         page,
         result.semantic_state,
     )
-    assert page.capture_selector_arguments
-    expected_selectors = _capture_selector_specs()
-    expected_selectors.pop("price")
-    assert all(item == expected_selectors for item in page.capture_selector_arguments)
-    assert [rectangle.role for rectangle in rectangles] == [
-        "title",
-        "capacity",
-        "color",
-    ]
+    assert page.capture_selector_arguments == []
+    assert rectangles == ()

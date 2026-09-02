@@ -343,11 +343,7 @@ def test_huawei_price_capture_checkpoint_reaches_excel_ak_and_an(
     _assert_numeric_huawei_detail(audit.observations[0].url)
     assert audit.results[0].state is TaskState.SUCCEEDED
     assert len(capture.requests) == 1
-    assert [rectangle.role for rectangle in capture.requests[0].css_rectangles] == [
-        "title",
-        "capacity",
-        "color",
-    ]
+    assert capture.requests[0].css_rectangles == ()
     assert result.summary.completed_rows == 1
     assert result.summary.failed_rows == 0
 
@@ -384,6 +380,40 @@ def test_huawei_captures_before_the_detail_price_node_hydrates(
     assert audit.observations[0].price == Decimal("4999")
     assert audit.results[0].state is TaskState.SUCCEEDED
     assert audit.results[0].evidence is not None
+
+
+def test_huawei_keeps_formal_screenshot_when_post_capture_price_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    page = _HuaweiPage()
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+    capture = _FormalCapture()
+    audit = _RunnerAudit()
+
+    result = run_full_pipeline(
+        _full_request(_huawei_inputs(tmp_path), tmp_path),
+        website_runner=lambda request: _run_real_runner(
+            request,
+            capture=capture,
+            session=_HuaweiSession(page),
+            audit=audit,
+        ),
+    )
+
+    assert len(capture.requests) == 1
+    saved = audit.results[0]
+    assert saved.state is TaskState.TECHNICAL_FAILURE
+    assert saved.error_code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
+    assert saved.evidence is not None
+    assert saved.evidence.path.exists()
+    quote = load_workbook(result.quote_path, data_only=False)
+    try:
+        sheet = quote["5G手机"]
+        assert sheet["AK2"].value is None
+        assert _image_anchors(sheet) == {"AN2"}
+    finally:
+        quote.close()
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _KNOWN_FORMAL_VALIDATION_CODES = frozenset(
     ("CAPTURE_OK", "CAPTURE_OK_MAC_VISUAL_REVIEW")
 )
+_FORMAL_EVIDENCE_TECHNICAL_CODES = frozenset(("PRICE_UNAVAILABLE_AFTER_CAPTURE",))
 
 
 class WebsiteChannel(StrEnum):
@@ -334,10 +335,18 @@ class WebsiteResult:
     def _validate_technical_failure(self) -> None:
         if not self.error_code or not self.error_message:
             raise ValueError("technical failure requires error code and message")
-        if self.evidence is not None:
-            raise ValueError("technical failure cannot carry formal evidence")
         if self.outcome is not None or self.price is not None:
             raise ValueError("technical failure cannot carry a business outcome or price")
+        if self.evidence is None:
+            return
+        if self.error_code not in _FORMAL_EVIDENCE_TECHNICAL_CODES:
+            raise ValueError("technical failure cannot carry formal evidence")
+        if not _is_http_url(self.url):
+            raise ValueError("partial formal evidence requires a URL")
+        if self.diagnostic_path is not None:
+            raise ValueError("partial formal evidence cannot be diagnostic evidence")
+        if self.evidence.validation_code not in _KNOWN_FORMAL_VALIDATION_CODES:
+            raise ValueError("partial formal evidence must be validated")
 
     def _validate_business_success(self) -> None:
         if self.outcome is None:

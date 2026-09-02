@@ -768,16 +768,18 @@ class TmallAdapter:
             color=color,
             site_name="Tmall",
             preserve_ready_position=(
-                normalize_product_text(task.brand) in {"华为", "HONOR"}
+                normalize_product_text(task.brand) in {"华为", "HONOR", "苹果"}
             ),
             upward_recovery_steps=(
-                4 if normalize_product_text(task.brand) == "华为" else 0
+                4
+                if normalize_product_text(task.brand) in {"华为", "苹果"}
+                else 0
             ),
             minimum_upward_nudges=(
                 0
             ),
             reveal_clipped_title=(
-                normalize_product_text(task.brand) in {"华为", "HONOR"}
+                normalize_product_text(task.brand) in {"华为", "HONOR", "苹果"}
             ),
         )
         browser_page.wait_for_timeout(_CAPTURE_SETTLE_MS)

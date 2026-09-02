@@ -2986,6 +2986,28 @@ def test_huawei_tmall_nudges_only_until_a_clipped_title_is_revealed() -> None:
     assert page.capture_upward_nudges == 2
 
 
+def test_apple_tmall_keeps_an_already_complete_four_proof_capture_frame() -> None:
+    page = _apple_controlled_page(
+        None,
+        capture_position_mode="ready_then_center_breaks",
+    )
+    task = _task(
+        brand="苹果",
+        model_name="iPhone 17",
+        ram="8GB",
+        storage="256GB",
+        color="黑色",
+    )
+    adapter = TmallAdapter(_apple_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.capture_view_positions == []
+    assert page.capture_upward_nudges == 0
+
+
 def test_tmall_detail_scales_before_selection_and_positions_only_for_capture() -> None:
     page = _FixturePage(
         price_snapshots=(

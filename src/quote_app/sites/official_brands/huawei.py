@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, quote, urljoin, urlsplit
 from quote_app.evidence.geometry import CssRect
 from quote_app.evidence.quality import CaptureQualityError
 from quote_app.evidence.semantic_state import SemanticStateReader, VerifiedSemanticState
-from quote_app.sites.detail_capture_view import ensure_capture_scale, restore_capture_scale
 from quote_app.sites.matching import color_matches, normalize_product_text
 from quote_app.sites.official_brands.base import LiveOfficialAdapterBase
 from quote_app.sites.official_brands.models import (
@@ -606,9 +605,11 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 ),
             )
         self._select(page, "color", task)
-        page.wait_for_timeout(_CONFIGURATION_SETTLE_MS)
         if defer_price:
-            return self._capture_ready_observation(task, page)
+            pending = self._capture_ready_observation(task, page)
+            page.wait_for_timeout(_CAPTURE_SETTLE_MS)
+            return pending
+        page.wait_for_timeout(_CONFIGURATION_SETTLE_MS)
         snapshot = self._stable_offer(task, page)
         return self.build_observation(
             task,
@@ -663,23 +664,32 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             raise LayoutRecognitionError("VMALL capture-ready state is unavailable")
         self._validate_expected_state(task, observation.semantic_state)
         browser = _page(page)
-        identity = self._require_offer_identity(
-            task,
-            browser,
-            _detail_identity(observation.url),
-        )
-        snapshot = self._stable_offer(task, browser)
-        if snapshot.identity.product_key != identity.product_key:
-            raise LayoutRecognitionError("VMALL price identity changed after capture")
+        identity = _detail_identity(observation.url)
+        set_default_timeout = getattr(browser, "set_default_timeout", None)
+        try:
+            if callable(set_default_timeout):
+                set_default_timeout(2_000)
+            price, _node = self._current_price(browser)
+        except Exception as error:
+            raise NonRetryableTechnicalError(
+                "PRICE_UNAVAILABLE_AFTER_CAPTURE",
+                "华为官网截图成功，但当前价格未能读取",
+            ) from error
+        finally:
+            if callable(set_default_timeout):
+                try:
+                    set_default_timeout(30_000)
+                except Exception:
+                    pass
         return self.build_observation(
             task,
             OfficialBusinessState.price_found(
-                identity=snapshot.identity,
+                identity=identity,
                 brand=task.brand,
                 model_name=task.model_name,
-                capacity=snapshot.capacity,
-                color=snapshot.color,
-                price=snapshot.price,
+                capacity=observation.semantic_state.capacity,
+                color=observation.semantic_state.color,
+                price=price,
             ),
         )
 
@@ -1143,27 +1153,11 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 raise LayoutRecognitionError("VMALL legal-no capture state changed")
             self._prepared.add(key)
             return
-        selectors = _capture_selectors(expected)
-        scaled = False
-        try:
-            if not _proofs_fit(browser, selectors):
-                ensure_capture_scale(browser, scale=0.8)
-                scaled = True
-            if not _proofs_fit(browser, selectors):
-                geometry = browser.evaluate(_GEOMETRY, selectors)
-                delta = _scroll_delta(geometry)
-                if delta is not None:
-                    browser.evaluate(_SCROLL, {"delta": delta})
-                if not _proofs_fit(browser, selectors):
-                    raise LayoutRecognitionError(
-                        "VMALL visual-proof capture view cannot be established"
-                    )
-            self._verified_capture_proofs(task, browser, expected)
-            browser.wait_for_timeout(_CAPTURE_SETTLE_MS)
-        except Exception:
-            if scaled:
-                restore_capture_scale(browser)
-            raise
+        # The Huawei detail page is already in its final selected state here.
+        # Formal capture deliberately performs no further DOM/layout/price work:
+        # VMALL frequently replaces option nodes after selection, so touching a
+        # retained locator at this boundary can wait for Playwright's full
+        # timeout and delete an otherwise valid screenshot.
         self._prepared.add(key)
 
     def verified_state_reader(
@@ -1176,11 +1170,8 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self._validate_expected_state(task, expected)
         if expected.outcome is not BusinessOutcome.PRICE_FOUND:
             return super().verified_state_reader(task, page, expected)
-        browser = _page(page)
 
         def reader() -> VerifiedSemanticState:
-            self.raise_if_manual_action(browser)
-            self._verified_capture_proofs(task, browser, expected)
             return expected
 
         return reader
@@ -1195,8 +1186,6 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self._validate_expected_state(task, expected)
         browser = _page(page)
         self._prepared.discard((id(browser), task.task_id, expected.current_sku))
-        if expected.outcome is BusinessOutcome.PRICE_FOUND:
-            restore_capture_scale(browser)
 
     def capture_rectangles_for_capture(
         self,
@@ -1208,19 +1197,7 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         self._validate_expected_state(task, expected)
         browser = _page(page)
         if expected.outcome is BusinessOutcome.PRICE_FOUND:
-            title, capacity, color = self._verified_capture_proofs(
-                task,
-                browser,
-                expected,
-            )
-            selectors = _capture_selectors(expected)
-            if not _proofs_fit(browser, selectors):
-                raise LayoutRecognitionError("VMALL final visual-proof geometry changed")
-            return (
-                _rect(title, "title"),
-                _rect(capacity, "capacity"),
-                _rect(color, "color"),
-            )
+            return ()
         current = self.build_observation(task, self._read_business_state(task, browser))
         if not self._same_legal_no_business_state(current.semantic_state, expected):
             raise LayoutRecognitionError("VMALL legal-no capture state changed")
