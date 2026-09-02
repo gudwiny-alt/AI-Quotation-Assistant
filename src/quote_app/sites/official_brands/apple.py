@@ -782,7 +782,6 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
             if not _proofs_fit(browser, proofs):
                 ensure_capture_scale(browser, scale=0.8)
                 scaled = True
-            self._final_capture_state(task, browser, expected)
         except Exception:
             if scaled:
                 restore_capture_scale(browser)

@@ -14,6 +14,7 @@ from quote_app.evidence.platform import PlatformEvidenceCapture
 from quote_app.evidence.semantic_state import VerifiedSemanticState
 from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.detail_capture_view import (
+    CaptureViewGeometryError,
     apply_capture_scale,
     ensure_capture_scale,
     position_detail_for_capture,
@@ -996,7 +997,24 @@ class TmallAdapter:
             task.model_name,
         )
         if result_search_input is None:
-            return (_css_rect(result_region, "result_region"),)
+            # Some Tmall stores retain the exact submitted query only in the
+            # approved result URL and clear the visible input after rendering.
+            # Restore that already verified value without submitting another
+            # search so the formal no-model screenshot visibly proves both the
+            # requested keyword and the result region.
+            result_search_input = _unique_visible_locator(
+                browser_page,
+                TMALL_SEARCH_INPUTS,
+                semantic_name="result search keyword",
+            )
+            result_search_input.fill(task.model_name)
+            if normalize_product_text(
+                result_search_input.input_value()
+            ) != normalize_product_text(task.model_name):
+                raise CaptureViewGeometryError(
+                    "Tmall no-model search keyword cannot be restored for capture",
+                    safe_stage="搜索框定位",
+                )
         return (
             _css_rect(result_search_input, "search_keyword"),
             _css_rect(result_region, "result_region"),

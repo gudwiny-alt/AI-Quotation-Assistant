@@ -7,6 +7,7 @@ import re
 
 import pytest
 
+from quote_app.evidence.semantic_state import VerifiedSemanticState
 from quote_app.sites.catalog import load_site_catalog
 from quote_app.sites.official_brands.models import (
     OfficialDetailIdentity,
@@ -1571,6 +1572,48 @@ def test_apple_formal_capture_does_not_reread_full_business_state() -> None:
     )
 
     assert adapter.remaining_transient_reads == 2
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "title",
+        "price",
+        "capacity",
+        "color",
+    )
+
+
+def test_apple_capture_rectangles_reuse_the_prepared_final_frame() -> None:
+    """React must not get a second chance to invalidate an accepted frame."""
+    from quote_app.sites.official_brands.apple import AppleOfficialAdapter
+    from quote_app.tasks.retry import LayoutRecognitionError
+
+    class _SingleFinalFrameAdapter(AppleOfficialAdapter):
+        final_frame_reads = 0
+
+        def _final_capture_state(  # type: ignore[override]
+            self,
+            task: WebsiteTask,
+            page: object,
+            expected: VerifiedSemanticState,
+        ) -> VerifiedSemanticState:
+            self.final_frame_reads += 1
+            if self.final_frame_reads > 1:
+                raise LayoutRecognitionError("Apple React frame rerendered")
+            return super()._final_capture_state(task, page, expected)  # type: ignore[arg-type]
+
+    page = _AppleFixturePage(
+        (_FIXTURES / "capacity_card_price.html").read_text(encoding="utf-8")
+    )
+    task = replace(_apple_task(), storage="256GB", color="黑色")
+    adapter = _SingleFinalFrameAdapter(_apple_spec())
+    observation = adapter.observe(task, page)
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        page,
+        observation.semantic_state,
+    )
+
+    assert adapter.final_frame_reads == 1
     assert tuple(rectangle.role for rectangle in rectangles) == (
         "title",
         "price",

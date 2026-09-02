@@ -77,6 +77,36 @@ _MAC_VISUAL_REVIEW_WINDOW_ARGS = (
     "--window-position=24,49",
     "--window-size=1464,893",
 )
+_NO_MODEL_PROOF_FRAME_ID = "quotation-no-model-proof-frame"
+_INSTALL_NO_MODEL_PROOF_FRAME = f"""
+(bounds) => {{
+  const frameId = "{_NO_MODEL_PROOF_FRAME_ID}";
+  document.getElementById(frameId)?.remove();
+  const frame = document.createElement("div");
+  frame.id = frameId;
+  frame.setAttribute("aria-hidden", "true");
+  const properties = {{
+    position: "fixed",
+    left: `${{bounds.left}}px`,
+    top: `${{bounds.top}}px`,
+    width: `${{bounds.width}}px`,
+    height: `${{bounds.height}}px`,
+    "box-sizing": "border-box",
+    border: "4px solid rgb(255, 0, 0)",
+    "border-radius": "0",
+    background: "transparent",
+    "pointer-events": "none",
+    "z-index": "2147483647",
+  }};
+  for (const [name, value] of Object.entries(properties)) {{
+    frame.style.setProperty(name, value, "important");
+  }}
+  document.documentElement.appendChild(frame);
+}}
+"""
+_REMOVE_NO_MODEL_PROOF_FRAME = f"""
+() => document.getElementById("{_NO_MODEL_PROOF_FRAME_ID}")?.remove()
+"""
 _SIX_CAPTURE_BRANDS = ("HONOR", "小米", "欧珀", "维沃", "华为", "苹果")
 _LIVE_OFFICIAL_CAPTURE_BRANDS = _SIX_CAPTURE_BRANDS
 _MARKETPLACE_CAPTURE_BRANDS = _SIX_CAPTURE_BRANDS
@@ -389,6 +419,32 @@ class MacFormalCaptureRuntime:
                 ),
                 environment_message="正式截图证据区域无法读取",
             )
+            if (
+                self._uses_darwin_beta_visual_review()
+                and state.outcome is BusinessOutcome.NO_MODEL
+                and capture_rectangles
+            ):
+                overlay_restorer = self._stage(
+                    "CAPTURE_ENVIRONMENT",
+                    "未找到机型红框无法绘制",
+                    lambda: self._install_no_model_proof_frame(
+                        page,
+                        capture_rectangles,
+                    ),
+                )
+                restore_capture_view = self._compose_capture_view_restorers(
+                    overlay_restorer,
+                    restore_capture_view,
+                )
+                current = self._require_current()
+                self._current = _CurrentState(
+                    permissions=current.permissions,
+                    bound=current.bound,
+                    page=current.page,
+                    generation=current.generation,
+                    probe=current.probe,
+                    restore_capture_view=restore_capture_view,
+                )
 
             probe: VerifiedPageStateProbe | None = None
 
@@ -1190,12 +1246,28 @@ class MacFormalCaptureRuntime:
         if (
             self._uses_darwin_beta_visual_review()
             and task.channel is WebsiteChannel.JD
+            and state.outcome is not BusinessOutcome.NO_MODEL
         ):
             return None
         reader = getattr(adapter, "capture_rectangles_for_capture", None)
         if not callable(reader):
             return None
-        rectangles = reader(task, page, state)
+        try:
+            rectangles = reader(task, page, state)
+        except CaptureViewGeometryError:
+            if not (
+                self._uses_darwin_beta_visual_review()
+                and task.channel is WebsiteChannel.JD
+                and state.outcome is BusinessOutcome.NO_MODEL
+                and state.css_rectangles
+            ):
+                raise
+            # JD occasionally finishes the verified search but cannot perform
+            # its optional final card alignment.  Prefer live final geometry;
+            # retain the already verified observation geometry only as the
+            # visual-review fallback so a decorative frame never suppresses
+            # the underlying evidence screenshot.
+            rectangles = state.css_rectangles
         if not isinstance(rectangles, tuple | list) or not all(
             isinstance(rectangle, CssRect)
             for rectangle in rectangles
@@ -1203,7 +1275,54 @@ class MacFormalCaptureRuntime:
             raise ValueError(
                 "capture rectangles reader must return CssRect values"
             )
+        roles = tuple(rectangle.role for rectangle in rectangles)
+        if state.outcome is BusinessOutcome.NO_MODEL and roles not in {
+            ("search_keyword", "result_region"),
+            ("result_region",),
+        }:
+            raise ValueError("no-model capture rectangles have invalid roles")
         return tuple(rectangles)
+
+    @staticmethod
+    def _install_no_model_proof_frame(
+        page: Any,
+        rectangles: tuple[CssRect, ...],
+    ) -> Callable[[], None]:
+        evaluate = getattr(page, "evaluate", None)
+        if not callable(evaluate):
+            raise ValueError("page does not support DOM proof framing")
+        left = min(rectangle.x for rectangle in rectangles)
+        top = min(rectangle.y for rectangle in rectangles)
+        right = max(
+            rectangle.x + rectangle.width for rectangle in rectangles
+        )
+        bottom = max(
+            rectangle.y + rectangle.height for rectangle in rectangles
+        )
+        evaluate(
+            _INSTALL_NO_MODEL_PROOF_FRAME,
+            {
+                "left": float(left),
+                "top": float(top),
+                "width": float(right - left),
+                "height": float(bottom - top),
+            },
+        )
+        return lambda: evaluate(_REMOVE_NO_MODEL_PROOF_FRAME)
+
+    @staticmethod
+    def _compose_capture_view_restorers(
+        first: Callable[[], None],
+        second: Callable[[], None] | None,
+    ) -> Callable[[], None]:
+        def restore() -> None:
+            try:
+                first()
+            finally:
+                if second is not None:
+                    second()
+
+        return restore
 
     def _capture_view_stage(
         self,

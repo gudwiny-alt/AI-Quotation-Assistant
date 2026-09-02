@@ -2149,6 +2149,41 @@ def test_tmall_blank_result_input_can_record_a_verified_no_model_result() -> Non
     )
 
 
+def test_tmall_no_model_capture_restores_verified_keyword_for_visual_proof() -> None:
+    html = _live_observed_html().replace(
+        'name="q" value="小米 15"',
+        'name="q" value=""',
+        1,
+    ).replace("新品 小米15 12GB+256GB 手机", "新品 小米14 手机", 1)
+    result_url = (
+        "https://xiaomi.tmall.com/?q=%D0%A1%C3%D7%2015"
+        + _LIVE_RESULTS_STATIC_QUERY
+    )
+    page = _FixturePage(html=html, after_search_url=result_url)
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert tuple(rectangle.role for rectangle in rectangles) == (
+        "search_keyword",
+        "result_region",
+    )
+    search_input = next(
+        node
+        for node in page.root.descendants()
+        if node.tag == "input" and node.attrs.get("name") == "q"
+    )
+    assert search_input.attrs["value"] == task.model_name
+
+
 def test_tmall_no_model_prepares_a_result_view_with_readable_card_names() -> None:
     page = _FixturePage("no_model.html")
     task = _task()

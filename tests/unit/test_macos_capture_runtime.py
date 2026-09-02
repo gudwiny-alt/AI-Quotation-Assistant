@@ -2644,6 +2644,32 @@ class _CaptureGeometryAdapter(_CapturePreparedAdapter):
         )
 
 
+class _FramingFailButGeometryAdapter(_CaptureGeometryAdapter):
+    def prepare_capture_view(
+        self,
+        task: WebsiteTask,
+        page: object,
+        expected: VerifiedSemanticState,
+    ) -> None:
+        del task, page, expected
+        raise CaptureViewGeometryError(
+            "JD no-model product card name is not visible for capture",
+            safe_stage="结果区域定位",
+        )
+
+
+class _OverlayPage:
+    def __init__(self) -> None:
+        self.evaluations: list[tuple[str, object | None]] = []
+
+    def evaluate(
+        self,
+        expression: str,
+        argument: object | None = None,
+    ) -> None:
+        self.evaluations.append((expression, argument))
+
+
 class _FailingCaptureGeometryAdapter(_CapturePreparedAdapter):
     def capture_rectangles_for_capture(
         self,
@@ -3008,12 +3034,8 @@ def test_darwin_beta_jd_no_model_capture_keeps_verified_search_result_when_only_
     """A verified JD no-model page is still captured when only card framing fails."""
 
     monkeypatch.setattr("platform.system", lambda: "Darwin")
-    adapter = _FailingCapturePreparationAdapter(
-        _site_spec(WebsiteChannel.JD),
-        CaptureViewGeometryError(
-            "JD no-model product card name is not visible for capture",
-            safe_stage="结果区域定位",
-        ),
+    adapter = _FramingFailButGeometryAdapter(
+        _site_spec(WebsiteChannel.JD)
     )
     runtime = MacFormalCaptureRuntime(
         sampler=_Sampler([]),
@@ -3024,6 +3046,7 @@ def test_darwin_beta_jd_no_model_capture_keeps_verified_search_result_when_only_
         policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
     )
     task = _task(channel=WebsiteChannel.JD)
+    page = _OverlayPage()
     state = replace(
         _state(canonical_url="https://mall.jd.com/search?keyword=missing"),
         current_sku="not-applicable",
@@ -3034,9 +3057,13 @@ def test_darwin_beta_jd_no_model_capture_keeps_verified_search_result_when_only_
         css_rectangles=(CssRect(30, 120, 720, 340, "result_region"),),
     )
 
-    context = runtime.capture_context_provider(task, object(), state)
+    context = runtime.capture_context_provider(task, page, state)
 
-    assert context.css_rectangles is None
+    assert context.css_rectangles == (
+        CssRect(30, 40, 120, 32, "search_keyword"),
+        CssRect(30, 120, 720, 340, "result_region"),
+    )
+    assert len(page.evaluations) == 1
     assert len(adapter.calls) == 1
     assert adapter.calls[0][0] == task
     assert adapter.calls[0][2] == state
@@ -3204,6 +3231,104 @@ def test_capture_context_uses_final_marketplace_rectangles_after_view_preparatio
         CssRect(30, 40, 120, 32, "search_keyword"),
         CssRect(30, 120, 720, 340, "result_region"),
     )
+
+
+def test_darwin_beta_no_model_capture_draws_and_removes_visible_proof_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whole-display review must paint the requested no-model frame in-page."""
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    adapter = _CaptureGeometryAdapter(_site_spec(WebsiteChannel.TMALL))
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    )
+    task = _task(channel=WebsiteChannel.TMALL)
+    page = _OverlayPage()
+    state = replace(
+        _state(canonical_url="https://example.test/tmall/search"),
+        current_sku="not-applicable",
+        region="not-applicable",
+        stock_state="not-applicable",
+        price=None,
+        outcome=BusinessOutcome.NO_MODEL,
+        css_rectangles=(
+            CssRect(30, 40, 120, 32, "search_keyword"),
+            CssRect(30, 120, 720, 340, "result_region"),
+        ),
+    )
+
+    context = runtime.capture_context_provider(task, page, state)
+
+    assert len(page.evaluations) == 1
+    install_script, payload = page.evaluations[0]
+    assert "quotation-no-model-proof-frame" in install_script
+    assert 'border: "4px solid rgb(255, 0, 0)"' in install_script
+    assert 'background: "transparent"' in install_script
+    assert '"pointer-events": "none"' in install_script
+    assert '"z-index": "2147483647"' in install_script
+    assert payload == {
+        "left": 30.0,
+        "top": 40.0,
+        "width": 720.0,
+        "height": 420.0,
+    }
+    runtime.evidence_capture()._pipeline = _RawCapturePipeline(
+        result=object()
+    )  # type: ignore[assignment]
+
+    runtime.evidence_capture().capture(_capture_request(context))
+
+    assert len(page.evaluations) == 2
+    remove_script, remove_argument = page.evaluations[1]
+    assert "quotation-no-model-proof-frame" in remove_script
+    assert remove_argument is None
+    assert adapter.restore_calls == [(task, page, state)]
+
+
+def test_darwin_beta_no_model_capture_removes_proof_frame_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    adapter = _CaptureGeometryAdapter(_site_spec(WebsiteChannel.TMALL))
+    runtime = MacFormalCaptureRuntime(
+        sampler=_Sampler([]),
+        bridge=_Bridge([]),
+        binder=_Binder([]),
+        adapter_registry=_CustomAdapterRegistry(adapter),
+        monotonic_clock=lambda: _NOW,
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    )
+    task = _task(channel=WebsiteChannel.TMALL)
+    page = _OverlayPage()
+    state = replace(
+        _state(canonical_url="https://example.test/tmall/search"),
+        current_sku="not-applicable",
+        region="not-applicable",
+        stock_state="not-applicable",
+        price=None,
+        outcome=BusinessOutcome.NO_MODEL,
+        css_rectangles=(
+            CssRect(30, 40, 120, 32, "search_keyword"),
+            CssRect(30, 120, 720, 340, "result_region"),
+        ),
+    )
+    context = runtime.capture_context_provider(task, page, state)
+    runtime.evidence_capture()._pipeline = _RawCapturePipeline(
+        error=OSError("capture failed")
+    )  # type: ignore[assignment]
+
+    with pytest.raises(OSError, match="capture failed"):
+        runtime.evidence_capture().capture(_capture_request(context))
+
+    assert len(page.evaluations) == 2
+    assert "quotation-no-model-proof-frame" in page.evaluations[1][0]
+    assert adapter.restore_calls == [(task, page, state)]
 
 
 def test_capture_context_preserves_jd_security_pause_from_final_view_preparation() -> None:
