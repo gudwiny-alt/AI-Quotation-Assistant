@@ -66,7 +66,7 @@ def test_app_build_label_identifies_six_brand_full_site_scope() -> None:
     from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
 
     assert APP_BUILD_LABEL == (
-        "华为官网硬截图与天猫苹果同屏保护版（六品牌三渠道）2026.09.02.163"
+        "华为官网硬截图取价补强与天猫苹果同屏保护版（六品牌三渠道）2026.09.02.164"
     )
     assert "当前受控页" in BETA_NOTICE
     assert "全部官网、全部天猫，最后执行全部京东" in BETA_NOTICE

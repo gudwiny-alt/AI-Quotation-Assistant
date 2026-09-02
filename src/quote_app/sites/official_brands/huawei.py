@@ -211,6 +211,8 @@ _PRICE_STYLE = """
     contextText,
     ancestorClasses,
     primaryDetailRoot,
+    tagName: element.tagName,
+    childElementCount: element.childElementCount,
   };
 }
 """
@@ -986,13 +988,18 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             candidate: Any,
             *,
             require_context: bool,
+            require_leaf: bool = False,
         ) -> tuple[Decimal, Any] | None:
             style = candidate.evaluate(_PRICE_STYLE)
             if not isinstance(style, dict):
                 return None
             if style.get("effectiveLineThrough") is True:
                 return None
-            if require_context and _price_context_rejected(style):
+            if require_leaf and style.get("childElementCount") != 0:
+                return None
+            if _price_class_context_rejected(style):
+                return None
+            if require_context and _price_text_context_rejected(style):
                 return None
             values = _money_values(candidate.inner_text())
             if values:
@@ -1008,11 +1015,12 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 )
             ) is not None:
                 return current
-        for candidate, require_context in _currency_price_fallbacks(page):
+        for candidate, require_context, require_leaf in _currency_price_fallbacks(page):
             if (
                 current := accepted(
                     candidate,
                     require_context=require_context,
+                    require_leaf=require_leaf,
                 )
             ) is not None:
                 return current
@@ -1291,19 +1299,19 @@ def _visible_price_candidates(page: Any) -> tuple[Any, ...]:
     )
 
 
-def _currency_price_fallbacks(page: Any) -> tuple[tuple[Any, bool], ...]:
+def _currency_price_fallbacks(page: Any) -> tuple[tuple[Any, bool, bool], ...]:
     """Find a hashed VMALL price even when sign and amount are sibling leaves."""
 
     roots = _visible(page, ("[data-prdid]",)) or (page,)
     leaves = tuple(
-        (candidate, True)
+        (candidate, selector != "div", selector == "div")
         for root in roots
-        for selector in ("span", "strong", "em", "p")
+        for selector in ("span", "strong", "em", "p", "div")
         for candidate in _visible(root, (selector,))
         if _EXACT_CURRENCY_AMOUNT.fullmatch(candidate.inner_text()) is not None
     )
     split_parents = tuple(
-        (candidate, False)
+        (candidate, False, False)
         for root in roots
         for candidate in _visible(root, ("div",))
         if _EXACT_CURRENCY_AMOUNT.fullmatch(candidate.inner_text()) is not None
@@ -1509,14 +1517,20 @@ def _legal_model_tail(value: str) -> bool:
     return len(tokens) == 1 and _COLOR_TAIL.fullmatch(tokens[0]) is not None
 
 
-def _price_context_rejected(style: object) -> bool:
+def _price_class_context_rejected(style: object) -> bool:
     if not isinstance(style, dict):
         return True
-    pieces = [str(style.get("contextText") or "")]
     ancestor_classes = style.get("ancestorClasses")
-    if isinstance(ancestor_classes, list):
-        pieces.extend(str(item) for item in ancestor_classes)
-    context = normalize_product_text(" ".join(pieces))
+    if not isinstance(ancestor_classes, list):
+        return False
+    context = normalize_product_text(" ".join(str(item) for item in ancestor_classes))
+    return any(marker in context for marker in _PRICE_EXCLUSION_MARKERS)
+
+
+def _price_text_context_rejected(style: object) -> bool:
+    if not isinstance(style, dict):
+        return True
+    context = normalize_product_text(str(style.get("contextText") or ""))
     return any(marker in context for marker in _PRICE_EXCLUSION_MARKERS)
 
 

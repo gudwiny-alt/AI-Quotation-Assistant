@@ -203,9 +203,12 @@ class _HuaweiLocator(_OfficialLocator):
             ),
             "contextText": node.parent.text if node.parent is not None else node.text,
             "ancestorClasses": [
-                ancestor.attrs.get("class", "") for ancestor in _ancestors(node)
+                candidate.attrs.get("class", "")
+                for candidate in (node, *_ancestors(node))
             ],
             "primaryDetailRoot": primary_detail_root,
+            "tagName": node.tag.upper(),
+            "childElementCount": len(node.children),
         }
 
 
@@ -1905,6 +1908,45 @@ def test_huawei_post_capture_price_read_has_a_two_second_browser_timeout(
 
     assert completed.price == Decimal("4999")
     assert timeouts == [2000, 30000]
+
+
+def test_huawei_post_capture_reads_visible_anonymous_div_price() -> None:
+    """A visible main price must not depend on VMALL runtime tags or classes."""
+
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe_for_capture(task, page)
+    assert isinstance(observation, CaptureReadyObservation)
+    for node in page.price_nodes():
+        node.attrs["hidden"] = ""
+        if node.parent is not None:
+            node.parent.attrs["hidden"] = ""
+    product_root = next(
+        node for node in page.detail_root.descendants() if "data-prdid" in node.attrs
+    )
+    subsidy = _OfficialNode(
+        "div",
+        {
+            "class": "subsidy-runtime-token",
+            "style": "color:rgb(207,10,44);font-size:32px",
+        },
+        product_root,
+    )
+    subsidy.text_parts = ["¥750"]
+    amount = _OfficialNode(
+        "div",
+        {
+            "style": "color:rgb(207,10,44);font-size:32px",
+        },
+        product_root,
+    )
+    amount.text_parts = ["¥2199"]
+    product_root.children.extend((subsidy, amount))
+
+    completed = adapter.finalize_observation(task, page, observation)
+
+    assert completed.price == Decimal("2199")
 
 
 def test_huawei_any_post_capture_price_exception_preserves_capture_result(

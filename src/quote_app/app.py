@@ -43,7 +43,7 @@ from quote_app.tasks.models import WebsiteChannel
 
 
 APP_BUILD_LABEL = (
-    "华为官网硬截图与天猫苹果同屏保护版（六品牌三渠道）2026.09.02.163"
+    "华为官网硬截图取价补强与天猫苹果同屏保护版（六品牌三渠道）2026.09.02.164"
 )
 BETA_NOTICE = (
     f"{APP_BUILD_LABEL}：选中品牌依次执行全部官网、全部天猫，最后执行全部京东；"
