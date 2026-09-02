@@ -101,6 +101,30 @@ def test_normal_sale_draws_no_red_frames() -> None:
     assert image.getpixel((10, 10)) == (255, 255, 255)
 
 
+def test_no_model_draws_one_bright_union_frame_around_search_and_results() -> None:
+    """Break caught: no-model evidence shows two thin boxes instead of one proof frame."""
+    image = Image.new("RGB", (140, 140), "white")
+    rectangles = (
+        ScreenRect(10, 10, 80, 20, "search_keyword"),
+        ScreenRect(20, 50, 100, 70, "result_region"),
+    )
+
+    annotations = draw_red_annotations(
+        image,
+        EvidenceState.NO_MODEL,
+        rectangles,
+    )
+
+    assert tuple(annotation.role for annotation in annotations) == (
+        "search_keyword",
+        "result_region",
+    )
+    assert image.getpixel((10, 10)) == (255, 0, 0)
+    assert image.getpixel((119, 119)) == (255, 0, 0)
+    assert image.getpixel((60, 13)) == (255, 0, 0)
+    assert image.getpixel((60, 50)) == (255, 255, 255)
+
+
 @pytest.mark.parametrize(
     ("state", "rectangles", "expected_roles"),
     [

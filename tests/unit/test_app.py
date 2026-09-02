@@ -55,22 +55,19 @@ def test_default_quote_month_uses_the_injected_current_month() -> None:
     assert request.quote_month == QuoteMonth(2026, 7)
 
 
-def test_beta_notice_describes_login_as_runtime_optional() -> None:
+def test_beta_notice_describes_execution_order_and_manual_resume() -> None:
     from quote_app.app import BETA_NOTICE
 
-    assert "无需预先登录" in BETA_NOTICE
-    assert "继续当前任务" in BETA_NOTICE
-
-
-def test_app_build_label_identifies_six_brand_full_site_scope() -> None:
-    from quote_app.app import APP_BUILD_LABEL, BETA_NOTICE
-
-    assert APP_BUILD_LABEL == (
-        "华为官网硬截图取价补强与天猫苹果同屏保护版（六品牌三渠道）2026.09.02.164"
+    assert BETA_NOTICE == (
+        "执行顺序：品牌官网、天猫、京东；遇到登录或验证页面时，"
+        "人工登录完成后点击“继续当前任务”按钮。"
     )
-    assert "当前受控页" in BETA_NOTICE
-    assert "全部官网、全部天猫，最后执行全部京东" in BETA_NOTICE
-    assert "京东独立登录状态" in BETA_NOTICE
+
+
+def test_app_build_label_uses_the_approved_short_title() -> None:
+    from quote_app.app import APP_BUILD_LABEL
+
+    assert APP_BUILD_LABEL == "终端福建分公司铺货报价智能体 2026.09.02.164"
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(
@@ -278,6 +275,8 @@ def test_gui_build_uses_compact_window_and_readonly_selectors(
     combobox_options: list[dict[str, object]] = []
     scrolled_options: list[dict[str, object]] = []
     geometries: list[str] = []
+    titles: list[str] = []
+    label_texts: list[object] = []
 
     class Widget:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -293,13 +292,17 @@ def test_gui_build_uses_compact_window_and_readonly_selectors(
         def __init__(self, *_args: object, **kwargs: object) -> None:
             combobox_options.append(kwargs)
 
+    class Label(Widget):
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            label_texts.append(kwargs.get("text"))
+
     class ScrolledText(Widget):
         def __init__(self, *_args: object, **kwargs: object) -> None:
             scrolled_options.append(kwargs)
 
     class Root(Widget):
-        def title(self, _title: str) -> None:
-            pass
+        def title(self, title: str) -> None:
+            titles.append(title)
 
         def geometry(self, geometry: str) -> None:
             geometries.append(geometry)
@@ -307,8 +310,9 @@ def test_gui_build_uses_compact_window_and_readonly_selectors(
         def rowconfigure(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-    for name in ("Frame", "Label", "Entry", "Button"):
+    for name in ("Frame", "Entry", "Button", "Separator", "LabelFrame"):
         monkeypatch.setattr(app_module.ttk, name, Widget)
+    monkeypatch.setattr(app_module.ttk, "Label", Label)
     monkeypatch.setattr(app_module.ttk, "Combobox", Combobox)
     monkeypatch.setattr(app_module.scrolledtext, "ScrolledText", ScrolledText)
 
@@ -324,6 +328,8 @@ def test_gui_build_uses_compact_window_and_readonly_selectors(
     app._build()
 
     assert geometries == ["900x620"]
+    assert titles == ["终端福建分公司铺货报价智能体 2026.09.02.164"]
+    assert "Design by Gudwin" in label_texts
     assert len(combobox_options) == 2
     month_options, run_options = combobox_options
     assert month_options["textvariable"] is app.month_var
@@ -948,7 +954,7 @@ def test_cli_calls_injected_pipeline_and_prints_output_summary(
     assert "处理完成：1" in output
     assert "处理失败：1" in output
     assert BETA_NOTICE in output
-    assert APP_BUILD_LABEL in BETA_NOTICE
+    assert APP_BUILD_LABEL in output
 
 
 def test_cli_core_pipeline_error_is_chinese_and_has_no_traceback(

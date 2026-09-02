@@ -76,7 +76,7 @@ def draw_red_annotations(
     state: EvidenceState,
     rectangles: tuple[ScreenRect, ...],
     *,
-    line_width: int = 6,
+    line_width: int = 8,
 ) -> tuple[EvidenceRectangle, ...]:
     if not isinstance(image, Image.Image):
         raise ValueError("image must be a Pillow Image")
@@ -90,8 +90,12 @@ def draw_red_annotations(
         return ()
 
     draw = ImageDraw.Draw(image)
-    annotations: list[EvidenceRectangle] = []
-    for rectangle in rectangles:
+    rendered_rectangles = (
+        (_union_rectangle(rectangles),)
+        if state is EvidenceState.NO_MODEL and rectangles
+        else rectangles
+    )
+    for rectangle in rendered_rectangles:
         right = rectangle.x + rectangle.width - 1
         bottom = rectangle.y + rectangle.height - 1
         draw.rectangle(
@@ -99,6 +103,9 @@ def draw_red_annotations(
             outline=(255, 0, 0),
             width=line_width,
         )
+
+    annotations: list[EvidenceRectangle] = []
+    for rectangle in rectangles:
         annotations.append(
             EvidenceRectangle(
                 role=rectangle.role,
@@ -109,3 +116,17 @@ def draw_red_annotations(
             )
         )
     return tuple(annotations)
+
+
+def _union_rectangle(rectangles: tuple[ScreenRect, ...]) -> ScreenRect:
+    left = min(rectangle.x for rectangle in rectangles)
+    top = min(rectangle.y for rectangle in rectangles)
+    right = max(rectangle.x + rectangle.width for rectangle in rectangles)
+    bottom = max(rectangle.y + rectangle.height for rectangle in rectangles)
+    return ScreenRect(
+        x=left,
+        y=top,
+        width=right - left,
+        height=bottom - top,
+        role="result_region",
+    )

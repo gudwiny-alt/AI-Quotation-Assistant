@@ -42,17 +42,11 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = (
-    "华为官网硬截图取价补强与天猫苹果同屏保护版（六品牌三渠道）2026.09.02.164"
-)
+APP_BUILD_LABEL = "终端福建分公司铺货报价智能体 2026.09.02.164"
 BETA_NOTICE = (
-    f"{APP_BUILD_LABEL}：选中品牌依次执行全部官网、全部天猫，最后执行全部京东；"
-    "京东独立登录状态会持久保留，首次使用无需预先登录；"
-    "遇到登录或验证页面时，"
-    "完成后点击“继续当前任务”。京东安全验证最多人工重试2次，"
-    "仍未通过会记录当前任务并继续后续京东记录，已完成的官网和天猫不受影响。"
-    "程序在当前受控页中搜索、读取匹配商品卡并进入正式详情页。"
+    "执行顺序：品牌官网、天猫、京东；遇到登录或验证页面时，人工登录完成后点击“继续当前任务”按钮。"
 )
+AUTHOR_CREDIT = "Design by Gudwin"
 
 CorePipeline = Callable[[InputPaths, QuoteMonth], CoreRunResult]
 DesktopPipeline = Callable[[FullPipelineRequest], FullPipelineResult]
@@ -422,24 +416,44 @@ class QuoteApp:
         self._schedule_initial_readiness_check()
 
     def _build(self) -> None:
-        self.root.title(f"资金物流平台铺货报价 - {APP_BUILD_LABEL}")
+        self.root.title(APP_BUILD_LABEL)
         self.root.geometry("900x620")
-        frame = ttk.Frame(self.root, padding=16)
+        frame = ttk.Frame(self.root, padding=18)
         frame.grid(sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
 
-        notice = ttk.Label(frame, text=BETA_NOTICE, foreground="#B45309")
-        notice.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 12))
-        self._add_file_row(frame, 1, "基础表", self.base_var, False)
-        self._add_file_row(frame, 2, "营销商品信息查询表", self.marketing_var, False)
-        self._add_file_row(frame, 3, "BOP资源信息表", self.bop_var, False)
-        self._add_file_row(frame, 4, "输出目录", self.output_dir_var, True)
+        ttk.Label(
+            frame,
+            text=APP_BUILD_LABEL,
+            font=("Helvetica", 17, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        notice = ttk.Label(
+            frame,
+            text=BETA_NOTICE,
+            foreground="#4B5563",
+            wraplength=840,
+            justify="left",
+        )
+        notice.grid(row=1, column=0, columnspan=3, sticky="w", pady=(5, 10))
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10)
+        )
 
-        ttk.Label(frame, text="报价月份").grid(row=5, column=0, sticky="w", pady=4)
-        month_frame = ttk.Frame(frame)
-        month_frame.grid(row=5, column=1, columnspan=2, sticky="w", pady=4)
+        files = ttk.LabelFrame(frame, text="数据文件", padding=10)
+        files.grid(row=3, column=0, columnspan=3, sticky="ew")
+        files.columnconfigure(1, weight=1)
+        self._add_file_row(files, 0, "基础表", self.base_var, False)
+        self._add_file_row(files, 1, "营销商品信息查询表", self.marketing_var, False)
+        self._add_file_row(files, 2, "BOP资源信息表", self.bop_var, False)
+        self._add_file_row(files, 3, "输出目录", self.output_dir_var, True)
+
+        settings = ttk.LabelFrame(frame, text="报价设置", padding=10)
+        settings.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Label(settings, text="报价月份").grid(row=0, column=0, sticky="w")
+        month_frame = ttk.Frame(settings)
+        month_frame.grid(row=0, column=1, sticky="w", padx=(12, 0))
         ttk.Entry(month_frame, width=8, textvariable=self.year_var).grid(row=0, column=0)
         ttk.Label(month_frame, text="年").grid(row=0, column=1, padx=(4, 12))
         ttk.Combobox(
@@ -461,8 +475,8 @@ class QuoteApp:
             width=max(len(mode) for mode in _RUN_MODE_OPTIONS),
         ).grid(row=0, column=5)
 
-        actions = ttk.Frame(frame)
-        actions.grid(row=6, column=0, columnspan=3, sticky="w", pady=(12, 8))
+        actions = ttk.LabelFrame(frame, text="操作", padding=10)
+        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="开始自动报价", command=self.run).grid(row=0, column=0)
         ttk.Button(
             actions,
@@ -493,12 +507,25 @@ class QuoteApp:
         )
         self.cancel_button.grid(row=1, column=1, pady=(8, 0))
 
-        ttk.Label(frame, text="运行结果").grid(row=7, column=0, sticky="nw", pady=(4, 0))
-        self.status = scrolledtext.ScrolledText(frame, width=72, height=8, state="disabled")
-        self.status.grid(row=7, column=1, columnspan=2, sticky="nsew", pady=(4, 0))
+        result_frame = ttk.LabelFrame(frame, text="运行结果", padding=10)
+        result_frame.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        result_frame.columnconfigure(0, weight=1)
+        self.status = scrolledtext.ScrolledText(
+            result_frame,
+            width=72,
+            height=8,
+            state="disabled",
+        )
+        self.status.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(
+            frame,
+            text=AUTHOR_CREDIT,
+            foreground="#9CA3AF",
+            font=("Helvetica", 9),
+        ).grid(row=7, column=0, columnspan=3, sticky="e", pady=(8, 0))
 
     def _add_file_row(
-        self, frame: ttk.Frame, row: int, label: str, variable: tk.StringVar, directory: bool
+        self, frame: tk.Misc, row: int, label: str, variable: tk.StringVar, directory: bool
     ) -> None:
         ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=4)
