@@ -2269,6 +2269,34 @@ def test_tmall_no_model_rereads_capture_rectangles_after_result_positioning() ->
     assert reader() == observation.semantic_state
 
 
+def test_tmall_no_model_capture_prefers_the_store_search_box_over_global_search() -> None:
+    """The proof frame must start at the store query, not Tmall's global box."""
+    html = _live_observed_html("no_model.html").replace(
+        '<main data-screen="results" hidden>',
+        '<main data-screen="results" hidden>'
+        '<form name="SearchForm" action="https://xiaomi.tmall.com/search.htm?scene=taobao_shop">'
+        '<input class="navsearch-text" name="keyword" value="小米 15" '
+        'style="left:120px;top:90px;width:360px;height:38px"></form>',
+        1,
+    )
+    page = _FixturePage(html=html, after_search_url=_LIVE_RESULTS_URL)
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task,
+        cast(Any, page),
+        observation.semantic_state,
+    )
+
+    keyword = next(rect for rect in rectangles if rect.role == "search_keyword")
+    assert keyword.x == 120
+    assert keyword.y == 90
+    assert keyword.width == 360
+
+
 @pytest.mark.parametrize(
 "result_url",
     [

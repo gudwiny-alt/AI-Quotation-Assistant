@@ -240,6 +240,30 @@ class _OppoNoModelPageWithVisibleQuery(
         empty_result.text_parts = ["没有更多了"]
 
 
+class _OppoBusyNoModelPage(_OppoNoModelPageWithVisibleQuery):
+    def __init__(self) -> None:
+        super().__init__()
+        results = next(
+            node
+            for node in self.root.descendants()
+            if node.attrs.get("data-screen") == "results"
+        )
+        dialog = next(
+            node
+            for node in results.descendants()
+            if node.attrs.get("data-oppo-role") == "search-dialog"
+        )
+        self.busy = _OfficialNode("div", {"role": "progressbar"}, dialog)
+        dialog.children.append(self.busy)
+        self.busy_waits = 0
+
+    def wait_for_timeout(self, milliseconds: float) -> None:
+        self.busy_waits += 1
+        if self.busy_waits >= 5:
+            self.busy.attrs["hidden"] = ""
+        super().wait_for_timeout(milliseconds)
+
+
 def _spec() -> Any:
     return next(
         spec
@@ -869,6 +893,45 @@ def test_oppo_no_model_capture_uses_80_percent_and_restores_after_capture() -> N
     adapter.restore_capture_view(task, page, observation.semantic_state)
 
     assert page.capture_scale == 1.0
+
+
+def test_oppo_search_waits_until_the_live_loading_overlay_is_gone() -> None:
+    page = _OppoBusyNoModelPage()
+
+    observation = _adapter().observe(_task(), page)
+
+    assert observation.outcome is BusinessOutcome.NO_MODEL
+    assert page.busy_waits >= 5
+
+
+def test_oppo_no_model_capture_rereads_live_geometry_after_scaling() -> None:
+    """Do not frame the stale pre-scale dialog geometry."""
+    adapter = _adapter()
+    task = _task()
+    page = _OppoNoModelPageWithVisibleQuery()
+    observation = adapter.observe(task, page)
+    query = next(
+        node
+        for node in page.root.descendants()
+        if node.attrs.get("data-oppo-role") == "search-query"
+    )
+    results = next(
+        node
+        for node in page.root.descendants()
+        if node.attrs.get("data-oppo-role") == "results"
+    )
+    query.attrs["style"] = "left:70px;top:55px;width:420px;height:42px"
+    results.attrs["style"] = "left:70px;top:125px;width:1180px;height:620px"
+
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    rectangles = adapter.capture_rectangles_for_capture(
+        task, page, observation.semantic_state
+    )
+
+    keyword = next(rect for rect in rectangles if rect.role == "search_keyword")
+    region = next(rect for rect in rectangles if rect.role == "result_region")
+    assert (keyword.x, keyword.y, keyword.width, keyword.height) == (70, 55, 420, 42)
+    assert (region.x, region.y, region.width, region.height) == (70, 125, 1180, 620)
 
 
 def test_oppo_no_model_capture_keeps_the_observed_search_view_after_scale() -> None:

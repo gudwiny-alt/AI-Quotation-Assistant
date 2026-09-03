@@ -1580,12 +1580,11 @@ def test_apple_formal_capture_does_not_reread_full_business_state() -> None:
     )
 
 
-def test_apple_capture_rectangles_reuse_the_prepared_final_frame() -> None:
-    """React must not get a second chance to invalidate an accepted frame."""
+def test_apple_capture_restores_the_verified_164_final_frame_sequence() -> None:
+    """Apple's proven .164 flow verifies once before and once at capture."""
     from quote_app.sites.official_brands.apple import AppleOfficialAdapter
-    from quote_app.tasks.retry import LayoutRecognitionError
 
-    class _SingleFinalFrameAdapter(AppleOfficialAdapter):
+    class _RecordedFinalFrameAdapter(AppleOfficialAdapter):
         final_frame_reads = 0
 
         def _final_capture_state(  # type: ignore[override]
@@ -1595,15 +1594,13 @@ def test_apple_capture_rectangles_reuse_the_prepared_final_frame() -> None:
             expected: VerifiedSemanticState,
         ) -> VerifiedSemanticState:
             self.final_frame_reads += 1
-            if self.final_frame_reads > 1:
-                raise LayoutRecognitionError("Apple React frame rerendered")
             return super()._final_capture_state(task, page, expected)  # type: ignore[arg-type]
 
     page = _AppleFixturePage(
         (_FIXTURES / "capacity_card_price.html").read_text(encoding="utf-8")
     )
     task = replace(_apple_task(), storage="256GB", color="黑色")
-    adapter = _SingleFinalFrameAdapter(_apple_spec())
+    adapter = _RecordedFinalFrameAdapter(_apple_spec())
     observation = adapter.observe(task, page)
 
     adapter.prepare_capture_view(task, page, observation.semantic_state)
@@ -1613,7 +1610,7 @@ def test_apple_capture_rectangles_reuse_the_prepared_final_frame() -> None:
         observation.semantic_state,
     )
 
-    assert adapter.final_frame_reads == 1
+    assert adapter.final_frame_reads == 2
     assert tuple(rectangle.role for rectangle in rectangles) == (
         "title",
         "price",

@@ -992,7 +992,7 @@ class TmallAdapter:
             TMALL_RESULT_REGIONS,
             semantic_name="result region",
         )
-        result_search_input = self._validated_result_search_input(
+        result_search_input = self._capture_result_search_input(
             browser_page,
             task.model_name,
         )
@@ -1002,11 +1002,16 @@ class TmallAdapter:
             # Restore that already verified value without submitting another
             # search so the formal no-model screenshot visibly proves both the
             # requested keyword and the result region.
-            result_search_input = _unique_visible_locator(
+            result_search_input = self._capture_result_search_input(
                 browser_page,
-                TMALL_SEARCH_INPUTS,
-                semantic_name="result search keyword",
+                task.model_name,
+                accept_blank=True,
             )
+            if result_search_input is None:
+                raise CaptureViewGeometryError(
+                    "Tmall no-model search input is unavailable for capture",
+                    safe_stage="搜索框定位",
+                )
             result_search_input.fill(task.model_name)
             if normalize_product_text(
                 result_search_input.input_value()
@@ -1019,6 +1024,47 @@ class TmallAdapter:
             _css_rect(result_search_input, "search_keyword"),
             _css_rect(result_region, "result_region"),
         )
+
+    def _capture_result_search_input(
+        self,
+        page: Any,
+        model_name: str,
+        *,
+        accept_blank: bool = False,
+    ) -> Any | None:
+        """Prefer the store's own query row for no-model visual evidence."""
+
+        store_selectors = (
+            'form[name="SearchForm"] input.navsearch-text[name="keyword"]',
+        )
+        try:
+            store_input = _unique_visible_locator(
+                page,
+                store_selectors,
+                semantic_name="store result search keyword",
+            )
+        except LayoutRecognitionError:
+            store_input = None
+        if store_input is not None:
+            value = store_input.input_value()
+            if isinstance(value, str) and normalize_product_text(
+                value
+            ) == normalize_product_text(model_name):
+                return store_input
+            if isinstance(value, str) and not value.strip():
+                if accept_blank:
+                    return store_input
+                # The approved search URL already proves the submitted model;
+                # the caller may restore that value without resubmitting.
+                return None
+        fallback = self._validated_result_search_input(page, model_name)
+        if fallback is None and accept_blank:
+            return _unique_visible_locator(
+                page,
+                TMALL_SEARCH_INPUTS,
+                semantic_name="result search keyword",
+            )
+        return fallback
 
     def _read_legal_no_state(
         self,

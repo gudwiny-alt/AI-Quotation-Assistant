@@ -86,6 +86,12 @@ _EMPTY_RESULTS = (
     '[class*="empty-result"]',
     '[class*="no-result"]',
 )
+_SEARCH_BUSY_INDICATORS = (
+    '[role="progressbar"]',
+    '[aria-busy="true"]',
+    ".v-progress-circular",
+    ".v-progress-linear",
+)
 _PRODUCT_LINKS = (
     '[data-oppo-role="product-link"]',
     'a[href*="/cn/web/products/"]',
@@ -387,11 +393,20 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                 if expected.outcome is BusinessOutcome.NO_MODEL:
                     ensure_capture_scale(browser_page, scale=0.8)
                 if expected.outcome is BusinessOutcome.NO_MODEL:
-                    # Observation already proved the search query and result region.
-                    # Scaling the stable page is presentation only; do not reject a
-                    # formal screenshot because cached locator geometry changed.
-                    self._prepared_rectangles[key] = tuple(
-                        expected.css_rectangles
+                    # Observation proved these exact live nodes.  Re-read their
+                    # boxes after presentation scaling so the proof frame follows
+                    # the rendered dialog instead of stale pre-scale geometry.
+                    proof_locators = _OBSERVED_NO_MODEL_PROOFS.get(
+                        (id(browser_page), task.task_id)
+                    )
+                    if proof_locators is None:
+                        raise LayoutRecognitionError(
+                            "OPPO no-model proof nodes are unavailable"
+                        )
+                    keyword, region = proof_locators
+                    self._prepared_rectangles[key] = (
+                        _css_rect(keyword, "search_keyword"),
+                        _css_rect(region, "result_region"),
                     )
                 else:
                     current_business = self._read_business_state(task, browser_page)
@@ -528,7 +543,11 @@ class OppoOfficialAdapter(LiveOfficialAdapterBase):
                 else None
             )
             explicit_empty = self._explicit_empty_result(scope)
-            if stable_reads >= 3 and region is not None:
+            search_busy = (
+                scope is not None
+                and _first_visible(scope, _SEARCH_BUSY_INDICATORS) is not None
+            )
+            if stable_reads >= 3 and region is not None and not search_busy:
                 if self._preferred_exact_result_link(page, task) is not None:
                     return
                 if keyword is not None:

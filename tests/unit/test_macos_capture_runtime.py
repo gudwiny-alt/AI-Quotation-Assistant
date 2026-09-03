@@ -3268,7 +3268,13 @@ def test_darwin_beta_no_model_capture_draws_and_removes_visible_proof_frame(
     assert len(page.evaluations) == 1
     install_script, payload = page.evaluations[0]
     assert "quotation-no-model-proof-frame" in install_script
-    assert 'border: "4px solid rgb(255, 0, 0)"' in install_script
+    assert "getComputedStyle(document.documentElement).zoom" in install_script
+    assert "bounds.left / zoom" in install_script
+    assert "bounds.top / zoom" in install_script
+    assert "bounds.width / zoom" in install_script
+    assert "bounds.height / zoom" in install_script
+    assert "4 / zoom" in install_script
+    assert "solid rgb(255, 0, 0)" in install_script
     assert 'background: "transparent"' in install_script
     assert '"pointer-events": "none"' in install_script
     assert '"z-index": "2147483647"' in install_script

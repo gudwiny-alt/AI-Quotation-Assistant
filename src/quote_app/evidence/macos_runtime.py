@@ -82,17 +82,25 @@ _INSTALL_NO_MODEL_PROOF_FRAME = f"""
 (bounds) => {{
   const frameId = "{_NO_MODEL_PROOF_FRAME_ID}";
   document.getElementById(frameId)?.remove();
+  // Playwright bounding boxes are already expressed in the visual viewport's
+  // post-zoom CSS coordinates.  The proof frame is appended beneath the
+  // zoomed root element, so compensate once here or it would be scaled a
+  // second time (shifted up/left and too narrow in the macOS screenshot).
+  const parsedZoom = Number.parseFloat(
+    getComputedStyle(document.documentElement).zoom
+  );
+  const zoom = Number.isFinite(parsedZoom) && parsedZoom > 0 ? parsedZoom : 1;
   const frame = document.createElement("div");
   frame.id = frameId;
   frame.setAttribute("aria-hidden", "true");
   const properties = {{
     position: "fixed",
-    left: `${{bounds.left}}px`,
-    top: `${{bounds.top}}px`,
-    width: `${{bounds.width}}px`,
-    height: `${{bounds.height}}px`,
+    left: `${{bounds.left / zoom}}px`,
+    top: `${{bounds.top / zoom}}px`,
+    width: `${{bounds.width / zoom}}px`,
+    height: `${{bounds.height / zoom}}px`,
     "box-sizing": "border-box",
-    border: "4px solid rgb(255, 0, 0)",
+    border: `${{4 / zoom}}px solid rgb(255, 0, 0)`,
     "border-radius": "0",
     background: "transparent",
     "pointer-events": "none",
