@@ -6,6 +6,9 @@ from pathlib import Path
 import re
 
 from openpyxl import load_workbook  # type: ignore[import-untyped]
+from openpyxl.drawing.spreadsheet_drawing import (  # type: ignore[import-untyped]
+    TwoCellAnchor,
+)
 from openpyxl.workbook.workbook import Workbook  # type: ignore[import-untyped]
 from openpyxl.xml.functions import tostring  # type: ignore[import-untyped]
 from PIL import Image
@@ -259,6 +262,36 @@ def test_writer_expands_evidence_cells_for_readable_screenshot_previews(
         assert len(sheet._images) == 1
         assert sheet._images[0].width >= 145
         assert sheet._images[0].height >= 90
+    finally:
+        workbook.close()
+
+
+def test_writer_binds_evidence_image_to_entire_target_cell(
+    tmp_path: Path,
+) -> None:
+    """Break caught: a fixed-size picture does not resize with its cell."""
+
+    source = BytesIO()
+    Image.new("RGB", (1512, 982), (34, 48, 71)).save(source, format="PNG")
+    output = write_quote_workbook(
+        QuoteWriteRequest(
+            quote_month=QuoteMonth(2026, 8),
+            rows=_rows(),
+            template_path=TEMPLATE_PATH,
+            output_dir=tmp_path,
+            evidence_images=(
+                QuoteEvidenceImage(anchor="AL2", payload=source.getvalue()),
+            ),
+        )
+    )
+
+    workbook = load_workbook(output, data_only=False)
+    try:
+        image = workbook["5G手机"]._images[0]
+        assert isinstance(image.anchor, TwoCellAnchor)
+        assert image.anchor.editAs == "twoCell"
+        assert (image.anchor._from.col, image.anchor._from.row) == (37, 1)
+        assert (image.anchor.to.col, image.anchor.to.row) == (38, 2)
     finally:
         workbook.close()
 

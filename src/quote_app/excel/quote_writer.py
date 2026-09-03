@@ -13,8 +13,14 @@ from typing import Iterator
 import warnings
 
 from openpyxl.drawing.image import Image as OpenpyxlImage  # type: ignore[import-untyped]
-from openpyxl.utils.units import points_to_pixels  # type: ignore[import-untyped]
-from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
+from openpyxl.drawing.spreadsheet_drawing import (  # type: ignore[import-untyped]
+    AnchorMarker,
+    TwoCellAnchor,
+)
+from openpyxl.utils import (  # type: ignore[import-untyped]
+    column_index_from_string,
+    get_column_letter,
+)
 from openpyxl.worksheet.datavalidation import (  # type: ignore[import-untyped]
     DataValidation,
 )
@@ -340,30 +346,19 @@ def _insert_evidence_images(
             raise AssertionError("validated evidence anchor must be parseable")
         column_letter = column.group()
         row_number = int(row.group())
-        width = sheet.column_dimensions[column_letter].width
-        width_pixels = _column_width_pixels(float(width or 13))
-        height_points = (
-            sheet.row_dimensions[row_number].height
-            or sheet.sheet_format.defaultRowHeight
-            or 15
-        )
-        height_pixels = points_to_pixels(float(height_points))
-        available_width = max(1, width_pixels - 4)
-        available_height = max(1, height_pixels - 4)
         if image.width <= 0 or image.height <= 0:
             raise ValueError("evidence image dimensions must be positive")
-        scale = min(
-            available_width / image.width,
-            available_height / image.height,
-            1,
+        zero_based_column = column_index_from_string(column_letter) - 1
+        zero_based_row = row_number - 1
+        image.anchor = TwoCellAnchor(
+            editAs="twoCell",
+            _from=AnchorMarker(
+                col=zero_based_column,
+                row=zero_based_row,
+            ),
+            to=AnchorMarker(
+                col=zero_based_column + 1,
+                row=zero_based_row + 1,
+            ),
         )
-        image.width *= scale
-        image.height *= scale
-        image.anchor = evidence.anchor
         sheet.add_image(image)
-
-
-def _column_width_pixels(width: float) -> int:
-    if width < 1:
-        return int(width * 12 + 0.5)
-    return int(width * 7 + 5)
