@@ -13,6 +13,7 @@ from quote_app.browser.session import (
     NativeChromeCdpSession,
     PersistentBrowserSession,
     jd_profile_dir_for,
+    official_profile_dir_for,
 )
 from quote_app.evidence.macos_runtime import MacFormalCaptureRuntime
 from quote_app.evidence.models import MacCapturePolicy, validate_mac_capture_policy
@@ -192,7 +193,7 @@ def run_website_tasks(
     *,
     runtime_factory: RuntimeFactory = _default_runtime_factory,
 ) -> WebsiteRunSummary:
-    """Run official and Tmall first, then finish JD in an isolated session."""
+    """Run official, Tmall, and JD in three isolated ordinary Chrome sessions."""
     if not isinstance(request, WebsiteRunRequest):
         raise ValueError("request must be a WebsiteRunRequest")
     if not callable(runtime_factory):
@@ -211,8 +212,11 @@ def run_website_tasks(
             checkpoint_errors=checkpoint_errors,
         )
         ordered_tasks = tuple(sorted(request.tasks, key=task_sort_key))
-        regular_tasks = tuple(
-            task for task in ordered_tasks if task.channel is not WebsiteChannel.JD
+        official_tasks = tuple(
+            task for task in ordered_tasks if task.channel is WebsiteChannel.OFFICIAL
+        )
+        tmall_tasks = tuple(
+            task for task in ordered_tasks if task.channel is WebsiteChannel.TMALL
         )
         jd_tasks = tuple(
             task for task in ordered_tasks if task.channel is WebsiteChannel.JD
@@ -223,14 +227,25 @@ def run_website_tasks(
                 PersistentBrowserSession | NativeChromeCdpSession,
             ]
         ] = []
-        if regular_tasks or not ordered_tasks:
+        if official_tasks:
             phases.append(
                 (
-                    regular_tasks,
+                    official_tasks,
+                    _browser_session_for_runtime(
+                        runtime,
+                        official_profile_dir_for(request.profile_dir),
+                        session_type=NativeChromeCdpSession,
+                    ),
+                )
+            )
+        if tmall_tasks:
+            phases.append(
+                (
+                    tmall_tasks,
                     _browser_session_for_runtime(
                         runtime,
                         request.profile_dir,
-                        session_type=PersistentBrowserSession,
+                        session_type=NativeChromeCdpSession,
                     ),
                 )
             )
@@ -241,6 +256,17 @@ def run_website_tasks(
                     _browser_session_for_runtime(
                         runtime,
                         jd_profile_dir_for(request.profile_dir),
+                        session_type=NativeChromeCdpSession,
+                    ),
+                )
+            )
+        if not ordered_tasks:
+            phases.append(
+                (
+                    (),
+                    _browser_session_for_runtime(
+                        runtime,
+                        request.profile_dir,
                         session_type=NativeChromeCdpSession,
                     ),
                 )

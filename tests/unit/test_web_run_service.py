@@ -660,7 +660,7 @@ def test_service_constructs_one_registry_browser_runtime_and_serial_runner(
 
     class Browser:
         def __init__(self, profile_dir: Path) -> None:
-            assert profile_dir == tmp_path / "profile"
+            assert profile_dir == tmp_path / "profile-official"
             lifecycle.append("browser")
 
         def __enter__(self):
@@ -721,7 +721,7 @@ def test_service_constructs_one_registry_browser_runtime_and_serial_runner(
     ]
 
 
-def test_service_finishes_official_and_tmall_before_isolated_jd_session(
+def test_service_runs_three_channels_in_isolated_native_chrome_sessions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -751,32 +751,29 @@ def test_service_finishes_official_and_tmall_before_isolated_jd_session(
         def close(self) -> None:
             lifecycle.append("repository-close")
 
-    class Browser:
+    class LegacyBrowser:
         def __init__(self, profile_dir: Path, **_kwargs: object) -> None:
-            assert profile_dir == tmp_path / "profile"
+            raise AssertionError(f"legacy Playwright launch used: {profile_dir}")
+
+    class NativeBrowser:
+        def __init__(self, profile_dir: Path, **_kwargs: object) -> None:
+            self.phase = {
+                tmp_path / "profile-official": "official",
+                tmp_path / "profile": "tmall",
+                tmp_path / "profile-jd": "jd",
+            }[profile_dir]
 
         def __enter__(self):
-            lifecycle.append("regular-enter")
+            lifecycle.append(f"{self.phase}-enter")
             return self
 
         def __exit__(self, *_args: object) -> None:
-            lifecycle.append("regular-close")
-
-    class JdBrowser:
-        def __init__(self, profile_dir: Path, **_kwargs: object) -> None:
-            assert profile_dir == tmp_path / "profile-jd"
-
-        def __enter__(self):
-            lifecycle.append("jd-enter")
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            lifecycle.append("jd-close")
+            lifecycle.append(f"{self.phase}-close")
 
     class Runner:
         def __init__(self, **kwargs: object) -> None:
             browser = kwargs["browser_session"]
-            self.phase = "jd" if isinstance(browser, JdBrowser) else "regular"
+            self.phase = browser.phase
             self.scheduler = SimpleNamespace(waiting_action=None)
 
         def run(
@@ -784,10 +781,7 @@ def test_service_finishes_official_and_tmall_before_isolated_jd_session(
             received_tasks: tuple[WebsiteTask, ...],
         ) -> tuple[WebsiteResult, ...]:
             phase_tasks.append(tuple(task.task_id for task in received_tasks))
-            if self.phase == "regular":
-                assert all(task.channel is not WebsiteChannel.JD for task in received_tasks)
-            else:
-                assert all(task.channel is WebsiteChannel.JD for task in received_tasks)
+            assert all(task.channel.value == self.phase for task in received_tasks)
             return tuple(results[task.task_id] for task in received_tasks)
 
     runtime = SimpleNamespace(
@@ -795,8 +789,8 @@ def test_service_finishes_official_and_tmall_before_isolated_jd_session(
         capture_context_provider=lambda *_args: None,
     )
     monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
-    _patch_browser_sessions(monkeypatch, web_run, Browser)
-    monkeypatch.setattr(web_run, "NativeChromeCdpSession", JdBrowser)
+    monkeypatch.setattr(web_run, "PersistentBrowserSession", LegacyBrowser)
+    monkeypatch.setattr(web_run, "NativeChromeCdpSession", NativeBrowser)
     monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
 
     summary = web_run.run_website_tasks(
@@ -804,10 +798,12 @@ def test_service_finishes_official_and_tmall_before_isolated_jd_session(
         runtime_factory=lambda _registry: runtime,
     )
 
-    assert phase_tasks == [("official", "tmall"), ("jd",)]
+    assert phase_tasks == [("official",), ("tmall",), ("jd",)]
     assert lifecycle == [
-        "regular-enter",
-        "regular-close",
+        "official-enter",
+        "official-close",
+        "tmall-enter",
+        "tmall-close",
         "jd-enter",
         "jd-close",
         "repository-close",
@@ -817,6 +813,77 @@ def test_service_finishes_official_and_tmall_before_isolated_jd_session(
         results[task.task_id].evidence.path  # type: ignore[union-attr]
         for task in tasks
     }
+
+
+def test_native_channel_task_failure_does_not_skip_later_native_phase(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from quote_app.services import web_run
+
+    official = _task("official", channel=WebsiteChannel.OFFICIAL)
+    tmall = _task("tmall", channel=WebsiteChannel.TMALL)
+    jd = _task("jd", channel=WebsiteChannel.JD)
+    tasks = (official, tmall, jd)
+    results = {
+        official.task_id: _failure(official, "CAPTURE_GEOMETRY"),
+        tmall.task_id: _success(
+            tmall,
+            _evidence(tmp_path / "tmall.png", b"tmall"),
+        ),
+        jd.task_id: _success(jd, _evidence(tmp_path / "jd.png", b"jd")),
+    }
+    entered_phases: list[str] = []
+
+    class Repository:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def task_state(self, task_id: str) -> TaskState:
+            return results[task_id].state
+
+        def close(self) -> None:
+            pass
+
+    class Browser:
+        def __init__(self, profile_dir: Path, **_kwargs: object) -> None:
+            self.phase = profile_dir.name.removeprefix("profile-")
+            if self.phase == "profile":
+                self.phase = "tmall"
+
+        def __enter__(self):
+            entered_phases.append(self.phase)
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    class Runner:
+        def __init__(self, **_kwargs: object) -> None:
+            self.scheduler = SimpleNamespace(waiting_action=None)
+
+        def run(
+            self,
+            received_tasks: tuple[WebsiteTask, ...],
+        ) -> tuple[WebsiteResult, ...]:
+            return tuple(results[task.task_id] for task in received_tasks)
+
+    runtime = SimpleNamespace(
+        evidence_capture=lambda: SimpleNamespace(capture=lambda _request: None),
+        capture_context_provider=lambda *_args: None,
+    )
+    monkeypatch.setattr(web_run, "SQLiteTaskRepository", Repository)
+    monkeypatch.setattr(web_run, "NativeChromeCdpSession", Browser)
+    monkeypatch.setattr(web_run, "WebsiteTaskRunner", Runner)
+
+    summary = web_run.run_website_tasks(
+        _request(tmp_path, tasks),
+        runtime_factory=lambda _registry: runtime,
+    )
+
+    assert entered_phases == ["official", "tmall", "jd"]
+    assert summary.technical_failure == 1
+    assert summary.succeeded == 2
 
 
 def test_checkpoint_snapshot_allows_jd_tasks_to_be_registered_in_later_phase(
@@ -924,14 +991,12 @@ def test_service_darwin_beta_uses_manual_window_session_defaults(
     )
 
     assert summary.succeeded == 0
-    assert browser_options == [
-        {
-            "launch_args": (
-                "--window-position=24,49",
-                "--window-size=1464,893",
-            )
-        }
-    ]
+    assert len(browser_options) == 1
+    assert browser_options[0]["launch_args"] == (
+        "--window-position=24,49",
+        "--window-size=1464,893",
+    )
+    assert callable(browser_options[0]["startup_preflight"])
 
 
 def test_service_preserves_partial_results_login_and_authoritative_failure_codes(

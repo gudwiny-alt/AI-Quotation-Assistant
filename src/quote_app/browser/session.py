@@ -93,6 +93,13 @@ def jd_profile_dir_for(profile_dir: Path) -> Path:
     return normalized.with_name(f"{normalized.name}-jd")
 
 
+def official_profile_dir_for(profile_dir: Path) -> Path:
+    """Return the stable, application-owned profile used only for official sites."""
+
+    normalized = Path(profile_dir).expanduser().resolve()
+    return normalized.with_name(f"{normalized.name}-official")
+
+
 class PersistentBrowserSession:
     """One visible installed-browser context backed by a locked local profile."""
 

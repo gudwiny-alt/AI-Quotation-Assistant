@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from quote_app.browser.channel_detection import BrowserChoice, detect_browser_choice
-from quote_app.browser.session import jd_profile_dir_for, prepare_dedicated_profile
+from quote_app.browser.session import (
+    jd_profile_dir_for,
+    official_profile_dir_for,
+    prepare_dedicated_profile,
+)
 
 JD_LOGIN_URL = "https://passport.jd.com/new/login.aspx"
 TMALL_LOGIN_URL = "https://login.taobao.com/member/login.jhtml"
@@ -26,6 +30,7 @@ def open_login_browser(
 
     Credentials, cookies, and verification codes remain entirely within the browser.
     """
+    prepare_dedicated_profile(official_profile_dir_for(profile_dir))
     tmall_profile = prepare_dedicated_profile(profile_dir)
     jd_profile = prepare_dedicated_profile(jd_profile_dir_for(profile_dir))
     choice = browser_choice or detect_browser_choice()
