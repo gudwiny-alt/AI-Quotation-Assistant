@@ -125,6 +125,11 @@ class _Locator:
         self._fresh()
         return self.nodes[0].get("value", "")
 
+    def fill(self, value: str) -> None:
+        self._fresh()
+        self.nodes[0].set("value", value)
+        self.page.search_input_fills.append(value)
+
     def click(self) -> None:
         self._fresh()
         node = self.nodes[0]
@@ -271,6 +276,7 @@ class _XiaomiFixturePage:
         self.main_price_group_fits = True
         self.proof_position_attempts = 0
         self.positioning_succeeds = True
+        self.search_input_fills: list[str] = []
 
     def goto(self, url: str, **_kwargs: object) -> None:
         if url.startswith("/"):
@@ -996,7 +1002,7 @@ def test_xiaomi_capture_layout_does_not_claim_oversized_proof_fits() -> None:
         ("no_color.html", BusinessOutcome.COLOR_UNAVAILABLE),
     ],
 )
-def test_xiaomi_configuration_no_revalidates_while_no_model_reuses_accepted_geometry(
+def test_xiaomi_capture_refreshes_geometry_after_view_preparation(
     fixture: str,
     outcome: BusinessOutcome,
 ) -> None:
@@ -1031,7 +1037,8 @@ def test_xiaomi_configuration_no_revalidates_while_no_model_reuses_accepted_geom
 
     assert verified == observation.semantic_state
     if outcome is BusinessOutcome.NO_MODEL:
-        assert rectangles == observation.css_rectangles
+        assert rectangles != observation.css_rectangles
+        assert rectangles[-1].x == 77
     else:
         assert rectangles[-1].x == 77
 
@@ -1390,9 +1397,9 @@ def test_xiaomi_no_model_capture_does_not_repeat_viewport_proof() -> None:
     assert 1200 in page.wait_timeout_milliseconds
 
 
-def test_xiaomi_empty_result_uses_exact_url_and_reuses_observed_page(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_xiaomi_empty_result_uses_exact_url_and_rewrites_visible_search_box() -> None:
+    """Break caught: the screenshot shows a site suggestion, not the task model."""
+
     adapter = _adapter()
     task = replace(_task(), model_name="REDMI R70 5G")
     page = _XiaomiFixturePage("empty_results.html")
@@ -1404,14 +1411,13 @@ def test_xiaomi_empty_result_uses_exact_url_and_reuses_observed_page(
 
     assert observation.outcome is BusinessOutcome.NO_MODEL
     assert "REDMI%20R70%205G" in observation.url
-    monkeypatch.setattr(
-        adapter,
-        "_no_model_proof_locators",
-        lambda *_args: (_ for _ in ()).throw(
-            AssertionError("accepted Xiaomi empty result must not be rediscovered")
-        ),
-    )
+    goto_calls = tuple(page.goto_calls)
     adapter.prepare_capture_view(task, page, observation.semantic_state)
+    assert page.locator('[data-xiaomi-role="search-keyword"]').input_value() == (
+        "REDMI R70 5G"
+    )
+    assert page.search_input_fills == ["REDMI R70 5G"]
+    assert tuple(page.goto_calls) == goto_calls
     assert tuple(
         rectangle.role
         for rectangle in adapter.capture_rectangles_for_capture(

@@ -458,10 +458,27 @@ class XiaomiOfficialAdapter(LiveOfficialAdapterBase):
                     raise LayoutRecognitionError(
                         "Xiaomi observed empty-result evidence is unavailable"
                     )
+                search = _first_visible(browser_page, _SEARCH_KEYWORD)
+                if search is None:
+                    raise LayoutRecognitionError(
+                        "Xiaomi visible search input is unavailable"
+                    )
+                search.fill(task.model_name)
+                if search.input_value().strip() != task.model_name:
+                    raise LayoutRecognitionError(
+                        "Xiaomi visible search input does not show the task model"
+                    )
+                keyword, region = self._no_model_proof_locators(
+                    task,
+                    browser_page,
+                )
                 # The result was already accepted in the observation phase.
                 # Native window activation can rebuild the DOM before formal
                 # capture, so old Playwright locators must not be a new gate.
-                self._prepared_rectangles[key] = rectangles
+                self._prepared_rectangles[key] = (
+                    _css_rect(keyword, "search_keyword"),
+                    _css_rect(region, "result_region"),
+                )
                 browser_page.wait_for_timeout(_CAPTURE_SETTLE_MS)
             else:
                 kind = (
