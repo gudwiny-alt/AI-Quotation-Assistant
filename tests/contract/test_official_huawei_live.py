@@ -1949,6 +1949,42 @@ def test_huawei_post_capture_reads_visible_anonymous_div_price() -> None:
     assert completed.price == Decimal("2199")
 
 
+def test_huawei_post_capture_ignores_related_product_price_before_main_price() -> None:
+    """Break caught: a related accessory's 199 replaces the main 2199."""
+
+    adapter = _adapter()
+    task = _task(model="HUAWEI Mate 70 Pro")
+    page = _HuaweiPage()
+    page.price_nodes()[0].text_parts = ["¥2199"]
+    _append_related_price(page, "¥199")
+    related = page.detail_root.children.pop()
+    page.detail_root.children.insert(0, related)
+    observation = adapter.observe_for_capture(task, page)
+    assert isinstance(observation, CaptureReadyObservation)
+
+    completed = adapter.finalize_observation(task, page, observation)
+
+    assert completed.price == Decimal("2199")
+
+
+def test_huawei_post_capture_never_uses_related_price_when_main_price_is_missing() -> None:
+    """Break caught: a saved screenshot is paired with an accessory price."""
+
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    for price in page.price_nodes():
+        price.attrs["hidden"] = ""
+    _append_related_price(page, "¥199")
+    observation = adapter.observe_for_capture(task, page)
+    assert isinstance(observation, CaptureReadyObservation)
+
+    with pytest.raises(NonRetryableTechnicalError) as captured:
+        adapter.finalize_observation(task, page, observation)
+
+    assert captured.value.code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
+
+
 def test_huawei_any_post_capture_price_exception_preserves_capture_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -984,6 +984,13 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         return locked
 
     def _current_price(self, page: Any) -> tuple[Decimal, Any]:
+        require_primary_detail_root = bool(
+            _visible(
+                page,
+                ('[data-prdid] #prd-detail-name[data-testid="prd-detail-name"]',),
+            )
+        )
+
         def accepted(
             candidate: Any,
             *,
@@ -992,6 +999,11 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         ) -> tuple[Decimal, Any] | None:
             style = candidate.evaluate(_PRICE_STYLE)
             if not isinstance(style, dict):
+                return None
+            if (
+                require_primary_detail_root
+                and style.get("primaryDetailRoot") is not True
+            ):
                 return None
             if style.get("effectiveLineThrough") is True:
                 return None
