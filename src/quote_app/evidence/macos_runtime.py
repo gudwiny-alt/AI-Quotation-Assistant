@@ -77,6 +77,9 @@ _MAC_VISUAL_REVIEW_WINDOW_ARGS = (
     "--window-position=24,49",
     "--window-size=1464,893",
 )
+_SAFE_WINDOW_HORIZONTAL_INSET = 24
+_SAFE_WINDOW_TOP_INSET = 16
+_SAFE_WINDOW_BOTTOM_INSET = 24
 _NO_MODEL_PROOF_FRAME_ID = "quotation-no-model-proof-frame"
 _INSTALL_NO_MODEL_PROOF_FRAME = f"""
 (bounds) => {{
@@ -112,6 +115,89 @@ _INSTALL_NO_MODEL_PROOF_FRAME = f"""
   document.documentElement.appendChild(frame);
 }}
 """
+
+
+def _normalize_native_chrome_page(page: Any) -> None:
+    context = getattr(page, "context", None)
+    if context is None:
+        return
+    _normalize_native_chrome_context(context, preferred_page=page)
+
+
+def _normalize_native_chrome_context(
+    context: Any,
+    *,
+    preferred_page: Any | None = None,
+) -> None:
+    pages = tuple(getattr(context, "pages", ()))
+    page = preferred_page or next(
+        (
+            candidate
+            for candidate in pages
+            if not callable(getattr(candidate, "is_closed", None))
+            or not candidate.is_closed()
+        ),
+        None,
+    )
+    if page is None:
+        raise RuntimeError("普通 Chrome 没有可用于窗口预检的页面")
+    available = page.evaluate(
+        """() => ({
+          availLeft: window.screen.availLeft,
+          availTop: window.screen.availTop,
+          availWidth: window.screen.availWidth,
+          availHeight: window.screen.availHeight,
+        })"""
+    )
+    safe = _safe_native_chrome_bounds(available)
+    session = context.new_cdp_session(page)
+    try:
+        target = session.send("Browser.getWindowForTarget")
+        window_id = target.get("windowId") if isinstance(target, Mapping) else None
+        if not isinstance(window_id, int):
+            raise RuntimeError("普通 Chrome 窗口身份不可用")
+        response = session.send(
+            "Browser.getWindowBounds",
+            {"windowId": window_id},
+        )
+        current = response.get("bounds") if isinstance(response, Mapping) else None
+        if not isinstance(current, Mapping):
+            raise RuntimeError("普通 Chrome 窗口边界不可用")
+        if any(current.get(name) != value for name, value in safe.items()):
+            session.send(
+                "Browser.setWindowBounds",
+                {"windowId": window_id, "bounds": safe},
+            )
+    finally:
+        detach = getattr(session, "detach", None)
+        if callable(detach):
+            detach()
+
+
+def _safe_native_chrome_bounds(available: object) -> dict[str, int | str]:
+    if not isinstance(available, Mapping):
+        raise RuntimeError("macOS Chrome 工作区不可用")
+    values: dict[str, int] = {}
+    for name in ("availLeft", "availTop", "availWidth", "availHeight"):
+        value = available.get(name)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise RuntimeError("macOS Chrome 工作区无效")
+        values[name] = int(round(value))
+    width = values["availWidth"] - 2 * _SAFE_WINDOW_HORIZONTAL_INSET
+    height = (
+        values["availHeight"]
+        - _SAFE_WINDOW_TOP_INSET
+        - _SAFE_WINDOW_BOTTOM_INSET
+    )
+    if width < 800 or height < 600:
+        raise RuntimeError("macOS Chrome 工作区过小")
+    return {
+        "left": values["availLeft"] + _SAFE_WINDOW_HORIZONTAL_INSET,
+        "top": values["availTop"] + _SAFE_WINDOW_TOP_INSET,
+        "width": width,
+        "height": height,
+        "windowState": "normal",
+    }
 _REMOVE_NO_MODEL_PROOF_FRAME = f"""
 () => document.getElementById("{_NO_MODEL_PROOF_FRAME_ID}")?.remove()
 """
@@ -332,7 +418,10 @@ class MacFormalCaptureRuntime:
     def browser_startup_preflight(
         self,
     ) -> Callable[[Any], None] | None:
-        """Fixed launch arguments establish the Mac pilot window contract."""
+        """Normalize an attached ordinary Chrome before any page is used."""
+
+        if self._uses_darwin_beta_visual_review():
+            return _normalize_native_chrome_context
         return None
 
     def _build_capture_context(
@@ -355,6 +444,8 @@ class MacFormalCaptureRuntime:
                     "CAPTURE_ENVIRONMENT",
                     "已验证页面状态无效",
                 )
+            if self._uses_darwin_beta_visual_review():
+                _normalize_native_chrome_page(page)
             permissions = self._permissions()
             first_sample = self._stage(
                 "CAPTURE_ENVIRONMENT",

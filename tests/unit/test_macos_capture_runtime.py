@@ -57,6 +57,59 @@ _DISPLAY = DisplayBounds(0, 0, 3024, 1964)
 _IDENTITY = BrowserWindowIdentity("macos", 5172, "901")
 
 
+class _WindowPreflightCdpSession:
+    def __init__(self) -> None:
+        self.bounds = {
+            "left": 6,
+            "top": 33,
+            "width": 1464,
+            "height": 863,
+            "windowState": "normal",
+        }
+        self.applied_bounds: list[dict[str, int | str]] = []
+
+    def send(
+        self,
+        method: str,
+        params: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if method == "Browser.getWindowForTarget":
+            return {"windowId": 71}
+        if method == "Browser.getWindowBounds":
+            return {"bounds": dict(self.bounds)}
+        if method == "Browser.setWindowBounds":
+            assert params is not None
+            assert params["windowId"] == 71
+            applied = dict(params["bounds"])  # type: ignore[arg-type]
+            self.applied_bounds.append(applied)
+            self.bounds.update(applied)
+            return {}
+        raise AssertionError(method)
+
+
+class _WindowPreflightPage:
+    def evaluate(self, _script: str) -> dict[str, int]:
+        return {
+            "availLeft": 0,
+            "availTop": 33,
+            "availWidth": 1470,
+            "availHeight": 863,
+        }
+
+
+class _WindowPreflightContext:
+    def __init__(self) -> None:
+        self.pages = [_WindowPreflightPage()]
+        self.cdp = _WindowPreflightCdpSession()
+
+    def new_cdp_session(
+        self,
+        page: _WindowPreflightPage,
+    ) -> _WindowPreflightCdpSession:
+        assert page is self.pages[0]
+        return self.cdp
+
+
 @pytest.mark.parametrize(
     "constructor",
     [
@@ -78,7 +131,7 @@ def test_visual_review_beta_is_rejected_outside_darwin(
         constructor()
 
 
-def test_darwin_beta_manual_layout_skips_startup_window_contract(
+def test_darwin_beta_manual_layout_uses_native_window_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("platform.system", lambda: "Darwin")
@@ -92,11 +145,38 @@ def test_darwin_beta_manual_layout_skips_startup_window_contract(
         "--window-position=24,49",
         "--window-size=1464,893",
     )
-    assert runtime.browser_startup_preflight() is None
+    assert runtime.browser_startup_preflight() is not None
     context = runtime.capture_context_provider(_task(), object(), _state())
 
     assert context.expected_window == _IDENTITY
     assert bridge.recoveries == []
+
+
+def test_darwin_beta_normalizes_native_chrome_to_safe_work_area(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: a work-area-filling JD window fails formal geometry."""
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    context = _WindowPreflightContext()
+    runtime = MacFormalCaptureRuntime(
+        policy=MacCapturePolicy.MAC_VISUAL_REVIEW_BETA,
+    )
+
+    preflight = runtime.browser_startup_preflight()
+    assert preflight is not None
+    preflight(context)
+    preflight(context)
+
+    assert context.cdp.applied_bounds == [
+        {
+            "left": 24,
+            "top": 49,
+            "width": 1422,
+            "height": 823,
+            "windowState": "normal",
+        }
+    ]
 
 
 def test_darwin_beta_manual_layout_preserves_current_chromium_window(
