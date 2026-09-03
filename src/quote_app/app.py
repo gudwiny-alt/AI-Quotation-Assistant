@@ -42,7 +42,7 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "终端福建分公司铺货报价智能体 2026.09.03.166"
+APP_BUILD_LABEL = "终端福建分公司铺货报价智能体 2026.09.03.167"
 BETA_NOTICE = (
     "执行顺序：品牌官网、天猫、京东；遇到登录或验证页面时，人工登录完成后点击“继续当前任务”按钮。"
 )
@@ -417,7 +417,12 @@ class QuoteApp:
 
     def _build(self) -> None:
         self.root.title(APP_BUILD_LABEL)
-        self.root.geometry("900x620")
+        self.root.geometry("900x700")
+        section_style = ttk.Style(self.root)
+        section_style.configure(
+            "Section.TLabelframe.Label",
+            font="TkDefaultFont",
+        )
         frame = ttk.Frame(self.root, padding=18)
         frame.grid(sticky="nsew")
         self.root.columnconfigure(0, weight=1)
@@ -441,7 +446,12 @@ class QuoteApp:
             row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10)
         )
 
-        files = ttk.LabelFrame(frame, text="数据文件", padding=10)
+        files = ttk.LabelFrame(
+            frame,
+            text="数据文件",
+            padding=10,
+            style="Section.TLabelframe",
+        )
         files.grid(row=3, column=0, columnspan=3, sticky="ew")
         files.columnconfigure(1, weight=1)
         self._add_file_row(files, 0, "基础表", self.base_var, False)
@@ -449,7 +459,12 @@ class QuoteApp:
         self._add_file_row(files, 2, "BOP资源信息表", self.bop_var, False)
         self._add_file_row(files, 3, "输出目录", self.output_dir_var, True)
 
-        settings = ttk.LabelFrame(frame, text="报价设置", padding=10)
+        settings = ttk.LabelFrame(
+            frame,
+            text="报价设置",
+            padding=10,
+            style="Section.TLabelframe",
+        )
         settings.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         ttk.Label(settings, text="报价月份").grid(row=0, column=0, sticky="w")
         month_frame = ttk.Frame(settings)
@@ -475,7 +490,12 @@ class QuoteApp:
             width=max(len(mode) for mode in _RUN_MODE_OPTIONS),
         ).grid(row=0, column=5)
 
-        actions = ttk.LabelFrame(frame, text="操作", padding=10)
+        actions = ttk.LabelFrame(
+            frame,
+            text="操作",
+            padding=10,
+            style="Section.TLabelframe",
+        )
         actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="开始自动报价", command=self.run).grid(row=0, column=0)
         ttk.Button(

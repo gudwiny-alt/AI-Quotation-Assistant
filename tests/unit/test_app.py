@@ -67,7 +67,7 @@ def test_beta_notice_describes_execution_order_and_manual_resume() -> None:
 def test_app_build_label_uses_the_approved_short_title() -> None:
     from quote_app.app import APP_BUILD_LABEL
 
-    assert APP_BUILD_LABEL == "终端福建分公司铺货报价智能体 2026.09.03.166"
+    assert APP_BUILD_LABEL == "终端福建分公司铺货报价智能体 2026.09.03.167"
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(
@@ -266,10 +266,10 @@ def test_gui_approved_run_modes_are_ordered_with_all_brands_first() -> None:
     )
 
 
-def test_gui_build_uses_compact_window_and_readonly_selectors(
+def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Break caught: the window grows tall or month/run inputs permit invalid text."""
+    """Break caught: the initial window clips credit or selectors permit invalid text."""
     from quote_app import app as app_module
 
     combobox_options: list[dict[str, object]] = []
@@ -277,6 +277,8 @@ def test_gui_build_uses_compact_window_and_readonly_selectors(
     geometries: list[str] = []
     titles: list[str] = []
     label_texts: list[object] = []
+    labelframe_options: list[dict[str, object]] = []
+    style_configurations: list[tuple[str, dict[str, object]]] = []
 
     class Widget:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -296,6 +298,17 @@ def test_gui_build_uses_compact_window_and_readonly_selectors(
         def __init__(self, *_args: object, **kwargs: object) -> None:
             label_texts.append(kwargs.get("text"))
 
+    class LabelFrame(Widget):
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            labelframe_options.append(kwargs)
+
+    class Style:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def configure(self, style_name: str, **kwargs: object) -> None:
+            style_configurations.append((style_name, kwargs))
+
     class ScrolledText(Widget):
         def __init__(self, *_args: object, **kwargs: object) -> None:
             scrolled_options.append(kwargs)
@@ -310,10 +323,12 @@ def test_gui_build_uses_compact_window_and_readonly_selectors(
         def rowconfigure(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-    for name in ("Frame", "Entry", "Button", "Separator", "LabelFrame"):
+    for name in ("Frame", "Entry", "Button", "Separator"):
         monkeypatch.setattr(app_module.ttk, name, Widget)
+    monkeypatch.setattr(app_module.ttk, "LabelFrame", LabelFrame)
     monkeypatch.setattr(app_module.ttk, "Label", Label)
     monkeypatch.setattr(app_module.ttk, "Combobox", Combobox)
+    monkeypatch.setattr(app_module.ttk, "Style", Style)
     monkeypatch.setattr(app_module.scrolledtext, "ScrolledText", ScrolledText)
 
     app = object.__new__(app_module.QuoteApp)
@@ -327,9 +342,23 @@ def test_gui_build_uses_compact_window_and_readonly_selectors(
     app.brand_mode_var = object()
     app._build()
 
-    assert geometries == ["900x620"]
-    assert titles == ["终端福建分公司铺货报价智能体 2026.09.03.166"]
+    assert geometries == ["900x700"]
+    assert titles == ["终端福建分公司铺货报价智能体 2026.09.03.167"]
     assert "Design by Gudwin" in label_texts
+    assert (
+        "Section.TLabelframe.Label",
+        {"font": "TkDefaultFont"},
+    ) in style_configurations
+    section_frames = {
+        options["text"]: options
+        for options in labelframe_options
+        if options.get("text") in {"数据文件", "报价设置", "操作"}
+    }
+    assert set(section_frames) == {"数据文件", "报价设置", "操作"}
+    assert all(
+        options.get("style") == "Section.TLabelframe"
+        for options in section_frames.values()
+    )
     assert len(combobox_options) == 2
     month_options, run_options = combobox_options
     assert month_options["textvariable"] is app.month_var
