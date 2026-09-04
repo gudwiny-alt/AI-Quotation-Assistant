@@ -42,7 +42,7 @@ from quote_app.services.web_run import (
 from quote_app.tasks.models import WebsiteChannel
 
 
-APP_BUILD_LABEL = "终端福建分公司铺货报价智能体 2026.09.03.168"
+APP_BUILD_LABEL = "终端福建分公司铺货报价智能体 2026.09.04.169"
 BETA_NOTICE = (
     "执行顺序：品牌官网、天猫、京东；遇到登录或验证页面时，人工登录完成后点击“继续当前任务”按钮。"
 )

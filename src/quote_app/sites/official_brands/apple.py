@@ -557,6 +557,18 @@ class AppleOfficialAdapter(LiveOfficialAdapterBase):
                 self._require_selected(page, kind, task)
                 return
             except LayoutRecognitionError:
+                # A visible-card click can return before the configurator
+                # actually accepts it. Retry once on the same page, with fresh
+                # locators, only while the exact choice is enabled/unselected.
+                # Keep the existing wait budget and never re-click a selection.
+                if tick == 2:
+                    target = self._exact_option(page, kind, task)
+                    if (
+                        target is not None
+                        and not _disabled(target)
+                        and not _selected(target)
+                    ):
+                        _option_evidence(page, target).click()
                 if tick < 20:
                     page.wait_for_timeout(250)
         raise LayoutRecognitionError(

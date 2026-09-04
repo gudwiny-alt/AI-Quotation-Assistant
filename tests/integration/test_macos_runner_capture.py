@@ -255,6 +255,57 @@ def test_service_composes_real_runner_and_preserves_partial_macos_results(
         assert repository.attempt_count("permission") == 0
 
 
+@pytest.mark.parametrize("official_fails", [False, True])
+def test_three_native_phases_publish_checkpoints_with_real_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    official_fails: bool,
+) -> None:
+    """Real registration/checkpoint ordering must reach Tmall and JD."""
+    from quote_app.services import web_run
+
+    _Session.opened = _Session.closed = 0
+    _Session.pages_by_family = {}
+    tasks = (
+        _task("jd", WebsiteChannel.JD, 2),
+        _task("tmall", WebsiteChannel.TMALL, 2),
+        _task("permission" if official_fails else "official", WebsiteChannel.OFFICIAL, 2),
+    )
+    database = tmp_path / "state.sqlite3"
+    with SQLiteTaskRepository(database) as repository:
+        repository.create_run(_run(tmp_path))
+    registry = AdapterRegistry(factories={channel: _Adapter for channel in WebsiteChannel})
+    monkeypatch.setattr(web_run, "NativeChromeCdpSession", _Session)
+    monkeypatch.setattr(web_run, "default_registry", lambda: registry)
+    snapshots = []
+    result_tasks = []
+
+    def record_event(event: Any) -> None:
+        if event.event == "result":
+            result_tasks.append(event.task_id)
+
+    summary = web_run.run_website_tasks(
+        web_run.WebsiteRunRequest(
+            run_id="run-1", tasks=tasks, profile_dir=tmp_path / "profile",
+            evidence_dir=tmp_path / "evidence", database_path=database,
+            checkpoint_sink=snapshots.append, event_sink=record_event,
+        ),
+        runtime_factory=lambda _registry: _Runtime(),
+    )
+
+    assert result_tasks == (["tmall", "jd"] if official_fails else ["official", "tmall", "jd"])
+    assert _Session.opened == _Session.closed == 3
+    assert summary.succeeded == (2 if official_fails else 3)
+    assert summary.technical_failure == int(official_fails)
+    assert len(snapshots[-1].results) == 3
+    assert {result.task_id for result in snapshots[-1].results} == {
+        task.task_id for task in tasks
+    }
+    with SQLiteTaskRepository(database) as repository:
+        assert repository.task_state("tmall") is TaskState.SUCCEEDED
+        assert repository.task_state("jd") is TaskState.SUCCEEDED
+
+
 def test_official_login_pauses_before_later_channel_and_resumes_atomically(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -1856,11 +1856,31 @@ def test_apple_selects_colour_before_waiting_for_storage_cards() -> None:
     assert observation.price == Decimal("5999")
 
 
-def test_apple_clicks_visible_configuration_cards_not_hidden_native_radios() -> None:
+@pytest.mark.parametrize(
+    ("ignored_option", "ignored_clicks"),
+    [(None, 0), ("color-black", 1), ("capacity-256", 1), ("color-black", 99)],
+)
+def test_apple_clicks_visible_configuration_cards_not_hidden_native_radios(
+    ignored_option: str | None, ignored_clicks: int,
+) -> None:
     """The Apple flow must select visible colour then storage cards."""
     from quote_app.sites.official_brands.apple import AppleOfficialAdapter
+    from quote_app.tasks.retry import LayoutRecognitionError
 
-    page = _AppleVisibleConfigurationPage(
+    class InitialClickLostPage(_AppleVisibleConfigurationPage):
+        attempts: list[str]
+
+        def select_visible_configuration_card(self, label: object) -> None:
+            option_id = str(getattr(label, "attrs").get("for"))
+            self.attempts.append(option_id)
+            if (
+                option_id == ignored_option
+                and self.attempts.count(option_id) <= ignored_clicks
+            ):
+                return
+            super().select_visible_configuration_card(label)
+
+    page = InitialClickLostPage(
         """
         <section data-screen="store"><a class="thumb"
           href="/shop/buy-iphone/iphone-17/mg734ch/a"><h2>iPhone 17</h2></a></section>
@@ -1877,12 +1897,28 @@ def test_apple_clicks_visible_configuration_cards_not_hidden_native_radios() -> 
         </main></section>
         """
     )
+    page.attempts = []
     task = replace(_apple_task(), storage="256GB", color="黑色")
 
-    observation = AppleOfficialAdapter(_apple_spec()).observe(task, page)
+    adapter = AppleOfficialAdapter(_apple_spec())
+    if ignored_clicks == 99:
+        with pytest.raises(LayoutRecognitionError, match="did not stabilize"):
+            adapter.observe(task, page)
+        assert page.attempts == ["color-black", "color-black"]
+        return
+
+    observation = adapter.observe(task, page)
 
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert page.visible_configuration_clicks == ["color-black", "capacity-256"]
+    expected = ["color-black", "capacity-256"]
+    if ignored_option is not None:
+        expected.insert(expected.index(ignored_option), ignored_option)
+    assert page.attempts == expected
+    # Selected options must not be clicked again on a later confirmation.
+    adapter._select(page, "color", task)
+    adapter._select(page, "capacity", task)
+    assert page.attempts == expected
 
 
 def test_apple_no_model_uses_a_search_and_result_evidence_pair() -> None:

@@ -886,10 +886,12 @@ def test_native_channel_task_failure_does_not_skip_later_native_phase(
     assert summary.succeeded == 2
 
 
-def test_checkpoint_snapshot_allows_jd_tasks_to_be_registered_in_later_phase(
+@pytest.mark.parametrize("later_channel", [WebsiteChannel.TMALL, WebsiteChannel.JD])
+def test_checkpoint_snapshot_allows_tasks_to_be_registered_in_later_phase(
     tmp_path: Path,
+    later_channel: WebsiteChannel,
 ) -> None:
-    """Catches a regular-phase checkpoint reading JD before JD is registered."""
+    """Official publication must not read a later channel as a missing task."""
     from quote_app.domain.models import QuoteMonth
     from quote_app.services.web_run import _WebsiteRunSnapshotIndex
     from quote_app.tasks.models import (
@@ -930,12 +932,12 @@ def test_checkpoint_snapshot_allows_jd_tasks_to_be_registered_in_later_phase(
         channel=WebsiteChannel.OFFICIAL,
         output_row=2,
     )
-    jd = _task("jd", channel=WebsiteChannel.JD, output_row=2)
+    later = _task("later", channel=later_channel, output_row=2)
 
     with SQLiteTaskRepository(tmp_path / "tasks.sqlite3") as repository:
         repository.create_run(run)
         repository.upsert_task(official)
-        snapshot = _WebsiteRunSnapshotIndex((official, jd), repository).update(
+        snapshot = _WebsiteRunSnapshotIndex((official, later), repository).update(
             official.task_id
         )
 

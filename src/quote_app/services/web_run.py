@@ -536,7 +536,7 @@ class _WebsiteRunSnapshotIndex:
         self._deferred_task_ids = frozenset(
             task.task_id
             for task in self._tasks
-            if task.channel is WebsiteChannel.JD
+            if task.channel in {WebsiteChannel.TMALL, WebsiteChannel.JD}
         )
         self._observations: dict[str, WebsiteObservationCheckpoint] = {}
         self._results: dict[str, WebsiteResult] = {}
