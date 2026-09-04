@@ -1949,6 +1949,34 @@ def test_huawei_post_capture_reads_visible_anonymous_div_price() -> None:
     assert completed.price == Decimal("2199")
 
 
+@pytest.mark.parametrize("amount", ["2199", "", "1899"])
+def test_huawei_current_detail_split_div_price_excludes_care_service(amount: str) -> None:
+    """Current VMALL has no data-prdid; Care+ is not the phone price."""
+    adapter = _adapter()
+    task = _task()
+    page = _HuaweiPage()
+    observation = adapter.observe_for_capture(task, page)
+    assert isinstance(observation, CaptureReadyObservation)
+    page.detail_root = page._parse(f"""
+      <html><body>
+        <div><div>HUAWEI Care+（一年期）</div><div>¥199</div></div>
+        <div id="prd-detail" data-testid="prd-detail">
+          <div id="prd-detail-name" data-testid="prd-detail-name">华为畅享 90 Pro Max</div>
+          <div><div>¥</div><div>{amount}</div><div></div></div>
+        </div>
+        <div><div>HUAWEI WATCH GT 7 Pro 表带</div><div>¥199</div></div>
+      </body></html>
+    """)
+    page.root = page.detail_root
+    if not amount:
+        with pytest.raises(NonRetryableTechnicalError) as error:
+            adapter.finalize_observation(task, page, observation)
+        assert error.value.code == "PRICE_UNAVAILABLE_AFTER_CAPTURE"
+    else:
+        completed = adapter.finalize_observation(task, page, observation)
+        assert completed.price == Decimal(amount)
+
+
 def test_huawei_post_capture_ignores_related_product_price_before_main_price() -> None:
     """Break caught: a related accessory's 199 replaces the main 2199."""
 

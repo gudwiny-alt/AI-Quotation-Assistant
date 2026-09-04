@@ -272,6 +272,14 @@ class JDAdapter:
                 str(error),
                 stage=stage[0],
             ) from error
+        except Exception as error:
+            if not _is_navigation_context_destroyed(error):
+                raise
+            # A redirect after login invalidates the JS document, not the task.
+            # Let the existing bounded task retry policy recover this JD stage.
+            raise LayoutRecognitionError(
+                "JD document changed during navigation", stage=stage[0],
+            ) from error
 
     def resume(
         self,
@@ -1366,7 +1374,26 @@ class JDAdapter:
     def _ensure_fixed_scale(page: Any) -> None:
         """Keep the current JD document at the approved 80% scale."""
 
-        apply_capture_scale(page, scale=0.8)
+        for retry_index in range(_JD_DOCUMENT_REPLACEMENT_MAX_RETRIES):
+            try:
+                apply_capture_scale(page, scale=0.8)
+                return
+            except Exception as error:
+                scale_reset = (
+                    isinstance(error, CaptureViewGeometryError)
+                    and error.safe_stage == "缩放验证"
+                )
+                if not scale_reset and not _is_navigation_context_destroyed(error):
+                    raise
+                if retry_index + 1 >= _JD_DOCUMENT_REPLACEMENT_MAX_RETRIES:
+                    if scale_reset:
+                        raise
+                    raise LayoutRecognitionError(
+                        "JD document or scale kept changing during navigation"
+                    ) from error
+                # Do not reopen the page or wait for network idle. Apply the
+                # same scale to the replacement document once it is available.
+                page.wait_for_timeout(500)
 
     def _read_legal_no_state(
         self,

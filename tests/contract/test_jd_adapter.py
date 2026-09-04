@@ -2854,6 +2854,58 @@ def test_frequency_control_redirect_retries_from_search_with_referrer() -> None:
     assert page.wait_timeout_milliseconds.count(5000) == 2
 
 
+@pytest.mark.parametrize("failure", ["context", "scale_reset"])
+def test_initial_document_transition_recovers_before_jd_search(
+    monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    page = _FixturePage()
+    evaluate = page.evaluate
+    interrupted = False
+
+    def transition(script: str, value: float | None = None) -> object:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            if failure == "context":
+                raise RuntimeError("Execution context was destroyed, most likely because of a navigation")
+            return {"inlineZoom": "1", "computedZoom": "1"}
+        return evaluate(script, value)
+
+    monkeypatch.setattr(page, "evaluate", transition)
+    observation = JDAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.detail_navigation_count == 1
+
+
+def test_jd_document_transition_recovery_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    page = _FixturePage()
+    attempts = []
+
+    def destroyed(*_args: object) -> object:
+        attempts.append(1)
+        raise RuntimeError("Execution context was destroyed, most likely because of a navigation")
+
+    monkeypatch.setattr(page, "evaluate", destroyed)
+    with pytest.raises(LayoutRecognitionError):
+        JDAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+    assert len(attempts) == 3
+
+
+def test_jd_navigation_during_search_is_retryable_not_unexpected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quote_app.tasks.retry import classify_attempt_error, RetryableTechnicalError
+    adapter = JDAdapter(_xiaomi_spec())
+
+    def destroyed(*_args: object) -> object:
+        raise RuntimeError("Execution context was destroyed, most likely because of a navigation")
+
+    monkeypatch.setattr(adapter, "_current_search_result", destroyed)
+    with pytest.raises(Exception) as error:
+        adapter.observe(_task(), cast(Any, _FixturePage()))
+    assert isinstance(classify_attempt_error(error.value), RetryableTechnicalError)
+
+
 def test_detail_document_replacement_is_reacquired_without_reopening_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3674,7 +3726,7 @@ def test_jd_rejects_an_unstable_fixed_scale_without_restoring_to_100() -> None:
     ):
         adapter.observe(task, cast(Any, page))
 
-    assert page.capture_scales == [0.8]
+    assert page.capture_scales == [0.8, 0.8, 0.8]
     assert page.capture_scale_restore_count == 0
 
 

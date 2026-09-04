@@ -984,6 +984,17 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         return locked
 
     def _current_price(self, page: Any) -> tuple[Decimal, Any]:
+        # Current VMALL places the phone's title/price in #prd-detail, while
+        # Care+ and accessory amounts live outside it (without data-prdid).
+        # Never fall back outside that summary when its price is absent.
+        page = next(
+            (
+                summary
+                for summary in _visible(page, ('#prd-detail[data-testid="prd-detail"]',))
+                if _visible(summary, (_DETAIL_TITLE,))
+            ),
+            page,
+        )
         require_primary_detail_root = bool(
             _visible(
                 page,
@@ -1327,7 +1338,10 @@ def _currency_price_fallbacks(page: Any) -> tuple[tuple[Any, bool, bool], ...]:
         for root in roots
         for candidate in _visible(root, ("div",))
         if _EXACT_CURRENCY_AMOUNT.fullmatch(candidate.inner_text()) is not None
-        and len(_visible(candidate, ("span",))) >= 2
+        and (
+            len(_visible(candidate, ("span",)))
+            + len(_visible(candidate, ("div",)))
+        ) >= 2
     )
     return (*leaves, *split_parents)
 
