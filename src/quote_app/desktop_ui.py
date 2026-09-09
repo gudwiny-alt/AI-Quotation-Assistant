@@ -1105,7 +1105,15 @@ class DesktopWorkbench:
             tile = tk.Frame(tiles, bg="#F2F6FD", padx=7, pady=12)
             tile.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 4, 0))
             label(tile, text, size=10, color=MUTED, bg="#F2F6FD").pack(anchor="center")
-            value = label(tile, "—", size=11, bold=True, color=BLUE, bg="#F2F6FD", wraplength=68)
+            value = label(
+                tile,
+                "—",
+                size=17 if self.page == "decision" else 11,
+                bold=True,
+                color=BLUE,
+                bg="#F2F6FD",
+                wraplength=68,
+            )
             value.pack(fill="x", pady=(7, 0))
             value.bind(
                 "<Configure>",
@@ -1122,7 +1130,16 @@ class DesktopWorkbench:
             line.grid(row=index + 3, column=0, sticky="ew", pady=7)
             line.columnconfigure(1, weight=1)
             label(line, name, color=MUTED, size=11).grid(row=0, column=0, sticky="w")
-            value = label(line, "—", size=11, anchor="e", wraplength=190)
+            primary_price = self.page == "decision" and index == 0
+            value = label(
+                line,
+                "—",
+                size=24 if primary_price else 11,
+                color=BLUE if primary_price else INK,
+                bold=primary_price,
+                anchor="e",
+                wraplength=190,
+            )
             value.grid(row=0, column=1, sticky="e", padx=(9, 0))
             self.detail_rows.append(value)
         tk.Frame(info, bg=LINE, height=1).grid(row=6, column=0, sticky="ew", pady=(10, 12))
