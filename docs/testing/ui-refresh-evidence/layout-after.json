@@ -1,0 +1,186 @@
+[
+  {
+    "phase": "before Tk",
+    "executable": "/Users/yangguowei/Documents/资金物流平台铺货报价智能体/.worktrees/mac-170-ui-refresh/../core-excel/.venv/bin/python"
+  },
+  {
+    "phase": "Tk initialized",
+    "scaling": 1.3339898243886428
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "overview",
+    "issues": [],
+    "scroll_checks": [
+      {
+        "viewport_height": 353,
+        "content_height": 414,
+        "bottom_after_scroll": 353,
+        "fraction": [
+          0.1473429951690821,
+          1.0
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "intelligence",
+    "issues": [],
+    "scroll_checks": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "decision",
+    "issues": [],
+    "scroll_checks": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "audit",
+    "issues": [],
+    "scroll_checks": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "history",
+    "issues": [],
+    "scroll_checks": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "settings",
+    "issues": [],
+    "scroll_checks": [
+      {
+        "viewport_height": 468,
+        "content_height": 422,
+        "bottom_after_scroll": 422,
+        "fraction": [
+          0.0,
+          1.0
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "overview",
+    "issues": [],
+    "scroll_checks": [
+      {
+        "viewport_height": 223,
+        "content_height": 414,
+        "bottom_after_scroll": 223,
+        "fraction": [
+          0.4613526570048309,
+          1.0
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "intelligence",
+    "issues": [],
+    "scroll_checks": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "decision",
+    "issues": [],
+    "scroll_checks": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "audit",
+    "issues": [],
+    "scroll_checks": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "history",
+    "issues": [],
+    "scroll_checks": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "settings",
+    "issues": [],
+    "scroll_checks": [
+      {
+        "viewport_height": 338,
+        "content_height": 422,
+        "bottom_after_scroll": 338,
+        "fraction": [
+          0.1990521327014218,
+          1.0
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "complete",
+    "result": "PASS"
+  }
+]

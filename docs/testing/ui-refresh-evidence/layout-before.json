@@ -1,0 +1,397 @@
+[
+  {
+    "phase": "before Tk",
+    "executable": "/Users/yangguowei/Documents/资金物流平台铺货报价智能体/.worktrees/mac-170-ui-refresh/../core-excel/.venv/bin/python"
+  },
+  {
+    "phase": "Tk initialized",
+    "scaling": 1.3339898243886428
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "overview",
+    "issues": [
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame4.!frame2.!frame4",
+        "class": "Frame",
+        "text": "",
+        "box": [
+          0,
+          331,
+          1010,
+          83
+        ],
+        "parent_size": [
+          1010,
+          351
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "intelligence",
+    "issues": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "decision",
+    "issues": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "audit",
+    "issues": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "history",
+    "issues": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1280x850",
+    "size_actual": [
+      1280,
+      850
+    ],
+    "page": "settings",
+    "issues": []
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "overview",
+    "issues": [
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame2.!button2",
+        "class": "TButton",
+        "text": "取消本次网页任务",
+        "box": [
+          594,
+          11,
+          149,
+          39
+        ],
+        "parent_size": [
+          730,
+          61
+        ]
+      },
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame4.!frame8.!frame2",
+        "class": "Frame",
+        "text": "",
+        "box": [
+          0,
+          41,
+          730,
+          201
+        ],
+        "parent_size": [
+          730,
+          221
+        ]
+      },
+      {
+        "type": "undersized-text-widget",
+        "widget": ".!frame2.!frame4.!frame8.!frame2.!frame.!frame.!button2",
+        "text": "路径",
+        "actual": [
+          80,
+          39
+        ],
+        "requested": [
+          129,
+          39
+        ]
+      },
+      {
+        "type": "undersized-text-widget",
+        "widget": ".!frame2.!frame4.!frame8.!frame2.!frame2.!frame.!button2",
+        "text": "路径",
+        "actual": [
+          74,
+          39
+        ],
+        "requested": [
+          129,
+          39
+        ]
+      },
+      {
+        "type": "undersized-text-widget",
+        "widget": ".!frame2.!frame4.!frame8.!frame2.!frame3.!frame.!button2",
+        "text": "路径",
+        "actual": [
+          79,
+          39
+        ],
+        "requested": [
+          129,
+          39
+        ]
+      },
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame4.!frame8.!frame3",
+        "class": "Frame",
+        "text": "",
+        "box": [
+          0,
+          254,
+          730,
+          65
+        ],
+        "parent_size": [
+          730,
+          221
+        ]
+      },
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame4.!frame8.!frame4",
+        "class": "Frame",
+        "text": "",
+        "box": [
+          0,
+          331,
+          730,
+          83
+        ],
+        "parent_size": [
+          730,
+          221
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "intelligence",
+    "issues": [
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame2.!button2",
+        "class": "TButton",
+        "text": "取消本次网页任务",
+        "box": [
+          594,
+          11,
+          149,
+          39
+        ],
+        "parent_size": [
+          730,
+          61
+        ]
+      },
+      {
+        "type": "undersized-text-widget",
+        "widget": ".!frame2.!frame4.!frame9.!frame.!frame.!button4",
+        "text": "京东",
+        "actual": [
+          48,
+          39
+        ],
+        "requested": [
+          129,
+          39
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "decision",
+    "issues": [
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame2.!button2",
+        "class": "TButton",
+        "text": "取消本次网页任务",
+        "box": [
+          594,
+          11,
+          149,
+          39
+        ],
+        "parent_size": [
+          730,
+          61
+        ]
+      },
+      {
+        "type": "undersized-text-widget",
+        "widget": ".!frame2.!frame4.!frame10.!frame.!label2",
+        "text": "尚无本次报价结果。任务完成后展示实际输出；运行中的阶段价格请到价格情报页查看。",
+        "actual": [
+          423,
+          40
+        ],
+        "requested": [
+          437,
+          40
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "audit",
+    "issues": [
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame2.!button2",
+        "class": "TButton",
+        "text": "取消本次网页任务",
+        "box": [
+          594,
+          11,
+          149,
+          39
+        ],
+        "parent_size": [
+          730,
+          61
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "history",
+    "issues": [
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame2.!button2",
+        "class": "TButton",
+        "text": "取消本次网页任务",
+        "box": [
+          594,
+          11,
+          149,
+          39
+        ],
+        "parent_size": [
+          730,
+          61
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "page",
+    "size_requested": "1000x720",
+    "size_actual": [
+      1000,
+      720
+    ],
+    "page": "settings",
+    "issues": [
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame2.!button2",
+        "class": "TButton",
+        "text": "取消本次网页任务",
+        "box": [
+          594,
+          11,
+          149,
+          39
+        ],
+        "parent_size": [
+          730,
+          61
+        ]
+      },
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame4.!frame13.!frame4",
+        "class": "Frame",
+        "text": "",
+        "box": [
+          23,
+          308,
+          684,
+          39
+        ],
+        "parent_size": [
+          730,
+          336
+        ]
+      },
+      {
+        "type": "outside-parent",
+        "widget": ".!frame2.!frame4.!frame13.!frame5",
+        "class": "Frame",
+        "text": "",
+        "box": [
+          23,
+          357,
+          684,
+          39
+        ],
+        "parent_size": [
+          730,
+          336
+        ]
+      }
+    ]
+  },
+  {
+    "phase": "complete"
+  }
+]
