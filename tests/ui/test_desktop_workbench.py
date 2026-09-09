@@ -293,3 +293,122 @@ def test_taller_window_gives_activity_log_more_room_without_losing_state(workben
     view.root.geometry("1000x720")
     view.root.update()
     assert view.app.status.get("1.0", "end") == before_text
+
+
+def test_rich_rows_keep_record_identity_across_mouse_keyboard_filter_and_refresh(workbench):
+    """New row renderer must open the selected record, never a neighbouring product."""
+    view = workbench
+    view.model.rows = [
+        TaskRow(
+            f"t{i}", f"商品 {i}", "jd" if i % 2 else "tmall", price=str(i), specification="256GB"
+        )
+        for i in range(1000)
+    ]
+    view.show_page("intelligence")
+    view.root.deiconify()
+    view.root.update()
+    table = view.table
+    table.canvas.event_generate("<Button-1>", x=60, y=90)
+    view.root.update()
+    assert table.selection() == ("t1",)
+    assert view.detail_title.cget("text") == "商品 1"
+    table._step(1)
+    view.root.update()
+    assert view.detail_title.cget("text") == "商品 2"
+    view.refresh()
+    view.root.update()
+    assert table.selection() == ("t2",)
+    assert len(table.canvas.find_all()) < 200  # draw visible rows, not 1,000 records
+    view._filter("京东")
+    view.root.update()
+    assert table.selection() == ("t1",)
+    assert view.detail_title.cget("text") == "商品 1"
+    assert all(int(key[1:]) % 2 for key in table.get_children())
+    view._filter("官网")
+    view.root.update()
+    assert table.selection() == ()
+    assert view.detail_title.cget("text") == "暂无选中商品"
+
+
+def test_rounded_actions_obey_disabled_state_and_keep_callbacks(workbench):
+    view = workbench
+    calls = []
+    control = view.app.continue_button
+    control.configure(command=lambda: calls.append("continued"))
+    control.invoke()
+    assert not calls
+    control.configure(state="normal")
+    control.invoke()
+    assert calls == ["continued"]
+    view.root.deiconify()
+    view.root.geometry("1280x1020")
+    view.root.update()
+    controls = (control, view.app.cancel_button, view.app.open_button)
+    assert len({c.winfo_width() for c in controls}) == 1, (
+        view.root.winfo_height(),
+        view._log_compact,
+        [c.grid_info() for c in controls],
+    )
+    assert controls[0].winfo_y() < controls[1].winfo_y() < controls[2].winfo_y()
+    view.root.geometry("1000x720")
+    view.root.update()
+    assert len({c.winfo_y() for c in controls}) == 1
+    control.configure(state="disabled")
+    control.invoke()
+    assert calls == ["continued"]
+
+
+def test_bundled_artwork_is_cached_and_missing_assets_do_not_trigger_downloads(workbench):
+    view = workbench
+    for name in ("华为", "OPPO", "vivo", "荣耀", "小米", "iPhone"):
+        image = view.artwork.channel("official", name, size=24)
+        assert image is not None
+        assert image is view.artwork.channel("official", name, size=24)
+    assert view.artwork.phone(42) is view.artwork.phone(42)
+    assert view.artwork.channel("official", "未知品牌") is not None
+    assert view.artwork.get("ui-brands/absent", 24) is None
+
+
+@pytest.mark.parametrize(
+    "values, expected",
+    [
+        (("2199.00", "2199", "2249", "2199.0"), (True, False, True)),
+        (("无", "无", "无", "无"), (False, False, False)),
+        (("0", "0.00", "1", "2"), (True, False, False)),
+    ],
+)
+def test_price_highlight_matches_numeric_output_only(workbench, values, expected):
+    from quote_app.domain.models import QuoteRow, WebQuery
+    from quote_app.desktop_ui import BLUE, LINE
+
+    view = workbench
+    view.model.quote_rows = (
+        QuoteRow(
+            1,
+            "sku",
+            cells=dict(zip(("AH", "AK", "AJ", "AI"), values)),
+            web_query=WebQuery(model_name="商品"),
+        ),
+    )
+    view.show_page("decision")
+    assert tuple(tile.cget("highlightbackground") == BLUE for tile in view.price_tiles) == expected
+    view._filter("含异常")
+    assert all(tile.cget("highlightbackground") == LINE for tile in view.price_tiles)
+
+
+def test_history_and_settings_do_not_keep_space_from_hidden_data_controls(workbench):
+    view = workbench
+    view.root.deiconify()
+    view.root.update()
+    for page in ("history", "settings"):
+        view.show_overview_tab("data")
+        view.root.update()
+        view.show_page(page)
+        view.root.update()
+        assert not view.context.winfo_ismapped()
+        header_bottom = view.heading.master.winfo_y() + view.heading.master.winfo_height()
+        assert view.body.winfo_y() - header_bottom < 35
+    view.show_overview_tab("data")
+    view.root.update()
+    assert view.context.winfo_ismapped()
+    assert view.run_controls.winfo_ismapped()

@@ -1,0 +1,14 @@
+{
+  "tmall": {
+    "trackName": "天猫 - 好品牌，好价格，上天猫",
+    "sellerName": "Zhejiang tmall Network Co., Ltd",
+    "trackViewUrl": "https://apps.apple.com/cn/app/%E5%A4%A9%E7%8C%AB-%E5%A5%BD%E5%93%81%E7%89%8C-%E5%A5%BD%E4%BB%B7%E6%A0%BC-%E4%B8%8A%E5%A4%A9%E7%8C%AB/id518966501?uo=4",
+    "artworkUrl512": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/3f/16/25/3f162541-551a-cf45-15b1-2e76639e7119/AppIcon-0-1x_U007emarketing-0-8-0-sRGB-85-220-0.png/512x512bb.jpg"
+  },
+  "jd": {
+    "trackName": "京东-又好又便宜",
+    "sellerName": "Beijing Jingdong Century Trading Co., Ltd.",
+    "trackViewUrl": "https://apps.apple.com/cn/app/%E4%BA%AC%E4%B8%9C-%E5%8F%88%E5%A5%BD%E5%8F%88%E4%BE%BF%E5%AE%9C/id414245413?uo=4",
+    "artworkUrl512": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/13/68/c9/1368c9dc-7f0d-dd9d-48b7-670a5faaa784/AppIcon-0-0-1x_U007epad-0-1-0-0-85-220.png/512x512bb.jpg"
+  }
+}

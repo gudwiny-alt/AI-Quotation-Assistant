@@ -1,0 +1,41 @@
+{
+  "Apple": {
+    "title": "Apple",
+    "hex": "000000",
+    "source": "https://www.apple.com"
+  },
+  "Google Chrome": {
+    "title": "Google Chrome",
+    "hex": "4285F4",
+    "source": "https://www.google.com/chrome",
+    "guidelines": "https://partnermarketinghub.withgoogle.com/brands/chrome"
+  },
+  "Honor": {
+    "title": "Honor",
+    "hex": "000000",
+    "source": "https://www.hihonor.com",
+    "guidelines": "https://www.hihonor.com/global/brand-guideline11/basics/logo"
+  },
+  "Huawei": {
+    "title": "Huawei",
+    "hex": "FF0000",
+    "source": "https://e.huawei.com/ph/material/partner/0a72728b864949c48b22106454352483",
+    "guidelines": "https://e.huawei.com/ph/material/partner/0a72728b864949c48b22106454352483"
+  },
+  "OPPO": {
+    "title": "OPPO",
+    "hex": "2D683D",
+    "source": "https://www.figma.com/community/file/832815970641696814/OPPO-Media-Kit",
+    "guidelines": "https://www.oppo.com/en/terms/"
+  },
+  "vivo": {
+    "title": "vivo",
+    "hex": "415FFF",
+    "source": "https://www.vivo.com"
+  },
+  "Xiaomi": {
+    "title": "Xiaomi",
+    "hex": "FF6900",
+    "source": "https://www.mi.com/global"
+  }
+}

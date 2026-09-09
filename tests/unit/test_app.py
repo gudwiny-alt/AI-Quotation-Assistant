@@ -297,6 +297,8 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
         for name in names:
             monkeypatch.setattr(module, name, Widget)
     monkeypatch.setattr(desktop_ui, "RoundedCard", Widget)
+    monkeypatch.setattr(desktop_ui, "SoftButton", Widget)
+    monkeypatch.setattr(desktop_ui, "Artwork", lambda _root: SimpleNamespace(channel=lambda *args, **kwargs: None))
     app = object.__new__(app_module.QuoteApp)
     app.root = Widget()
     for name in ("base", "marketing", "bop", "output_dir", "year", "month", "brand_mode"):

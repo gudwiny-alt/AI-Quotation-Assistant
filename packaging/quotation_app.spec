@@ -22,7 +22,8 @@ datas = [
         "resources/sites",
     ),
 ]
-datas.append((str(PROJECT_ROOT / 'assets' / 'ui-icons'), 'assets/ui-icons'))
+for asset_dir in ('ui-icons', 'ui-brands', 'ui-media'):
+    datas.append((str(PROJECT_ROOT / 'assets' / asset_dir), 'assets/' + asset_dir))
 datas += collect_data_files('playwright')
 
 a = Analysis(

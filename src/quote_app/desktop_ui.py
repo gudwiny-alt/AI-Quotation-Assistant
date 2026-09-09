@@ -14,6 +14,15 @@ from typing import TYPE_CHECKING
 from PIL import Image, ImageTk
 
 from quote_app.resources import bundled_resource_path
+from quote_app.desktop_widgets import (
+    Artwork,
+    IconMedallion,
+    RichTable,
+    SoftButton,
+    StatusPill,
+    product_subtitle,
+    numeric_price,
+)
 
 from quote_app.desktop_state import (
     CHANNEL_LABELS,
@@ -23,7 +32,6 @@ from quote_app.desktop_state import (
     compact_path,
     read_history,
     read_task_rows,
-    quote_channel_prices,
 )
 
 if TYPE_CHECKING:
@@ -74,14 +82,7 @@ def label(
 
 
 def button(parent: tk.Misc, text: str, command, *, primary: bool = False, **kwargs):
-    return ttk.Button(
-        parent,
-        text=text,
-        command=command,
-        width=0,
-        style="Primary.TButton" if primary else "Workbench.TButton",
-        **kwargs,
-    )
+    return SoftButton(parent, text=text, command=command, primary=primary, **kwargs)
 
 
 class RoundedCard(tk.Frame):
@@ -139,6 +140,7 @@ class DesktopWorkbench:
     def __init__(self, app: QuoteApp, *, title: str, credit: str, modes: tuple[str, ...]):
         self.app, self.root = app, app.root
         self.model = DesktopState()
+        self.artwork = Artwork(self.root)
         self.page = "overview"
         self.filter = "全部"
         self.overview_tab = "tasks"
@@ -278,6 +280,8 @@ class DesktopWorkbench:
 
     def _icon_label(self, parent, name, *, color="blue", size=24, bg=WHITE):
         picture = self._icon(name, color, size)
+        if size >= 30 and picture and name != "box":
+            return IconMedallion(parent, picture, size, bg=bg, tone=color)
         return label(parent, image=picture or "", bg=bg, width=size if picture else 2)
 
     def _sidebar(self, credit):
@@ -426,15 +430,11 @@ class DesktopWorkbench:
             self.metrics.append((title, number))
 
     def _log(self):
-        panel = card(self.main, padx=18, pady=8)
+        panel = card(self.main, padx=18, pady=12)
         panel.grid(row=4, column=0, sticky="ew")
         panel.columnconfigure(0, weight=1)
         self.log_heading = label(panel, "最近执行动态", size=14, bold=True)
         self.log_heading.grid(row=0, column=0, sticky="w")
-        self.app.open_button = button(
-            panel, "打开输出目录", self.app.open_output_directory, state="disabled"
-        )
-        self.app.open_button.grid(row=1, column=1, sticky="e", padx=(14, 0))
         self.app.status = scrolledtext.ScrolledText(
             panel,
             height=2,
@@ -449,33 +449,72 @@ class DesktopWorkbench:
             highlightthickness=0,
             padx=0,
             pady=4,
+            spacing3=4,
         )
-        self.app.status.grid(row=1, column=0, sticky="ew", pady=(3, 0))
-        actions = tk.Frame(panel, bg=WHITE)
-        actions.grid(row=0, column=1, sticky="e")
+        self.app.status.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+        self.log_actions = tk.Frame(panel, bg=WHITE)
         self.app.continue_button = button(
-            actions,
+            self.log_actions,
             "继续当前任务",
             self.app.continue_current_task,
+            primary=True,
             state="disabled",
-            padding=(7, 3),
+            padding=(12, 6),
         )
-        self.app.continue_button.pack(side="left", padx=(0, 6))
         self.app.cancel_button = button(
-            actions, "取消网页任务", self.app.cancel_manual_action, state="disabled", padding=(7, 3)
+            self.log_actions,
+            "取消网页任务",
+            self.app.cancel_manual_action,
+            state="disabled",
+            padding=(12, 6),
         )
-        self.app.cancel_button.pack(side="left")
+        self.log_separator = tk.Frame(self.log_actions, bg=LINE, height=1)
+        self.app.open_button = button(
+            self.log_actions,
+            "打开输出目录",
+            self.app.open_output_directory,
+            state="disabled",
+            padding=(12, 6),
+            image=self._icon("folder-open", "blue", 18),
+        )
+        self._log_compact = None
+        self._arrange_log_actions(False)
         self.task_status = label(self.main, "尚未开始任务", size=10, color=MUTED, bg=BG)
         self.task_status.grid(row=5, column=0, sticky="ew", pady=(7, 0))
+
+    def _arrange_log_actions(self, compact):
+        if compact == self._log_compact:
+            return
+        self._log_compact = compact
+        controls = (self.app.continue_button, self.app.cancel_button, self.app.open_button)
+        for widget in (*controls, self.log_separator):
+            widget.grid_forget()
+        for column in range(3):
+            self.log_actions.columnconfigure(column, weight=0, minsize=0)
+        if compact:
+            # Short windows use a single tidy toolbar to preserve the page viewport.
+            self.log_actions.grid(row=0, column=1, sticky="e", padx=(16, 0), rowspan=1)
+            self.app.status.grid(columnspan=2)
+            for index, control in enumerate(controls):
+                control.grid(row=0, column=index, padx=(6, 0), sticky="ew")
+        else:
+            self.log_actions.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(24, 0))
+            self.log_actions.columnconfigure(0, weight=1, minsize=158)
+            self.app.status.grid(columnspan=1)
+            controls[0].grid(row=0, column=0, sticky="ew")
+            controls[1].grid(row=1, column=0, sticky="ew", pady=(7, 0))
+            self.log_separator.grid(row=2, column=0, sticky="ew", pady=9)
+            controls[2].grid(row=3, column=0, sticky="ew")
 
     def _resize_log(self, event):
         if event.widget is not self.root:
             return
-        # Give the activity log the extra vertical room in a taller window,
-        # while keeping the existing compact layout usable on smaller screens.
-        lines = min(12, 2 + max(0, event.height - 850) // 30)
+        # macOS may deliver an older Configure event after the new geometry is applied.
+        height = self.root.winfo_height()
+        lines = min(12, 2 + max(0, height - 850) // 30)
         if int(self.app.status.cget("height")) != lines:
             self.app.status.configure(height=lines)
+        self._arrange_log_actions(height < 900)
 
     def append_log(self, message: str):
         text = self.app.status
@@ -487,6 +526,10 @@ class DesktopWorkbench:
     def show_page(self, page: str):
         self.page = page
         self.filter = "全部"
+        if page in {"history", "settings"}:
+            self.context.grid_remove()
+        else:
+            self.context.grid()
         self.tabs.grid_remove()
         self.stages.grid_remove()
         self.run_controls.grid_remove()
@@ -609,9 +652,9 @@ class DesktopWorkbench:
             line = tk.Frame(progress, bg="#F2F6FD", padx=12, pady=8)
             line.grid(row=index + 2, column=0, columnspan=3, sticky="ew", pady=3)
             line.columnconfigure(2, weight=1)
-            self._icon_label(
-                line, "globe" if key == "official" else "database", size=22, bg="#F2F6FD"
-            ).grid(row=0, column=0, padx=(0, 10))
+            label(line, image=self.artwork.channel(key, size=25) or "", bg="#F2F6FD").grid(
+                row=0, column=0, padx=(0, 10)
+            )
             label(line, title, size=12, bg="#F2F6FD").grid(row=0, column=1, padx=(0, 16))
             bar = tk.Canvas(line, height=9, width=90, bg="#F2F6FD", highlightthickness=0)
             bar.grid(row=0, column=2, sticky="ew")
@@ -716,13 +759,11 @@ class DesktopWorkbench:
         label(online, "自动取价与截图留存", size=10, color=MUTED).pack(anchor="w")
         channels = tk.Frame(online, bg="#F2F6FD", padx=8, pady=9)
         channels.pack(fill="x", pady=(17, 0))
-        for index, (icon, title) in enumerate(
-            (("globe", "官网"), ("database", "天猫"), ("database", "京东"))
-        ):
+        for index, (channel, title) in enumerate(CHANNEL_LABELS.items()):
             channels.columnconfigure(index, weight=1, uniform="channels")
             item = tk.Frame(channels, bg="#F2F6FD")
             item.grid(row=0, column=index, sticky="ew")
-            self._icon_label(item, icon, size=20, bg="#F2F6FD").pack()
+            label(item, image=self.artwork.channel(channel, size=28) or "", bg="#F2F6FD").pack()
             label(item, title, size=10, bg="#F2F6FD", anchor="center").pack(pady=(4, 0))
         sources = (
             ("一级终端营销系统", "营销商品信息查询表 · 本地导入", self.app.marketing_var),
@@ -958,9 +999,14 @@ class DesktopWorkbench:
         ):
             line = tk.Frame(environment, bg="#F5F8FD", padx=14, pady=13)
             line.grid(row=index + 2, column=0, sticky="ew", pady=3)
-            self._icon_label(line, icon, size=27, bg="#F5F8FD").grid(
-                row=0, column=0, rowspan=2, padx=(0, 14)
-            )
+            if title == "Google Chrome":
+                label(
+                    line, image=self.artwork.get("ui-brands/chrome", 32) or "", bg="#F5F8FD"
+                ).grid(row=0, column=0, rowspan=2, padx=(0, 14))
+            else:
+                self._icon_label(line, icon, size=27, bg="#F5F8FD").grid(
+                    row=0, column=0, rowspan=2, padx=(0, 14)
+                )
             label(line, title, size=13, bold=True, bg="#F5F8FD").grid(row=0, column=1, sticky="w")
             label(line, subtitle, size=10, color=MUTED, bg="#F5F8FD").grid(
                 row=1, column=1, sticky="w", pady=(4, 0)
@@ -999,9 +1045,13 @@ class DesktopWorkbench:
         login.grid(row=1, column=0, sticky="ew", padx=(0, 13), pady=(14, 0))
         login.columnconfigure(0, weight=1)
         label(login, "渠道登录", size=17, bold=True).grid(row=0, column=0, sticky="w")
-        label(login, "京东 / 天猫 · 登录状态由网站验证", size=11, color=MUTED).grid(
-            row=1, column=0, sticky="w", pady=(7, 7)
-        )
+        channel_marks = tk.Frame(login, bg=WHITE)
+        channel_marks.grid(row=1, column=0, sticky="w", pady=(10, 10))
+        for channel in ("jd", "tmall"):
+            label(channel_marks, image=self.artwork.channel(channel, size=26) or "").pack(
+                side="left", padx=(0, 8)
+            )
+            label(channel_marks, CHANNEL_LABELS[channel], size=12).pack(side="left", padx=(0, 20))
         label(
             login,
             "遇到登录或安全验证时，在浏览器完成操作后继续当前任务。",
@@ -1016,6 +1066,16 @@ class DesktopWorkbench:
         about = card(content, padx=20, pady=17)
         about.grid(row=1, column=0, sticky="ew", pady=(14, 0))
         label(about, "关于软件", size=15, bold=True).pack(anchor="w")
+        brands = tk.Frame(about, bg=WHITE)
+        brands.pack(fill="x", pady=(14, 10))
+        for index, name in enumerate(("华为", "OPPO", "vivo", "荣耀", "小米", "苹果")):
+            brands.columnconfigure(index, weight=1, uniform="brand_marks")
+            item = tk.Frame(brands, bg=WHITE)
+            item.grid(row=0, column=index, sticky="ew")
+            label(
+                item, image=self.artwork.channel("official", name, size=34) or "", anchor="center"
+            ).pack()
+            label(item, name, size=10, color=MUTED, anchor="center").pack(pady=(3, 0))
         label(
             about,
             "铺货报价智能体     ·     Mac .170 逻辑基线     ·     本地运行",
@@ -1061,12 +1121,13 @@ class DesktopWorkbench:
             control = button(filters, item, lambda item=item: self._filter(item), padding=(13, 6))
             control.pack(side="left", padx=(0, 5))
             self.filter_buttons[item] = control
-        columns = (("商品", 195), ("渠道", 58), ("价格", 82), ("状态", 104))
+        columns = (("商品", 195), ("渠道", 90), ("价格", 75), ("状态", 102))
         if self.page == "decision":
-            columns = (("商品 / 物料", 190), ("官网", 80), ("天猫", 80), ("京东", 80))
+            columns = (("商品 / 物料", 190), ("最低有效价", 94), ("状态", 100))
         elif self.page == "audit":
-            columns = (("商品", 195), ("渠道", 58), ("价格", 82), ("截图状态", 104))
-        self.table = self._table(panel, columns, row=2)
+            columns = (("商品", 195), ("渠道", 90), ("价格", 82), ("截图状态", 104))
+        self.table = RichTable(panel, columns)
+        self.table.grid(row=2, column=0, sticky="nsew")
         self.table.bind("<<TreeviewSelect>>", self._selection)
         self.empty = label(panel, "尚无数据", color=MUTED, size=10, wraplength=420, justify="left")
         self.empty.grid(row=3, column=0, sticky="ew", pady=(12, 0))
@@ -1083,29 +1144,46 @@ class DesktopWorkbench:
             {"decision": "本条报价依据", "audit": "核验详情"}.get(self.page, "当前采集"),
             size=17,
             bold=True,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 14))
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
         holder = tk.Frame(side, bg=WHITE)
         holder.grid(row=1, column=0, sticky="nsew")
         holder.columnconfigure(0, weight=1)
         holder.rowconfigure(0, weight=1)
         info = self._scrollable(holder)
         info.configure(bg=WHITE)
+        product = tk.Frame(info, bg=WHITE)
+        product.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        product.columnconfigure(1, weight=1)
+        picture = tk.Frame(product, bg=WHITE)
+        picture.grid(row=0, column=0, rowspan=2, padx=(0, 12))
+        self.product_picture = label(picture, image=self.artwork.phone(58) or "")
+        self.product_picture.pack()
+        label(picture, "产品示意", size=8, color=MUTED).pack()
         self.detail_title = label(
-            info, "暂无选中商品", size=14, bold=True, wraplength=290, justify="left"
+            product, "暂无选中商品", size=14, bold=True, wraplength=200, justify="left"
         )
-        self.detail_title.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        self.detail_title.grid(row=0, column=1, sticky="ew", pady=(0, 5))
         self.detail_spec = label(
-            info, "选择左侧记录查看真实结果", size=10, color=MUTED, wraplength=290, justify="left"
+            product,
+            "选择左侧记录查看真实结果",
+            size=10,
+            color=MUTED,
+            wraplength=200,
+            justify="left",
         )
-        self.detail_spec.grid(row=1, column=0, sticky="ew", pady=(0, 16))
+        self.detail_spec.grid(row=1, column=1, sticky="ew")
         for text_label in (self.detail_title, self.detail_spec):
             text_label.bind(
                 "<Configure>",
                 lambda event: event.widget.configure(wraplength=max(80, event.width - 4)),
             )
+        self.detail_source = label(info, "", size=10, color=MUTED, compound="left")
+        self.detail_source.grid(row=1, column=0, sticky="w", pady=(0, 6))
         tiles = tk.Frame(info, bg=WHITE)
-        tiles.grid(row=2, column=0, sticky="ew", pady=(0, 16))
+        tiles.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         self.detail_values = []
+        self.price_tiles = []
+        self.price_marks = []
         labels = (
             ("官网", "天猫", "京东")
             if self.page == "decision"
@@ -1113,16 +1191,25 @@ class DesktopWorkbench:
         )
         for index, text in enumerate(labels):
             tiles.columnconfigure(index, weight=1, uniform="detail")
-            tile = tk.Frame(tiles, bg="#F2F6FD", padx=7, pady=12)
+            tile = tk.Frame(
+                tiles, bg="#F5F8FD", padx=6, pady=10, highlightthickness=1, highlightbackground=LINE
+            )
             tile.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 4, 0))
-            label(tile, text, size=10, color=MUTED, bg="#F2F6FD").pack(anchor="center")
+            self.price_tiles.append(tile)
+            if self.page == "decision":
+                channel = ("official", "tmall", "jd")[index]
+                mark = label(tile, image=self.artwork.channel(channel, size=23) or "", bg="#F5F8FD")
+                mark.pack(pady=(0, 5))
+                self.price_marks.append(mark)
+            tile_title = label(tile, text, size=10, color=MUTED, bg="#F5F8FD")
+            tile_title.pack(anchor="center")
             value = label(
                 tile,
                 "—",
                 size=17 if self.page == "decision" else 11,
                 bold=True,
                 color=BLUE,
-                bg="#F2F6FD",
+                bg="#F5F8FD",
                 wraplength=68,
             )
             value.pack(fill="x", pady=(7, 0))
@@ -1131,6 +1218,14 @@ class DesktopWorkbench:
                 lambda event: event.widget.configure(wraplength=max(30, event.width - 4)),
             )
             self.detail_values.append(value)
+            if self.page != "decision":
+                if index != 1:
+                    tile.grid_remove()
+                else:
+                    tile.grid(row=0, column=0, columnspan=3, padx=0)
+                    tile_title.pack_configure(side="left", padx=(5, 0))
+                    value.pack_configure(side="right", fill="none", pady=0, padx=(12, 4))
+                    value.configure(font=(FONT, 18, "bold"), wraplength=160)
         self.detail_rows = []
         for index, name in enumerate(
             ("最低有效价", "物料编码", "处理异常")
@@ -1138,22 +1233,22 @@ class DesktopWorkbench:
             else ("业务结果", "任务状态", "截图文件")
         ):
             line = tk.Frame(info, bg=WHITE)
-            line.grid(row=index + 3, column=0, sticky="ew", pady=7)
+            line.grid(row=index + 3, column=0, sticky="ew", pady=4)
             line.columnconfigure(1, weight=1)
             label(line, name, color=MUTED, size=11).grid(row=0, column=0, sticky="w")
             primary_price = self.page == "decision" and index == 0
-            value = label(
-                line,
-                "—",
-                size=24 if primary_price else 11,
-                color=BLUE if primary_price else INK,
-                bold=primary_price,
-                anchor="e",
-                wraplength=190,
+            value = (
+                label(line, "—", size=24, color=BLUE, bold=True, anchor="e", wraplength=190)
+                if primary_price
+                else label(line, "—", size=10, color=INK, wraplength=160, justify="right")
+                if self.page == "decision" and index == 1
+                else StatusPill(line)
             )
             value.grid(row=0, column=1, sticky="e", padx=(9, 0))
             self.detail_rows.append(value)
-        tk.Frame(info, bg=LINE, height=1).grid(row=6, column=0, sticky="ew", pady=(10, 12))
+            if self.page != "decision" and index == 2:
+                line.grid_remove()
+        tk.Frame(info, bg=LINE, height=1).grid(row=6, column=0, sticky="ew", pady=(4, 7))
         self.detail = scrolledtext.ScrolledText(
             info,
             width=24,
@@ -1168,14 +1263,30 @@ class DesktopWorkbench:
             state="disabled",
             spacing3=5,
         )
-        self.detail.grid(row=7, column=0, sticky="ew")
+        self.detail.grid(row=7 if self.page == "decision" else 9, column=0, sticky="ew")
+        if self.page != "decision":
+            self.detail.configure(height=2)
+        self.manual_hint = label(
+            info,
+            "",
+            color=ORANGE,
+            size=10,
+            bg="#FFF6E8",
+            wraplength=280,
+            justify="left",
+            padx=10,
+            pady=10,
+        )
+        self.manual_hint.bind(
+            "<Configure>", lambda e: e.widget.configure(wraplength=max(80, e.width - 24))
+        )
         self.preview = None
         self.preview_image = None
         if self.page != "decision":
             self.preview = label(
                 info, "暂无可展示的截图证据", size=11, color=MUTED, bg="#F2F6FD", anchor="center"
             )
-            self.preview.grid(row=8, column=0, sticky="ew", pady=(12, 0), ipady=25)
+            self.preview.grid(row=7, column=0, sticky="ew", pady=(0, 7), ipady=25)
         self.evidence_button = (
             button(side, "查看渠道证据  →", lambda: self.show_page("audit"))
             if self.page == "decision"
@@ -1317,7 +1428,10 @@ class DesktopWorkbench:
         ):
             title.configure(text=text)
             number.configure(text=str(count), fg=number_color)
-            icon_widget.configure(image=self._icon(icon, icon_color, 36) or "")
+            icon_widget.configure(
+                image=self._icon(icon, icon_color, 36) or "",
+                **({"tone": icon_color} if isinstance(icon_widget, IconMedallion) else {}),
+            )
         self.task_status.configure(text=self.model.summary)
         if self.page == "settings":
             self.start_button.configure(
@@ -1342,13 +1456,25 @@ class DesktopWorkbench:
             for index, row in enumerate(self.model.quote_rows):
                 if self.filter == "含异常" and not row.issues:
                     continue
-                values = (row.web_query.model_name or row.material_code, *quote_channel_prices(row))
+                values = (
+                    row.web_query.model_name or row.material_code,
+                    self._price(row.cells.get("AH", "")),
+                    "含异常" if row.issues else "已输出",
+                )
                 self.table.insert(
                     "",
                     "end",
                     iid=str(index),
                     values=values,
-                    tags=("warning",) if row.issues else ("alternate",) if index % 2 else (),
+                    image=self.artwork.phone(42),
+                    subtitle=product_subtitle(
+                        row.web_query.model_name,
+                        " / ".join(
+                            str(v) for v in (row.web_query.storage, row.web_query.color) if v
+                        ),
+                    ),
+                    badges={2: "orange" if row.issues else "green"},
+                    emphasis=(1,),
                 )
             self.empty.configure(
                 text="报价已生成；选择商品查看真实输出字段与异常。"
@@ -1391,7 +1517,22 @@ class DesktopWorkbench:
                         self._price(row.price),
                         last,
                     ),
-                    tags=("warning",) if row.error else ("alternate",) if index % 2 else (),
+                    image=self.artwork.phone(42),
+                    subtitle=product_subtitle(row.model_name, row.specification),
+                    icons={1: self.artwork.channel(row.channel, row.model_name, size=17)},
+                    badges={
+                        3: "orange"
+                        if row.error or row.state in {"waiting_for_login", "paused"}
+                        else "green"
+                        if (
+                            row.evidence_state == "complete"
+                            if self.page == "audit"
+                            else row.state == "succeeded"
+                        )
+                        else "blue"
+                        if row.state == "running"
+                        else "muted"
+                    },
                 )
             self.empty.configure(
                 text=(
@@ -1417,7 +1558,12 @@ class DesktopWorkbench:
 
     @staticmethod
     def _price(value):
-        return f"¥ {value}" if value != "" else "—"
+        if value is None or value == "":
+            return "—"
+        amount = numeric_price(value)
+        if amount is None:
+            return str(value)
+        return f"¥{amount:,.0f}" if amount == amount.to_integral_value() else f"¥{amount:,f}"
 
     def _selection(self, _event=None):
         if self.detail is None:
@@ -1426,6 +1572,11 @@ class DesktopWorkbench:
         self.selected_evidence = None
         title, spec = "暂无选中商品", "选择左侧记录查看真实结果"
         values, checks = ("—", "—", "—"), ("—", "—", "—")
+        tones = ("muted", "muted", "muted")
+        self.detail_source.configure(text="", image="")
+        self.manual_hint.grid_remove()
+        for tile in self.price_tiles:
+            tile.configure(highlightbackground=LINE)
         if not selection:
             text = "运行后可查看价格、业务结果与截图证据。"
         elif self.page == "decision":
@@ -1436,9 +1587,22 @@ class DesktopWorkbench:
                 " / ".join(str(part) for part in (query.storage, query.color) if part)
                 or f"来源行号 {row.source_row_number}"
             )
-            values = quote_channel_prices(row)
+            self.detail_source.configure(
+                text="  三渠道价格比较 · 本次工作簿输出",
+                image=self.artwork.channel("official", title, size=25) or "",
+            )
+            tones = ("blue", "muted", "orange" if row.issues else "green")
+            values = tuple(self._price(row.cells.get(key)) for key in ("AK", "AJ", "AI"))
+            # AH is the existing pipeline output, not a newly calculated UI quote.
+            minimum = numeric_price(row.cells.get("AH"))
+            for tile, mark, channel, key in zip(
+                self.price_tiles, self.price_marks, ("official", "tmall", "jd"), ("AK", "AJ", "AI")
+            ):
+                mark.configure(image=self.artwork.channel(channel, title, size=23) or "")
+                chosen = minimum is not None and numeric_price(row.cells.get(key)) == minimum
+                tile.configure(highlightbackground=BLUE if chosen else LINE)
             checks = (
-                self._cell(row.cells.get("AH")),
+                self._price(row.cells.get("AH")),
                 row.material_code,
                 f"{len(row.issues)} 项" if row.issues else "未记录异常",
             )
@@ -1467,6 +1631,34 @@ class DesktopWorkbench:
                 task.model_name or task.task_id,
                 task.specification or "商品规格以采集记录为准",
             )
+            self.detail_source.configure(
+                text="  "
+                + CHANNEL_LABELS.get(task.channel, task.channel)
+                + " · "
+                + task.state_label,
+                image=self.artwork.channel(task.channel, title, size=25) or "",
+            )
+            tones = (
+                "green" if task.outcome else "muted",
+                "orange"
+                if task.state in {"waiting_for_login", "technical_failure", "paused"}
+                else "green"
+                if task.state == "succeeded"
+                else "blue"
+                if task.state == "running"
+                else "muted",
+                "green" if task.evidence_path and task.evidence_path.is_file() else "muted",
+            )
+            if task.state == "waiting_for_login":
+                self.manual_hint.configure(
+                    text="等待人工处理\n请在浏览器完成登录或安全验证，再点击下方“继续当前任务”。"
+                )
+                self.manual_hint.grid(row=8, column=0, sticky="ew", pady=(10, 0))
+            elif task.error:
+                self.manual_hint.configure(
+                    text="需要关注 · " + task.error + "\n请根据实际执行日志核实原因。"
+                )
+                self.manual_hint.grid(row=8, column=0, sticky="ew", pady=(10, 0))
             values = (
                 CHANNEL_LABELS.get(task.channel, task.channel),
                 self._price(task.price),
@@ -1484,11 +1676,14 @@ class DesktopWorkbench:
             )
             text += "\n\n价格保存与截图完成分别记录。"
         self.detail_title.configure(text=title)
+        self.product_picture.configure(image=self.artwork.phone(58) or "")
         self.detail_spec.configure(text=spec)
         for widget, value in zip(self.detail_values, values):
             widget.configure(text=value)
-        for widget, value in zip(self.detail_rows, checks):
-            widget.configure(text=value)
+        for widget, value, tone in zip(self.detail_rows, checks, tones):
+            widget.configure(
+                text=value, **({"tone": tone} if isinstance(widget, StatusPill) else {})
+            )
         self.detail.configure(state="normal")
         self.detail.delete("1.0", tk.END)
         self.detail.insert(tk.END, text)
@@ -1560,11 +1755,12 @@ class DesktopWorkbench:
         )
         selector.grid(row=0, column=2, padx=(12, 0))
         selector.bind("<<ComboboxSelected>>", lambda _event: self._filter_history())
-        self.history_table = self._table(
-            panel, (("创建时间", 175), ("状态", 100), ("任务标识", 300), ("更新时间", 175)), row=2
+        self.history_table = RichTable(
+            panel, (("创建时间", 175), ("状态", 110), ("任务标识", 250), ("更新时间", 160))
         )
+        self.history_table.grid(row=2, column=0, sticky="nsew")
         self.history_table.bind("<<TreeviewSelect>>", self._history_selection)
-        self.history_table.bind(
+        self.history_table.canvas.bind(
             "<Double-1>", lambda _event: self._history_detail(self.history_table)
         )
         self.history_hint = label(panel, color=MUTED, size=11)
@@ -1610,7 +1806,15 @@ class DesktopWorkbench:
                     run.run_id,
                     run.updated_at[:19].replace("T", " "),
                 ),
-                tags=("alternate",) if index % 2 else (),
+                badges={
+                    1: "green"
+                    if run.state == "completed"
+                    else "orange"
+                    if run.state in {"waiting_for_login", "paused", "failed", "stopped"}
+                    else "blue"
+                    if run.state == "running"
+                    else "muted"
+                },
             )
         items = tree.get_children()
         self.history_hint.configure(
@@ -1625,6 +1829,8 @@ class DesktopWorkbench:
         )
         if selected and selected[0] in items:
             tree.selection_set(selected[0])
+        elif items:
+            tree.selection_set(items[0])
         self._history_selection()
 
     def _history_selection(self, _event=None):
