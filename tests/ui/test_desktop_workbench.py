@@ -140,7 +140,7 @@ def test_native_shortcuts_switch_pages_without_running_task(workbench):
     assert not view.model.running
 
 
-@pytest.mark.parametrize("size", ["1280x850", "1000x720"])
+@pytest.mark.parametrize("size", ["1280x850", "1000x720", "1280x1020"])
 @pytest.mark.parametrize("populated", [False, True])
 def test_native_pages_fit_window_and_scrolled_content_is_reachable(workbench, size, populated):
     """Break caught: actual widget geometry hides controls or clips content at supported sizes."""
@@ -271,3 +271,25 @@ def test_native_card_background_covers_the_full_padded_frame(workbench):
     assert panel.border.winfo_y() == 0
     assert panel.border.winfo_width() == panel.winfo_width()
     assert panel.border.winfo_height() == panel.winfo_height()
+
+
+def test_taller_window_gives_activity_log_more_room_without_losing_state(workbench):
+    view = workbench
+    view.root.deiconify()
+    view.root.geometry("1280x850")
+    view.root.update()
+    view.append_log("保留当前运行记录")
+    before_text = view.app.status.get("1.0", "end")
+    before_height = view.app.status.winfo_height()
+    view.app.continue_button.configure(state="normal")
+    view.root.geometry("1280x1020")
+    view.root.update()
+    assert view.app.status.winfo_height() >= before_height * 3
+    assert view.app.status.get("1.0", "end") == before_text
+    assert str(view.app.continue_button["state"]) == "normal"
+    view.show_overview_tab("reports")
+    view.root.update()
+    assert view.app.status.winfo_height() >= before_height * 3
+    view.root.geometry("1000x720")
+    view.root.update()
+    assert view.app.status.get("1.0", "end") == before_text

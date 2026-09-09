@@ -286,6 +286,8 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
             return []
         def geometry(self, value: str) -> None:
             geometries.append(value)
+        def winfo_screenheight(self):
+            return 1440
 
     for module, names in (
         (desktop_ui.tk, ("Frame", "Label", "Button", "Canvas", "Text")),
@@ -300,7 +302,7 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
     for name in ("base", "marketing", "bop", "output_dir", "year", "month", "brand_mode"):
         setattr(app, name + "_var", SimpleNamespace(get=lambda: "", trace_add=lambda *_args: None))
     app._build()
-    assert geometries == ["1280x850"]
+    assert geometries == ["1280x1020"]
     assert any(item.get("text") == "Design by Gudwin" for item in widgets)
     selectors = [item for item in widgets if "values" in item]
     assert [item["state"] for item in selectors] == ["readonly", "readonly"]

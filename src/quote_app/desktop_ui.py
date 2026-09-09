@@ -147,7 +147,8 @@ class DesktopWorkbench:
         self._trace_ids: list[tuple[tk.StringVar, str]] = []
         self._configure_styles()
         self.root.title(title)
-        self.root.geometry("1280x850")
+        startup_height = min(1020, max(720, self.root.winfo_screenheight() - 100))
+        self.root.geometry(f"1280x{startup_height}")
         self.root.minsize(1000, 720)
         self.root.configure(bg=BG)
         self.root.columnconfigure(1, weight=1)
@@ -165,6 +166,7 @@ class DesktopWorkbench:
         self.body.columnconfigure(0, weight=1)
         self.body.rowconfigure(0, weight=1)
         self._log()
+        self.root.bind("<Configure>", self._resize_log, add="+")
         self.root.bind("<MouseWheel>", self._scroll_wheel, add="+")
         modifier = "Command" if sys.platform == "darwin" else "Control"
         for index, (page, *_rest) in enumerate(PAGES, 1):
@@ -465,6 +467,15 @@ class DesktopWorkbench:
         self.app.cancel_button.pack(side="left")
         self.task_status = label(self.main, "尚未开始任务", size=10, color=MUTED, bg=BG)
         self.task_status.grid(row=5, column=0, sticky="ew", pady=(7, 0))
+
+    def _resize_log(self, event):
+        if event.widget is not self.root:
+            return
+        # Give the activity log the extra vertical room in a taller window,
+        # while keeping the existing compact layout usable on smaller screens.
+        lines = min(12, 2 + max(0, event.height - 850) // 30)
+        if int(self.app.status.cget("height")) != lines:
+            self.app.status.configure(height=lines)
 
     def append_log(self, message: str):
         text = self.app.status
