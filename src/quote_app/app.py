@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from tkinter import filedialog, scrolledtext, ttk
+from tkinter import filedialog, ttk
 from types import MappingProxyType
 
 from quote_app.domain.models import InputPaths, QuoteMonth
@@ -360,7 +360,12 @@ def run_cli(
 
 
 class QuoteApp:
-    """Minimal Tk shell around the already-verified local core pipeline."""
+    """Native workbench controller around the verified local pipeline."""
+
+    status: tk.Text
+    open_button: ttk.Button
+    continue_button: ttk.Button
+    cancel_button: ttk.Button
 
     def __init__(
         self,
@@ -416,133 +421,11 @@ class QuoteApp:
         self._schedule_initial_readiness_check()
 
     def _build(self) -> None:
-        self.root.title(APP_BUILD_LABEL)
-        self.root.geometry("900x700")
-        section_style = ttk.Style(self.root)
-        section_style.configure(
-            "Section.TLabelframe.Label",
-            font="TkDefaultFont",
-        )
-        frame = ttk.Frame(self.root, padding=18)
-        frame.grid(sticky="nsew")
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        frame.columnconfigure(1, weight=1)
+        from quote_app.desktop_ui import DesktopWorkbench
 
-        ttk.Label(
-            frame,
-            text=APP_BUILD_LABEL,
-            font=("Helvetica", 17, "bold"),
-        ).grid(row=0, column=0, columnspan=3, sticky="w")
-        notice = ttk.Label(
-            frame,
-            text=BETA_NOTICE,
-            foreground="#4B5563",
-            wraplength=840,
-            justify="left",
+        self.workbench = DesktopWorkbench(
+            self, title=APP_BUILD_LABEL, credit=AUTHOR_CREDIT, modes=_RUN_MODE_OPTIONS
         )
-        notice.grid(row=1, column=0, columnspan=3, sticky="w", pady=(5, 10))
-        ttk.Separator(frame, orient="horizontal").grid(
-            row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10)
-        )
-
-        files = ttk.LabelFrame(
-            frame,
-            text="数据文件",
-            padding=10,
-            style="Section.TLabelframe",
-        )
-        files.grid(row=3, column=0, columnspan=3, sticky="ew")
-        files.columnconfigure(1, weight=1)
-        self._add_file_row(files, 0, "基础表", self.base_var, False)
-        self._add_file_row(files, 1, "营销商品信息查询表", self.marketing_var, False)
-        self._add_file_row(files, 2, "BOP资源信息表", self.bop_var, False)
-        self._add_file_row(files, 3, "输出目录", self.output_dir_var, True)
-
-        settings = ttk.LabelFrame(
-            frame,
-            text="报价设置",
-            padding=10,
-            style="Section.TLabelframe",
-        )
-        settings.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-        ttk.Label(settings, text="报价月份").grid(row=0, column=0, sticky="w")
-        month_frame = ttk.Frame(settings)
-        month_frame.grid(row=0, column=1, sticky="w", padx=(12, 0))
-        ttk.Entry(month_frame, width=8, textvariable=self.year_var).grid(row=0, column=0)
-        ttk.Label(month_frame, text="年").grid(row=0, column=1, padx=(4, 12))
-        ttk.Combobox(
-            month_frame,
-            width=5,
-            textvariable=self.month_var,
-            values=tuple(str(month) for month in range(1, 13)),
-            state="readonly",
-        ).grid(row=0, column=2)
-        ttk.Label(month_frame, text="月").grid(row=0, column=3, padx=4)
-        ttk.Label(month_frame, text="运行范围").grid(
-            row=0, column=4, padx=(16, 4)
-        )
-        ttk.Combobox(
-            month_frame,
-            textvariable=self.brand_mode_var,
-            values=_RUN_MODE_OPTIONS,
-            state="readonly",
-            width=max(len(mode) for mode in _RUN_MODE_OPTIONS),
-        ).grid(row=0, column=5)
-
-        actions = ttk.LabelFrame(
-            frame,
-            text="操作",
-            padding=10,
-            style="Section.TLabelframe",
-        )
-        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-        ttk.Button(actions, text="开始自动报价", command=self.run).grid(row=0, column=0)
-        ttk.Button(
-            actions,
-            text="首次登录（京东/天猫）",
-            command=self.open_login_browser,
-        ).grid(row=0, column=1, padx=8)
-        ttk.Button(
-            actions,
-            text="检查截图权限",
-            command=self.check_readiness,
-        ).grid(row=0, column=2, padx=(0, 8))
-        self.open_button = ttk.Button(
-            actions, text="打开输出目录", command=self.open_output_directory, state="disabled"
-        )
-        self.open_button.grid(row=0, column=3)
-        self.continue_button = ttk.Button(
-            actions,
-            text="继续当前任务",
-            command=self.continue_current_task,
-            state="disabled",
-        )
-        self.continue_button.grid(row=1, column=0, pady=(8, 0))
-        self.cancel_button = ttk.Button(
-            actions,
-            text="取消本次网页任务",
-            command=self.cancel_manual_action,
-            state="disabled",
-        )
-        self.cancel_button.grid(row=1, column=1, pady=(8, 0))
-
-        result_frame = ttk.LabelFrame(frame, text="运行结果", padding=10)
-        result_frame.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
-        result_frame.columnconfigure(0, weight=1)
-        self.status = scrolledtext.ScrolledText(
-            result_frame,
-            width=72,
-            height=8,
-            state="disabled",
-        )
-        self.status.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(
-            frame,
-            text=AUTHOR_CREDIT,
-            foreground="#9CA3AF",
-            font=("Helvetica", 9),
-        ).grid(row=7, column=0, columnspan=3, sticky="e", pady=(8, 0))
 
     def _add_file_row(
         self, frame: tk.Misc, row: int, label: str, variable: tk.StringVar, directory: bool
@@ -616,6 +499,9 @@ class QuoteApp:
         except InputValidationError as error:
             self._set_status(f"输入无效：{error}")
             return
+        workbench = getattr(self, "workbench", None)
+        if workbench is not None:
+            workbench.begin_run()
         status = f"{APP_BUILD_LABEL}\n自动报价运行中"
         status = f"{self._run_mode_status_prefix()}\n{status}"
         self._set_status(status)
@@ -728,6 +614,9 @@ class QuoteApp:
                 selected = outcome
 
         if not self._closing and selected is not None:
+            workbench = getattr(self, "workbench", None)
+            if workbench is not None:
+                workbench.finish(selected)
             if isinstance(selected, BaseException):
                 if isinstance(selected, CorePipelineError):
                     self._set_status(f"运行未完成：{selected}")
@@ -761,6 +650,9 @@ class QuoteApp:
                 not self._closing
                 and generation == self._active_pipeline_generation
             ):
+                workbench = getattr(self, "workbench", None)
+                if workbench is not None:
+                    workbench.apply_event(event)
                 self._set_status(format_worker_event_status(event))
 
     def continue_current_task(self) -> None:
@@ -831,6 +723,10 @@ class QuoteApp:
 
     def _set_status(self, message: str) -> None:
         if not self._widgets_available():
+            return
+        workbench = getattr(self, "workbench", None)
+        if workbench is not None:
+            workbench.append_log(message)
             return
         self.status.configure(state="normal")
         self.status.delete("1.0", tk.END)

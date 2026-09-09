@@ -269,113 +269,46 @@ def test_gui_approved_run_modes_are_ordered_with_all_brands_first() -> None:
 def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Break caught: the initial window clips credit or selectors permit invalid text."""
+    """The refreshed shell preserves valid selectors, actions and authorship."""
     from quote_app import app as app_module
+    from quote_app import desktop_ui
+    from types import SimpleNamespace
 
-    combobox_options: list[dict[str, object]] = []
-    scrolled_options: list[dict[str, object]] = []
+    widgets: list[dict[str, object]] = []
     geometries: list[str] = []
-    titles: list[str] = []
-    label_texts: list[object] = []
-    labelframe_options: list[dict[str, object]] = []
-    style_configurations: list[tuple[str, dict[str, object]]] = []
 
     class Widget:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def grid(self, **_kwargs: object) -> None:
-            pass
-
-        def columnconfigure(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-    class Combobox(Widget):
         def __init__(self, *_args: object, **kwargs: object) -> None:
-            combobox_options.append(kwargs)
+            widgets.append(kwargs)
+        def __getattr__(self, _name: str):
+            return lambda *_args, **_kwargs: None
+        def winfo_children(self):
+            return []
+        def geometry(self, value: str) -> None:
+            geometries.append(value)
 
-    class Label(Widget):
-        def __init__(self, *_args: object, **kwargs: object) -> None:
-            label_texts.append(kwargs.get("text"))
-
-    class LabelFrame(Widget):
-        def __init__(self, *_args: object, **kwargs: object) -> None:
-            labelframe_options.append(kwargs)
-
-    class Style:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def configure(self, style_name: str, **kwargs: object) -> None:
-            style_configurations.append((style_name, kwargs))
-
-    class ScrolledText(Widget):
-        def __init__(self, *_args: object, **kwargs: object) -> None:
-            scrolled_options.append(kwargs)
-
-    class Root(Widget):
-        def title(self, title: str) -> None:
-            titles.append(title)
-
-        def geometry(self, geometry: str) -> None:
-            geometries.append(geometry)
-
-        def rowconfigure(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-    for name in ("Frame", "Entry", "Button", "Separator"):
-        monkeypatch.setattr(app_module.ttk, name, Widget)
-    monkeypatch.setattr(app_module.ttk, "LabelFrame", LabelFrame)
-    monkeypatch.setattr(app_module.ttk, "Label", Label)
-    monkeypatch.setattr(app_module.ttk, "Combobox", Combobox)
-    monkeypatch.setattr(app_module.ttk, "Style", Style)
-    monkeypatch.setattr(app_module.scrolledtext, "ScrolledText", ScrolledText)
-
+    for module, names in (
+        (desktop_ui.tk, ("Frame", "Label", "Button", "Canvas", "Text")),
+        (desktop_ui.ttk, ("Frame", "Entry", "Button", "Separator", "Combobox", "Style", "Scrollbar", "Treeview")),
+        (desktop_ui.scrolledtext, ("ScrolledText",)),
+    ):
+        for name in names:
+            monkeypatch.setattr(module, name, Widget)
     app = object.__new__(app_module.QuoteApp)
-    app.root = Root()
-    app.base_var = object()
-    app.marketing_var = object()
-    app.bop_var = object()
-    app.output_dir_var = object()
-    app.year_var = object()
-    app.month_var = object()
-    app.brand_mode_var = object()
+    app.root = Widget()
+    for name in ("base", "marketing", "bop", "output_dir", "year", "month", "brand_mode"):
+        setattr(app, name + "_var", SimpleNamespace(get=lambda: "", trace_add=lambda *_args: None))
     app._build()
-
-    assert geometries == ["900x700"]
-    assert titles == ["终端福建分公司铺货报价智能体 2026.09.04.170"]
-    assert "Design by Gudwin" in label_texts
-    assert (
-        "Section.TLabelframe.Label",
-        {"font": "TkDefaultFont"},
-    ) in style_configurations
-    section_frames = {
-        options["text"]: options
-        for options in labelframe_options
-        if options.get("text") in {"数据文件", "报价设置", "操作"}
-    }
-    assert set(section_frames) == {"数据文件", "报价设置", "操作"}
-    assert all(
-        options.get("style") == "Section.TLabelframe"
-        for options in section_frames.values()
-    )
-    assert len(combobox_options) == 2
-    month_options, run_options = combobox_options
-    assert month_options["textvariable"] is app.month_var
-    assert month_options["values"] == tuple(str(month) for month in range(1, 13))
-    assert month_options["state"] == "readonly"
-    assert run_options["textvariable"] is app.brand_mode_var
-    assert run_options["values"] == (
-        "全品牌",
-        "荣耀",
-        "小米",
-        "OPPO",
-        "vivo",
-        "华为",
-        "苹果",
-    )
-    assert run_options["state"] == "readonly"
-    assert scrolled_options == [{"width": 72, "height": 8, "state": "disabled"}]
+    assert geometries == ["1280x850"]
+    assert any(item.get("text") == "Design by Gudwin" for item in widgets)
+    selectors = [item for item in widgets if "values" in item]
+    assert [item["state"] for item in selectors] == ["readonly", "readonly"]
+    assert selectors[0]["textvariable"] is app.month_var
+    assert selectors[1]["textvariable"] is app.brand_mode_var
+    assert selectors[1]["values"] == ("全品牌", "荣耀", "小米", "OPPO", "vivo", "华为", "苹果")
+    assert any(item.get("command") == app.run for item in widgets)
+    assert any(item.get("command") == app.continue_current_task for item in widgets)
+    assert any(item.get("command") == app.cancel_manual_action for item in widgets)
 
 
 @pytest.mark.parametrize("mode", ("全部品牌", "测试品牌"))
