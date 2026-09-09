@@ -402,6 +402,7 @@ class DesktopWorkbench:
         row = self.metrics_frame = tk.Frame(self.main, bg=BG)
         row.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         self.metrics = []
+        self.metric_icons = []
         for index, (color, icon, icon_color) in enumerate(
             ((INK, "files", "blue"), (BLUE, "circle-check", "green"), (ORANGE, "clock", "orange"))
         ):
@@ -413,9 +414,9 @@ class DesktopWorkbench:
                 sticky="ew",
                 padx=(0 if index == 0 else 6, 0 if index == 2 else 6),
             )
-            self._icon_label(panel, icon, color=icon_color, size=36).grid(
-                row=0, column=0, rowspan=2, padx=(0, 16)
-            )
+            icon_widget = self._icon_label(panel, icon, color=icon_color, size=36)
+            icon_widget.grid(row=0, column=0, rowspan=2, padx=(0, 16))
+            self.metric_icons.append(icon_widget)
             title = label(panel, color=INK, size=12)
             title.grid(row=0, column=1, sticky="w")
             number = label(panel, "0", size=25, bold=True, color=color)
@@ -1270,9 +1271,25 @@ class DesktopWorkbench:
                     sum(bool(row.outcome) and row.evidence_state != "complete" for row in rows),
                 ),
             )
-        for (title, number), (text, count) in zip(self.metrics, values):
+        appearance = (
+            (
+                ("files", "blue", INK),
+                ("triangle-alert", "orange", ORANGE),
+                ("circle-check", "green", GREEN),
+            )
+            if self.page == "decision"
+            else (
+                ("files", "blue", INK),
+                ("circle-check", "green", BLUE),
+                ("clock", "orange", ORANGE),
+            )
+        )
+        for (title, number), icon_widget, (text, count), (icon, icon_color, number_color) in zip(
+            self.metrics, self.metric_icons, values, appearance
+        ):
             title.configure(text=text)
-            number.configure(text=str(count))
+            number.configure(text=str(count), fg=number_color)
+            icon_widget.configure(image=self._icon(icon, icon_color, 36) or "")
         self.task_status.configure(text=self.model.summary)
         if self.page == "settings":
             self.start_button.configure(
