@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Shared PyInstaller definition for the Mac pilot and Windows portable build."""
+# ruff: noqa: F821 — build names are injected by PyInstaller
+"""Independent directory-based preview bundle; leaves the stable application intact."""
 
 from pathlib import Path
 import sys
@@ -8,7 +9,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 PROJECT_ROOT = Path(SPECPATH).parent
-APP_NAME = "福建移动铺货报价助手"
+APP_NAME = "铺货报价工作台-UI精修预览"
 TEMPLATE_PATH = "resources/templates/quote_template.xlsx"
 CATALOG_PATH = "resources/sites/catalog.json"
 
@@ -22,8 +23,8 @@ datas = [
         "resources/sites",
     ),
 ]
-datas.append((str(PROJECT_ROOT / 'assets' / 'ui-icons'), 'assets/ui-icons'))
-datas += collect_data_files('playwright')
+datas.append((str(PROJECT_ROOT / "assets" / "ui-icons"), "assets/ui-icons"))
+datas += collect_data_files("playwright")
 
 a = Analysis(
     [str(PROJECT_ROOT / "src" / "quote_app" / "__main__.py")],
@@ -37,7 +38,8 @@ a = Analysis(
         "quote_app.sites.jd",
         "quote_app.sites.tmall",
         "quote_app.sites.official",
-    ] + collect_submodules("quote_app.sites.official_brands"),
+    ]
+    + collect_submodules("quote_app.sites.official_brands"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -48,9 +50,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,
@@ -59,21 +60,8 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
 )
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=True, name=APP_NAME)
 if sys.platform == "darwin":
     app = BUNDLE(
-        exe,
-        a.binaries,
-        a.zipfiles,
-        a.datas,
-        name=f"{APP_NAME}.app",
-        bundle_identifier="com.fjmobile.quotation",
-    )
-else:
-    coll = COLLECT(
-        exe,
-        a.binaries,
-        a.datas,
-        strip=False,
-        upx=True,
-        name=APP_NAME,
+        coll, name=f"{APP_NAME}.app", bundle_identifier="com.fjmobile.quotation.ui-preview"
     )
