@@ -67,7 +67,7 @@ def test_beta_notice_describes_execution_order_and_manual_resume() -> None:
 def test_app_build_label_uses_the_approved_short_title() -> None:
     from quote_app.app import APP_BUILD_LABEL
 
-    assert APP_BUILD_LABEL == "终端福建分公司铺货报价智能体 2026.09.04.170"
+    assert APP_BUILD_LABEL == "终端福建分公司铺货报价智能体 2026.09.04.170 · UI预览版"
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(

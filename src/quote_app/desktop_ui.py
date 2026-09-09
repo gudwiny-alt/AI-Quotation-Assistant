@@ -73,6 +73,7 @@ def button(parent: tk.Misc, text: str, command, *, primary: bool = False, **kwar
         parent,
         text=text,
         command=command,
+        width=0,
         style="Primary.TButton" if primary else "Workbench.TButton",
         **kwargs,
     )
@@ -217,7 +218,7 @@ class DesktopWorkbench:
             size=10,
             bg="#F7FAFF",
         ).grid(row=10, column=0, sticky="w", padx=8)
-        label(sidebar, "2026.09.04.170", color=MUTED, size=9, bg="#F7FAFF").grid(
+        label(sidebar, ".170 · UI预览版", color=MUTED, size=9, bg="#F7FAFF").grid(
             row=11, column=0, sticky="w", padx=8, pady=(6, 4)
         )
         label(sidebar, credit, color=MUTED, size=9, bg="#F7FAFF").grid(
@@ -255,11 +256,11 @@ class DesktopWorkbench:
         ).grid(row=0, column=6)
         bar.columnconfigure(7, weight=1)
         self.app.continue_button = button(
-            bar, "继续当前任务", self.app.continue_current_task, state="disabled"
+            bar, "继续当前任务", self.app.continue_current_task, state="disabled", padding=(7, 7)
         )
         self.app.continue_button.grid(row=0, column=8, padx=(10, 6))
         self.app.cancel_button = button(
-            bar, "取消本次网页任务", self.app.cancel_manual_action, state="disabled"
+            bar, "取消本次网页任务", self.app.cancel_manual_action, state="disabled", padding=(7, 7)
         )
         self.app.cancel_button.grid(row=0, column=9)
 
@@ -351,9 +352,27 @@ class DesktopWorkbench:
             self._workbench()
         self.refresh()
 
+    def _scrollable(self, parent):
+        viewport = tk.Frame(parent, bg=BG)
+        viewport.grid(row=0, column=0, sticky="nsew")
+        viewport.columnconfigure(0, weight=1)
+        viewport.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(viewport, bg=BG, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        content = tk.Frame(canvas, bg=BG)
+        content.columnconfigure(0, weight=1)
+        window = canvas.create_window((0, 0), window=content, anchor="nw")
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        content.bind(
+            "<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        return content
+
     def _overview(self):
-        content = tk.Frame(self.body, bg=BG)
-        content.grid(row=0, column=0, sticky="nsew")
+        content = self._scrollable(self.body)
         content.columnconfigure(0, weight=1)
         intro = tk.Frame(content, bg=BG)
         intro.grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -421,7 +440,8 @@ class DesktopWorkbench:
         )
 
     def _settings(self):
-        panel = card(self.body, padx=22, pady=20)
+        content = self._scrollable(self.body)
+        panel = card(content, padx=22, pady=20)
         panel.grid(row=0, column=0, sticky="nsew")
         panel.columnconfigure(0, weight=1)
         label(panel, "浏览器与截图", size=16, bold=True).grid(row=0, column=0, sticky="w")
@@ -494,6 +514,10 @@ class DesktopWorkbench:
         self.table.bind("<<TreeviewSelect>>", self._selection)
         self.empty = label(panel, "尚无数据", color=MUTED, size=11, wraplength=440, justify="left")
         self.empty.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        self.empty.bind(
+            "<Configure>",
+            lambda event: event.widget.configure(wraplength=max(160, event.width - 4)),
+        )
         side = card(split, padx=18, pady=16)
         side.grid(row=0, column=1, sticky="nsew")
         side.columnconfigure(0, weight=1)
