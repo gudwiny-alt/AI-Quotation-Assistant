@@ -15,6 +15,7 @@ from PIL import Image, ImageTk
 
 from quote_app.resources import bundled_resource_path
 from quote_app.desktop_controls import MonthPicker, SoftEntry, SoftSelect, SoftScrolledText
+from quote_app.desktop_scrolling import bind_scrolling, scroll_canvas
 from quote_app.desktop_widgets import (
     Artwork,
     IconMedallion,
@@ -171,7 +172,7 @@ class DesktopWorkbench:
         self.body.rowconfigure(0, weight=1)
         self._log()
         self.root.bind("<Configure>", self._resize_log, add="+")
-        self.root.bind("<MouseWheel>", self._scroll_wheel, add="+")
+        bind_scrolling(self.root, self._scroll_wheel)
         modifier = "Command" if sys.platform == "darwin" else "Control"
         for index, (page, *_rest) in enumerate(PAGES, 1):
             self.root.bind(f"<{modifier}-Key-{index}>", partial(self._navigate_key, page=page))
@@ -592,7 +593,9 @@ class DesktopWorkbench:
         viewport.grid(row=0, column=0, sticky="nsew")
         viewport.columnconfigure(0, weight=1)
         viewport.rowconfigure(0, weight=1)
-        canvas = tk.Canvas(viewport, bg=BG, highlightthickness=0, borderwidth=0)
+        canvas = tk.Canvas(
+            viewport, bg=BG, highlightthickness=0, borderwidth=0, yscrollincrement=1
+        )
         scrollbar = SlimScrollbar(viewport, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.grid(row=0, column=0, sticky="nsew")
@@ -608,14 +611,15 @@ class DesktopWorkbench:
         )
         return content
 
-    def _scroll_wheel(self, event):
+    def _scroll_wheel(self, event, *, precise=False):
         widget = event.widget
         while widget is not None:
+            if widget.winfo_class() in {"Text", "Listbox", "Treeview"}:
+                # These already scrolled through their native class bindings.
+                return None
             canvas = getattr(widget, "_workbench_scroll_canvas", None)
             if canvas is not None:
-                amount = -event.delta if sys.platform == "darwin" else -int(event.delta / 120)
-                canvas.yview_scroll(amount, "units")
-                return "break"
+                return scroll_canvas(canvas, event, precise=precise)
             widget = getattr(widget, "master", None)
         return None
 

@@ -11,6 +11,7 @@ from tkinter import font as tkfont
 from PIL import Image, ImageTk
 
 from quote_app.resources import bundled_resource_path
+from quote_app.desktop_scrolling import bind_scrolling, scroll_canvas, wheel_pixels
 
 FONT = ".AppleSystemUIFont" if sys.platform == "darwin" else "Microsoft YaHei UI"
 INK, MUTED, BLUE = "#132443", "#72829D", "#2468F5"
@@ -238,7 +239,8 @@ class RichTable(tk.Frame):
         self.canvas.configure(yscrollcommand=self._scrolled)
         self.canvas.bind("<Configure>", self._schedule)
         self.canvas.bind("<Button-1>", self._click)
-        self.canvas.bind("<MouseWheel>", self._wheel)
+        bind_scrolling(self.canvas, self._wheel)
+        bind_scrolling(self.header, self._wheel)
         self.canvas.bind("<Up>", lambda e: self._step(-1))
         self.canvas.bind("<Down>", lambda e: self._step(1))
         self.canvas.bind("<Home>", lambda e: self._step(-len(self.records)))
@@ -262,10 +264,8 @@ class RichTable(tk.Frame):
         self.canvas.yview(*args)
         self._schedule()
 
-    def _wheel(self, event):
-        delta = -event.delta if sys.platform == "darwin" else -int(event.delta / 120)
-        self.canvas.yview_scroll(delta, "units")
-        return "break"
+    def _wheel(self, event, *, precise=False):
+        return scroll_canvas(self.canvas, event, precise=precise)
 
     def get_children(self):
         return tuple(self.records)
@@ -357,7 +357,7 @@ class RichTable(tk.Frame):
         region = (0, 0, width, max(height, total))
         if region != self._region:
             self._region = region
-            c.configure(scrollregion=region, yscrollincrement=20)
+            c.configure(scrollregion=region, yscrollincrement=1)
         first = max(0, int(c.canvasy(0) // self.rowheight))
         end = min(len(self.records), first + height // self.rowheight + 2)
         keys = tuple(self.records)
@@ -528,6 +528,17 @@ class SlimScrollbar(tk.Canvas):
         self.bind("<Leave>", lambda e: self._hover(False))
         self.bind("<Button-1>", self._press)
         self.bind("<B1-Motion>", self._drag)
+        bind_scrolling(self, self._wheel)
+
+    def _wheel(self, event, *, precise=False):
+        dx, dy = wheel_pixels(self, event, precise=precise)
+        pixels = dy if self.orient == "vertical" else dx or dy
+        span = self.last - self.first
+        length, _thumb, _start = self._geometry()
+        if pixels and length > 0 and span < 1:
+            fraction = self.first + pixels * span / length
+            self.command("moveto", max(0.0, min(1 - span, fraction)))
+        return "break"
 
     def set(self, first, last):
         self.first = max(0.0, min(1.0, float(first)))

@@ -222,6 +222,48 @@ def _scroll_canvases(widget):
         yield from _scroll_canvases(child)
 
 
+@pytest.mark.parametrize("sequence,delta", [("<MouseWheel>", -120), ("<TouchpadScroll>", 65516)])
+def test_page_scrolls_over_child_label_and_scrollbar(workbench, scroll_event, sequence, delta):
+    view = workbench
+    view.root.geometry("1000x720")
+    view.show_overview_tab("data")
+    view.root.deiconify()
+    view.root.update()
+    canvas = next(_scroll_canvases(view.body))
+    content = canvas.winfo_children()[0]
+    target = tk.Label(content, text="Wheel regression")
+    target.grid(row=99, column=0)
+    view.root.update()
+    for widget in (target, canvas.master.grid_slaves(row=0, column=1)[0]):
+        canvas.yview_moveto(0)
+        view.root.update()
+        before = canvas.yview()[0]
+        scroll_event(widget, sequence, delta=delta)
+        view.root.update()
+        assert before < canvas.yview()[0] < 0.5
+
+
+def test_scrolling_nested_log_does_not_also_move_outer_page(workbench, scroll_event):
+    from quote_app.desktop_controls import SoftScrolledText
+
+    view = workbench
+    view.root.geometry("1000x720")
+    view.show_overview_tab("data")
+    view.root.deiconify()
+    canvas = next(_scroll_canvases(view.body))
+    content = canvas.winfo_children()[0]
+    log = SoftScrolledText(content, height=3)
+    log.grid(row=99, column=0)
+    log.insert("end", "log line\n" * 100)
+    view.root.update()
+    canvas.yview_moveto(0)
+    before = canvas.yview()
+    scroll_event(log, "<MouseWheel>", delta=-120)
+    view.root.update()
+    assert log.yview()[0] > 0
+    assert canvas.yview() == before
+
+
 def _check_geometry(widget, issues):
     for child in widget.winfo_children():
         if not child.winfo_ismapped():

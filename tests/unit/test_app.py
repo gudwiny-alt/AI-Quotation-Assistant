@@ -277,9 +277,19 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
     widgets: list[dict[str, object]] = []
     geometries: list[str] = []
 
+    def tk_call(*args):
+        if args == ("package", "provide", "Tk"):
+            return "9.0.4"
+        if args == ("package", "vcompare", "9.0.4", "9.0"):
+            return 1
+        if args == ("tk", "windowingsystem"):
+            return "aqua"
+        raise desktop_ui.tk.TclError("Headless fixture does not create native images")
+
     class Widget:
         def __init__(self, *_args: object, **kwargs: object) -> None:
             widgets.append(kwargs)
+            self.tk = SimpleNamespace(call=tk_call)
         def __getattr__(self, _name: str):
             return lambda *_args, **_kwargs: None
         def winfo_children(self):

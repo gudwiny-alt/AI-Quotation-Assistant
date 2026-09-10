@@ -84,6 +84,94 @@ def test_placeholder_is_not_inserted_in_input_or_shared_variable(root):
     assert control.entry.selection_get() == "任务-123"
 
 
+@pytest.mark.parametrize("sequence,down,up", [("<MouseWheel>", -120, 120), ("<TouchpadScroll>", 65516, 20)])
+@pytest.mark.parametrize("surface", ["rows", "bar", "header"])
+def test_table_wheel_moves_in_both_directions_without_skipping_entire_table(
+    root, scroll_event, sequence, down, up, surface
+):
+    from quote_app.desktop_widgets import RichTable
+
+    table = RichTable(root, [("商品", 300)])
+    table.pack(fill="both", expand=True)
+    for index in range(100):
+        table.insert("", "end", iid=str(index), values=(f"商品 {index}",))
+    root.update()
+    target = {"rows": table.canvas, "bar": table.scrollbar, "header": table.header}[surface]
+    before = table.canvas.yview()[0]
+    scroll_event(target, sequence, delta=down)
+    root.update()
+    after = table.canvas.yview()[0]
+    assert before < after < 0.1
+    scroll_event(target, sequence, delta=up)
+    root.update()
+    assert table.canvas.yview()[0] < after
+
+
+@pytest.mark.parametrize("sequence,delta", [("<MouseWheel>", -120), ("<TouchpadScroll>", 65516)])
+def test_log_scrolls_when_pointer_is_over_slim_scrollbar(root, scroll_event, sequence, delta):
+    from quote_app.desktop_controls import SoftScrolledText
+
+    log = SoftScrolledText(root)
+    log.pack(fill="both", expand=True)
+    log.insert("end", "log line\n" * 100)
+    log.configure(state="disabled")
+    root.update()
+    scroll_event(log.vbar, sequence, delta=delta)
+    root.update()
+    assert 0 < log.yview()[0] < 0.1
+
+
+def test_precise_scroll_preserves_small_deltas_and_separates_axes(root, scroll_event):
+    from quote_app.desktop_scrolling import bind_scrolling, scroll_canvas
+
+    canvas = tk.Canvas(root, scrollregion=(0, 0, 4000, 4000), highlightthickness=0)
+    canvas.pack(fill="both", expand=True)
+    bind_scrolling(canvas, lambda event, **kw: scroll_canvas(canvas, event, **kw))
+    root.update()
+    canvas.xview_moveto(0)
+    canvas.yview_moveto(0)
+    # Tk packs signed X into the high word and signed Y into the low word.
+    scroll_event(canvas, "<TouchpadScroll>", delta=65535)  # dy=-1
+    root.update()
+    assert canvas.yview()[0] == pytest.approx(1 / 4000)
+    assert canvas.xview()[0] == 0
+    scroll_event(canvas, "<TouchpadScroll>", delta=-1310720)  # dx=-20, dy=0
+    root.update()
+    assert canvas.xview()[0] == pytest.approx(20 / 4000)
+    assert canvas.yview()[0] == pytest.approx(1 / 4000)
+    scroll_event(canvas, "<MouseWheel>", delta=-120, state=1)  # Shift: horizontal
+    root.update()
+    assert canvas.xview()[0] == pytest.approx(60 / 4000)
+    assert canvas.yview()[0] == pytest.approx(1 / 4000)
+
+
+def test_horizontal_bar_precise_scroll_is_bounded_and_empty_track_is_inert(root, scroll_event):
+    from quote_app.desktop_widgets import SlimScrollbar
+
+    canvas = tk.Canvas(root, scrollregion=(0, 0, 4000, 400), highlightthickness=0)
+    bar = SlimScrollbar(root, orient="horizontal", command=canvas.xview)
+    bar.pack(side="bottom", fill="x")
+    canvas.pack(fill="both", expand=True)
+    canvas.configure(xscrollcommand=bar.set)
+    root.update()
+    canvas.xview_moveto(0)
+    scroll_event(bar, "<TouchpadScroll>", delta=-1310720)  # dx=-20
+    root.update()
+    assert 0 < canvas.xview()[0] < 0.1
+    canvas.xview_moveto(1)
+    root.update()
+    before = canvas.xview()
+    scroll_event(bar, "<MouseWheel>", delta=-120)
+    root.update()
+    assert canvas.xview() == before
+    canvas.configure(scrollregion=(0, 0, 10, 10))
+    root.update()
+    before = canvas.xview()
+    scroll_event(bar, "<TouchpadScroll>", delta=-1310720)
+    root.update()
+    assert canvas.xview() == before
+
+
 @pytest.mark.parametrize("orient", ["vertical", "horizontal"])
 def test_slim_scrollbar_drag_reaches_end_without_exceeding_view(root, orient):
     from quote_app.desktop_widgets import SlimScrollbar
