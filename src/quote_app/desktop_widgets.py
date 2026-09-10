@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 import re
 import sys
 import tkinter as tk
-from tkinter import font as tkfont, ttk
+from tkinter import font as tkfont
 
 from PIL import Image, ImageTk
 
@@ -233,7 +233,7 @@ class RichTable(tk.Frame):
             self, width=1, height=250, bg=WHITE, highlightthickness=0, takefocus=True
         )
         self.canvas.grid(row=1, column=0, sticky="nsew")
-        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._scroll)
+        self.scrollbar = SlimScrollbar(self, orient="vertical", command=self._scroll)
         self.scrollbar.grid(row=1, column=1, sticky="ns")
         self.canvas.configure(yscrollcommand=self._scrolled)
         self.canvas.bind("<Configure>", self._schedule)
@@ -507,3 +507,69 @@ def numeric_price(value):
         return amount if amount.is_finite() else None
     except (InvalidOperation, ValueError, TypeError):
         return None
+
+
+class SlimScrollbar(tk.Canvas):
+    """Arrow-free native scrollbar; an empty track consumes no painted space."""
+
+    def __init__(self, parent, *, orient="vertical", command):
+        self.orient, self.command = orient, command
+        self.first, self.last, self.hover, self.offset = 0.0, 1.0, False, 0.0
+        super().__init__(
+            parent,
+            bg=parent.cget("bg"),
+            highlightthickness=0,
+            borderwidth=0,
+            width=12 if orient == "vertical" else 1,
+            height=12 if orient == "horizontal" else 1,
+        )
+        self.bind("<Configure>", self._draw)
+        self.bind("<Enter>", lambda e: self._hover(True))
+        self.bind("<Leave>", lambda e: self._hover(False))
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._drag)
+
+    def set(self, first, last):
+        self.first = max(0.0, min(1.0, float(first)))
+        self.last = max(self.first, min(1.0, float(last)))
+        self._draw()
+
+    def _hover(self, value):
+        self.hover = value
+        self._draw()
+
+    def _geometry(self):
+        length = self.winfo_height() if self.orient == "vertical" else self.winfo_width()
+        span = self.last - self.first
+        thumb = min(length, max(24, length * span))
+        start = self.first / (1 - span) * (length - thumb) if span < 1 else 0
+        return length, thumb, start
+
+    def _draw(self, _event=None):
+        self.delete("all")
+        if self.last - self.first >= 0.99999:
+            return
+        _length, thumb, start = self._geometry()
+        color = "#92A6C4" if self.hover else "#CBD6E6"
+        inset = 2 if self.hover else 3
+        if self.orient == "vertical":
+            rounded(self, inset, start, 12 - inset, start + thumb, fill=color, radius=4)
+        else:
+            rounded(self, start, inset, start + thumb, 12 - inset, fill=color, radius=4)
+
+    def _position(self, event):
+        return event.y if self.orient == "vertical" else event.x
+
+    def _press(self, event):
+        _length, thumb, start = self._geometry()
+        position = self._position(event)
+        self.offset = position - start if start <= position <= start + thumb else thumb / 2
+        self._drag(event)
+
+    def _drag(self, event):
+        length, thumb, _start = self._geometry()
+        if length <= thumb:
+            return
+        limit = 1 - (self.last - self.first)
+        fraction = (self._position(event) - self.offset) / (length - thumb) * limit
+        self.command("moveto", max(0.0, min(limit, fraction)))

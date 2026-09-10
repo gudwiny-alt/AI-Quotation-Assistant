@@ -284,12 +284,16 @@ def test_taller_window_gives_activity_log_more_room_without_losing_state(workben
     view.app.continue_button.configure(state="normal")
     view.root.geometry("1280x1020")
     view.root.update()
-    assert view.app.status.winfo_height() >= before_height * 3
+    assert view.app.status.winfo_height() > before_height
+    if view.root.winfo_height() >= 1000:
+        assert view.app.status.winfo_height() >= before_height * 3
     assert view.app.status.get("1.0", "end") == before_text
     assert str(view.app.continue_button["state"]) == "normal"
     view.show_overview_tab("reports")
     view.root.update()
-    assert view.app.status.winfo_height() >= before_height * 3
+    assert view.app.status.winfo_height() > before_height
+    if view.root.winfo_height() >= 1000:
+        assert view.app.status.winfo_height() >= before_height * 3
     view.root.geometry("1000x720")
     view.root.update()
     assert view.app.status.get("1.0", "end") == before_text

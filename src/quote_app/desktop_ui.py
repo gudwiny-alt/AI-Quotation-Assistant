@@ -8,17 +8,19 @@ from pathlib import Path
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
 from PIL import Image, ImageTk
 
 from quote_app.resources import bundled_resource_path
+from quote_app.desktop_controls import MonthPicker, SoftEntry, SoftSelect, SoftScrolledText
 from quote_app.desktop_widgets import (
     Artwork,
     IconMedallion,
     RichTable,
     SoftButton,
+    SlimScrollbar,
     StatusPill,
     product_subtitle,
     numeric_price,
@@ -387,22 +389,15 @@ class DesktopWorkbench:
             control.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
             self.stage_buttons[key] = control
         self.run_controls = bar = card(self.context, padx=18, pady=13)
-        bar.columnconfigure(7, weight=1)
+        bar.columnconfigure(4, weight=1)
         label(bar, "报价月份", size=11, color=MUTED).grid(row=0, column=0, padx=(0, 10))
-        ttk.Entry(bar, textvariable=self.app.year_var, width=6).grid(row=0, column=1)
-        label(bar, "年", size=11).grid(row=0, column=2, padx=4)
-        ttk.Combobox(
-            bar,
-            textvariable=self.app.month_var,
-            width=3,
-            state="readonly",
-            values=tuple(str(month) for month in range(1, 13)),
+        MonthPicker(bar, yearvariable=self.app.year_var, monthvariable=self.app.month_var).grid(
+            row=0, column=1
+        )
+        label(bar, "运行范围", size=11, color=MUTED).grid(row=0, column=2, padx=(24, 10))
+        SoftSelect(
+            bar, textvariable=self.app.brand_mode_var, values=modes, state="readonly", width=170
         ).grid(row=0, column=3)
-        label(bar, "月", size=11).grid(row=0, column=4, padx=(4, 24))
-        label(bar, "运行范围", size=11, color=MUTED).grid(row=0, column=5, padx=(0, 10))
-        ttk.Combobox(
-            bar, textvariable=self.app.brand_mode_var, values=modes, state="readonly", width=9
-        ).grid(row=0, column=6)
 
     def _metrics(self):
         row = self.metrics_frame = tk.Frame(self.main, bg=BG)
@@ -435,7 +430,7 @@ class DesktopWorkbench:
         panel.columnconfigure(0, weight=1)
         self.log_heading = label(panel, "最近执行动态", size=14, bold=True)
         self.log_heading.grid(row=0, column=0, sticky="w")
-        self.app.status = scrolledtext.ScrolledText(
+        self.app.status = SoftScrolledText(
             panel,
             height=2,
             width=45,
@@ -598,7 +593,7 @@ class DesktopWorkbench:
         viewport.columnconfigure(0, weight=1)
         viewport.rowconfigure(0, weight=1)
         canvas = tk.Canvas(viewport, bg=BG, highlightthickness=0, borderwidth=0)
-        scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        scrollbar = SlimScrollbar(viewport, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -881,7 +876,7 @@ class DesktopWorkbench:
         output.grid(row=3, column=0, sticky="ew", pady=(14, 0))
         output.columnconfigure(1, weight=1)
         label(output, "输出目录", size=12, bold=True).grid(row=0, column=0, padx=(0, 15))
-        ttk.Entry(output, textvariable=self.app.output_dir_var).grid(row=0, column=1, sticky="ew")
+        SoftEntry(output, textvariable=self.app.output_dir_var).grid(row=0, column=1, sticky="ew")
         button(
             output, "选择目录…", lambda: self.app._choose_directory(self.app.output_dir_var)
         ).grid(row=0, column=2, padx=(10, 0))
@@ -1249,7 +1244,7 @@ class DesktopWorkbench:
             if self.page != "decision" and index == 2:
                 line.grid_remove()
         tk.Frame(info, bg=LINE, height=1).grid(row=6, column=0, sticky="ew", pady=(4, 7))
-        self.detail = scrolledtext.ScrolledText(
+        self.detail = SoftScrolledText(
             info,
             width=24,
             height=4,
@@ -1313,8 +1308,8 @@ class DesktopWorkbench:
         for index, (title, width) in enumerate(columns):
             tree.heading(str(index), text=title, anchor="w")
             tree.column(str(index), width=width, minwidth=55, stretch=index == 0, anchor="w")
-        vertical = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        horizontal = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        vertical = SlimScrollbar(frame, orient="vertical", command=tree.yview)
+        horizontal = SlimScrollbar(frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
         tree.grid(row=0, column=0, sticky="nsew")
         vertical.grid(row=0, column=1, sticky="ns")
@@ -1734,24 +1729,29 @@ class DesktopWorkbench:
         filters = tk.Frame(panel, bg=WHITE)
         filters.grid(row=1, column=0, sticky="ew", pady=(0, 14))
         filters.columnconfigure(1, weight=1)
-        label(filters, "任务标识", color=MUTED, size=11).grid(row=0, column=0, padx=(0, 10))
         self.history_query = tk.StringVar(self.root)
         self.history_state = tk.StringVar(self.root, value="全部状态")
-        entry = ttk.Entry(filters, textvariable=self.history_query)
+        entry = SoftEntry(
+            filters,
+            textvariable=self.history_query,
+            placeholder="输入任务编号搜索",
+            icon=self.artwork.get("ui-icons/search-muted", 20),
+            width=420,
+        )
         entry.grid(row=0, column=1, sticky="ew")
-        entry.bind("<KeyRelease>", lambda _event: self._filter_history())
+
         self.history_snapshot = read_history(self.app.app_paths.task_database)
         states = tuple(
             dict.fromkeys(
                 STATE_LABELS.get(run.state, run.state) for run in self.history_snapshot.runs
             )
         )
-        selector = ttk.Combobox(
+        selector = SoftSelect(
             filters,
             textvariable=self.history_state,
             values=("全部状态", *states),
             state="readonly",
-            width=12,
+            width=160,
         )
         selector.grid(row=0, column=2, padx=(12, 0))
         selector.bind("<<ComboboxSelected>>", lambda _event: self._filter_history())
@@ -1782,6 +1782,12 @@ class DesktopWorkbench:
             state="disabled",
         )
         self.history_detail_button.grid(row=0, column=1, rowspan=2, padx=(10, 0))
+        self._trace_ids.append(
+            (
+                self.history_query,
+                self.history_query.trace_add("write", lambda *_: self._filter_history()),
+            )
+        )
         self._filter_history()
 
     def _filter_history(self):

@@ -292,7 +292,7 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
     for module, names in (
         (desktop_ui.tk, ("Frame", "Label", "Button", "Canvas", "Text")),
         (desktop_ui.ttk, ("Frame", "Entry", "Button", "Separator", "Combobox", "Style", "Scrollbar", "Treeview")),
-        (desktop_ui.scrolledtext, ("ScrolledText",)),
+        (desktop_ui, ("SoftScrolledText", "MonthPicker", "SoftSelect", "SoftEntry", "SlimScrollbar")),
     ):
         for name in names:
             monkeypatch.setattr(module, name, Widget)
@@ -307,10 +307,12 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
     assert geometries == ["1280x1020"]
     assert any(item.get("text") == "Design by Gudwin" for item in widgets)
     selectors = [item for item in widgets if "values" in item]
-    assert [item["state"] for item in selectors] == ["readonly", "readonly"]
-    assert selectors[0]["textvariable"] is app.month_var
-    assert selectors[1]["textvariable"] is app.brand_mode_var
-    assert selectors[1]["values"] == ("全品牌", "荣耀", "小米", "OPPO", "vivo", "华为", "苹果")
+    dates = [item for item in widgets if "yearvariable" in item]
+    assert dates[0]["yearvariable"] is app.year_var
+    assert dates[0]["monthvariable"] is app.month_var
+    assert [item["state"] for item in selectors] == ["readonly"]
+    assert selectors[0]["textvariable"] is app.brand_mode_var
+    assert selectors[0]["values"] == ("全品牌", "荣耀", "小米", "OPPO", "vivo", "华为", "苹果")
     assert any(item.get("command") == app.run for item in widgets)
     assert any(item.get("command") == app.continue_current_task for item in widgets)
     assert any(item.get("command") == app.cancel_manual_action for item in widgets)

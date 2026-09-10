@@ -1,20 +1,19 @@
-# Native UI component polish QA — 2026-09-10
+# Native form controls QA — 2026-09-10
 
 final result: passed
 
-Scope: the user's approved local asset and native component refinement, not a claim of pixel-identical reproduction of all earlier mockups.
+Scope: approved polish of month/year selection, brand/status dropdowns, task search, output directory field, and scrollbars across the existing native app. Stable .170 business logic is unchanged.
 
-References: user-provided red-box screenshots of product rows, source marks, price cards, state labels and activity actions. Compared against actual CUA captures of the packaged native workbench at its default 1280×1020 client size; images in docs/testing/ui-refresh-evidence/polish-2026-09-10. Test fixtures are visibly labelled and never represented as real collection evidence.
+Evidence: docs/testing/ui-refresh-evidence/controls-2026-09-10, with direct CUA captures of the final packaged QA build. Data is visibly labelled as a fixture. Prior product artwork and channel mark QA remains in docs/testing/ui-refresh-evidence/polish-2026-09-10.
 
-Verified improvements:
-- Equal-width vertical activity actions at the tall default size. Compact single toolbar at short sizes; preserved log text, disabled state and callbacks.
-- Product artwork, two-line product/specification rows, rounded selected row, status pills and local source marks are visible in the three workbenches. Source labels fit without ellipses at the default size.
-- Existing minimum quote is prominent, numeric ties handled correctly, missing prices not presented as winning quotes.
-- Intelligence/audit evidence placeholder is visible at the default size; actual files remain the only source of real evidence previews.
-- Official Chrome/JD/Tmall marks are clear in settings and data preparation. Six manufacturer marks are bundled and used by model-name lookup; unknown official sources use a globe.
-- Removed stale empty context height when navigating to history/settings from data preparation.
-- Native geometry/reachability and mouse/keyboard selection tested across supported sizes and empty/populated states. No P0/P1/P2 issues remain for this scope.
+Verified changes:
+- One calendar field with draft year and twelve month buttons; cancel preserves values; invalid year does not commit.
+- Consistent 42px white controls, 8px rounded outlines, blue focus, native text editing and separate placeholders.
+- White dropdowns with pale blue selection, library chevrons, keyboard selection and Escape/outside dismissal; repeated clicks close correctly and cleanup removes popup bindings/traces.
+- Arrowless slim vertical/horizontal scrollbars across page containers, tables and logs; no painted thumb when all content fits.
+- Search changes, including pasted text, filter the existing read-only history data.
+- Actual geometry and content reachability verified in empty/populated pages and supported window sizes. The current display clamps a requested tall window to 946px; log expansion follows actual available height.
 
-Remaining P3 differences from the generated concept: native combo boxes/scrollbars retain their system appearance; long selected detail content scrolls; manufacturer wordmarks have less detail at very small row sizes. The four granular collection steps in the concept have not been fabricated; this version continues to show actual supported task/outcome/evidence states.
+Verification: 1,944 unit tests + 29 native UI tests passed; Ruff/mypy clean. Static review identified a selector focus/toggle race, fixed and covered. Escape focus return was also reproduced and fixed on macOS. Production and independent QA bundles built successfully. Release signature/archive checks are recorded alongside the package.
 
-Verification: 1,944 unit tests + 21 native UI tests passed on final code; Ruff/mypy clean. A separate static reviewer identified one numeric highlighting issue, repaired and covered with decimal/zero/unavailable cases. PyInstaller QA and production builds completed. Bundle signature and archive checks recorded in the release notes.
+No P0/P1/P2 findings remain for this scope. P3 differences: menus retain a plain rectangular popup surface; native text editors remain inside styled shells. The new visuals do not imply additional data collection functionality.

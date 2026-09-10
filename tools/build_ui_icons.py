@@ -6,6 +6,9 @@ import cairosvg
 
 out = Path("assets/ui-icons")
 names = {
+    "search": "search",
+    "calendar": "calendar",
+    "chevron-down": "chevron-down",
     "box": "box",
     "layout-dashboard": "layout-dashboard",
     "chart-no-axes-column-increasing": "chart-bar",
@@ -43,6 +46,8 @@ for local, source in names.items():
     )
     (out / (local + ".svg")).write_text(svg)
     for name, color in colors.items():
+        if name == "muted" and local in {"search", "calendar", "chevron-down"}:
+            color = "#72829D"
         cairosvg.svg2png(
             bytestring=svg.replace("currentColor", color).encode(),
             write_to=str(out / (local + "-" + name + ".png")),
