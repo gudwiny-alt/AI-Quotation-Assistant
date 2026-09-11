@@ -289,10 +289,14 @@ class DesktopWorkbench:
 
     def _sidebar(self, credit):
         sidebar = tk.Frame(
-            self.root, width=236, bg=SIDEBAR, highlightbackground=LINE, highlightthickness=1
+            self.root, width=236, bg=SIDEBAR, highlightthickness=0, borderwidth=0
         )
         sidebar.grid(row=0, column=0, sticky="ns")
         sidebar.grid_propagate(False)
+        # A static divider must not turn into Tk's black keyboard-focus frame.
+        tk.Frame(sidebar, bg=LINE, width=1, borderwidth=0).place(
+            relx=1, rely=0, relheight=1, anchor="ne"
+        )
         sidebar.columnconfigure(0, weight=1)
         sidebar.rowconfigure(9, weight=1)
         brand = tk.Frame(sidebar, bg=SIDEBAR)

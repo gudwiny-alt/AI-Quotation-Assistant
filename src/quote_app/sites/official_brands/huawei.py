@@ -529,7 +529,10 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
                 if len(opened_pages) == 1:
                     popup = opened_pages[0]
                     popup_url = str(getattr(popup, "url", ""))
-                    if popup_url != "about:blank":
+                    # Native Chrome can expose an empty URL before the popup's
+                    # first navigation commits. Keep the existing bounded wait;
+                    # validate the destination as soon as it becomes available.
+                    if popup_url not in {"", "about:blank"}:
                         if not _is_detail_url(popup_url):
                             raise LayoutRecognitionError(
                                 "VMALL portal popup did not reach approved detail"

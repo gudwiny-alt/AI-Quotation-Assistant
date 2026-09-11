@@ -857,6 +857,8 @@ def _select(nodes: list[_Node], selector: str) -> list[_Node]:
 
 
 def _matches(node: _Node, selector: str) -> bool:
+    if selector == "*":
+        return True
     parsed = _SELECTOR.fullmatch(selector)
     if parsed is None:
         raise AssertionError(f"fixture harness does not support selector {selector!r}")
@@ -1633,6 +1635,58 @@ def test_tmall_uses_the_first_available_exact_model_card_when_the_store_lists_du
     )
 
     assert detail_url == "https://detail.tmall.com/item.htm?id=123456789020"
+
+
+def test_tmall_enters_rendered_exact_product_beside_empty_result_placeholder() -> None:
+    page = _FixturePage(fixture="apple_search_empty_tail.html")
+    locator = page.locator("dl.item")
+    cards = tuple(locator.nth(index) for index in range(locator.count()))
+    adapter = TmallAdapter(_apple_spec())
+
+    exact = adapter._exact_product_cards(cards, "iPhone 17")
+
+    assert len(exact) == 1
+    assert adapter._exact_product_detail_url(
+        exact, base_url="https://apple.tmall.com/",
+    ) == "https://detail.tmall.com/item.htm?id=974619066443"
+
+
+@pytest.mark.parametrize("model_name", ["iPhone 17 Pro", "iPhone 18"])
+def test_tmall_empty_result_placeholder_prevents_no_model_conclusion(
+    model_name: str,
+) -> None:
+    page = _FixturePage(fixture="apple_search_empty_tail.html")
+    locator = page.locator("dl.item")
+    cards = tuple(locator.nth(index) for index in range(locator.count()))
+
+    with pytest.raises(LayoutRecognitionError):
+        TmallAdapter(_apple_spec())._exact_product_cards(cards, model_name)
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        '<dl class="item last" data-id="793718245506">未知商品标题</dl>',
+        '<dl class="item last" data-id="793718245506"><img alt="iPhone 17"></dl>',
+        '<dl class="item last" data-id="793718245506"><a href="//detail.tmall.com/item.htm?id=793718245506"></a></dl>',
+        '<dl class="item last" data-id="unknown"> </dl>',
+        '<dl class="item last"> </dl>',
+    ],
+)
+def test_tmall_unrecognized_result_content_still_blocks_exact_product(
+    tail: str,
+) -> None:
+    html = (FIXTURES / "apple_search_empty_tail.html").read_text("utf-8")
+    html = html.replace(
+        '<dl class="item last" data-id="793718245506">                   </dl>',
+        tail,
+    )
+    page = _FixturePage(html=html)
+    locator = page.locator("dl.item")
+    cards = tuple(locator.nth(index) for index in range(locator.count()))
+
+    with pytest.raises(LayoutRecognitionError):
+        TmallAdapter(_apple_spec())._exact_product_cards(cards, "iPhone 17")
 
 
 def test_tmall_sold_out_selected_sku_with_bound_price_is_quoted() -> None:
@@ -3487,6 +3541,56 @@ def test_tmall_apple_waits_only_until_the_first_selected_price_is_available() ->
     assert observation.outcome is BusinessOutcome.PRICE_FOUND
     assert observation.price == Decimal("4399")
     assert page.price_snapshot_reads == 3
+
+
+@pytest.mark.parametrize(
+    ("pre_discount_location", "expected_price"),
+    [("current", Decimal("6799")), ("hidden", None), ("outside", None)],
+)
+def test_apple_selected_sku_subsidy_layout_requires_visible_bound_pre_discount(
+    pre_discount_location: str,
+    expected_price: Decimal | None,
+) -> None:
+    page = _apple_controlled_page(None)
+    panel = next(
+        node for node in page.root.descendants()
+        if node.attrs.get("id") == "tbpcDetail_SkuPanelRightWrap"
+    )
+    parser = _DocumentParser()
+    parser.feed(
+        (FIXTURES / "apple_selected_sku_subsidy_prices.html").read_text("utf-8")
+    )
+    panel.children = parser.root.children
+    for child in panel.children:
+        child.parent = panel
+    for node in panel.descendants():
+        if not node.attrs.get("class", "").startswith("subPrice--"):
+            continue
+        if pre_discount_location == "hidden":
+            node.attrs["hidden"] = ""
+        elif pre_discount_location == "outside":
+            assert node.parent is not None
+            node.parent.children.remove(node)
+            page.root.children.append(node)
+            node.parent = page.root
+    task = _task(
+        brand="苹果", model_name="iPhone 17", ram="8GB", storage="256GB",
+    )
+    adapter = TmallAdapter(_apple_spec())
+
+    if expected_price is None:
+        with pytest.raises(LayoutRecognitionError):
+            adapter.observe(task, cast(Any, page))
+        return
+
+    observation = adapter.observe(task, cast(Any, page))
+
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert observation.price == expected_price
+    assert observation.semantic_state.price == expected_price
+    assert adapter.verified_state_reader(
+        task, cast(Any, page), observation.semantic_state,
+    )().price == expected_price
 
 
 @pytest.mark.parametrize("brand", ["华为", "HONOR", "苹果"])

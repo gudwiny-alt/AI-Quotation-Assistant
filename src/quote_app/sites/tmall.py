@@ -1462,7 +1462,18 @@ class TmallAdapter:
         model_name: str,
     ) -> tuple[Any, ...]:
         exact: list[Any] = []
+        has_empty_placeholder = False
         for card in cards:
+            # The live store can leave a numeric-ID card shell at the end of
+            # its results. It has no product evidence to interpret yet, but
+            # must not block a fully rendered, independently verified match.
+            if (
+                _NUMERIC_SKU.fullmatch(card.get_attribute("data-id") or "")
+                and not card.inner_text().strip()
+                and card.locator("*").count() == 0
+            ):
+                has_empty_placeholder = True
+                continue
             title = _unique_visible_locator(
                 card,
                 TMALL_PRODUCT_TITLES,
@@ -1470,6 +1481,11 @@ class TmallAdapter:
             )
             if _tmall_result_card_matches(model_name, title.inner_text()):
                 exact.append(card)
+        if has_empty_placeholder and not exact:
+            # An unrendered card could still contain the requested model.
+            raise LayoutRecognitionError(
+                "Tmall result cards are incomplete; empty product placeholder remains"
+            )
         return tuple(exact)
 
     def _exact_product_detail_url(
@@ -1919,6 +1935,7 @@ class TmallAdapter:
             normalize_product_text("华为"),
             normalize_product_text("荣耀"),
             normalize_product_text("HONOR"),
+            normalize_product_text("苹果"),
         }
 
     @staticmethod

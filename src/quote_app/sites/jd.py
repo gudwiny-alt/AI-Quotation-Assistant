@@ -449,6 +449,7 @@ class JDAdapter:
             )
         return self._exact_product_detail_url(
             exact_cards,
+            task=task,
             base_url=page.url,
         )
 
@@ -1793,15 +1794,30 @@ class JDAdapter:
         self,
         cards: tuple[Any, ...],
         *,
+        task: WebsiteTask,
         base_url: str,
     ) -> str:
-        available_cards = tuple(
-            card for card in cards if not _result_card_is_unavailable(card)
+        card_urls = tuple(
+            (card, self._card_detail_url(card, base_url=base_url))
+            for card in cards
         )
-        detail_urls = {
-            self._card_detail_url(card, base_url=base_url)
-            for card in (available_cards or cards)
-        }
+        if len({url for _, url in card_urls}) > 1 and any(
+            visible_locators(card, (".jDesc a",)) for card, _ in card_urls
+        ):
+            # JD lists individual colours as separate items of one base model.
+            # Only a unique, explicit configuration may resolve those URLs;
+            # the detail observer still verifies the seller, SKU and price.
+            configuration_urls = {
+                url for card, url in card_urls
+                if _result_card_matches_configuration(card, task)
+            }
+            if len(configuration_urls) == 1:
+                return configuration_urls.pop()
+            raise LayoutRecognitionError("JD exact product result is ambiguous")
+        available_urls = tuple(
+            url for card, url in card_urls if not _result_card_is_unavailable(card)
+        )
+        detail_urls = set(available_urls or tuple(url for _, url in card_urls))
         if not detail_urls:
             raise LayoutRecognitionError("JD exact product link is missing")
         if len(detail_urls) != 1:
@@ -2848,6 +2864,34 @@ def _result_card_is_unavailable(card: Any) -> bool:
 
     card_text = normalize_product_text(card.inner_text())
     return any(marker in card_text for marker in _UNAVAILABLE_STOCK_MARKERS)
+
+
+def _result_card_matches_configuration(card: Any, task: WebsiteTask) -> bool:
+    """Recognize JD's observed model/RAM+storage/colour product-title format."""
+
+    titles = visible_locators(card, (".jDesc a",))
+    if len(titles) != 1:
+        return False
+    title = normalize_product_text(titles[0].inner_text())
+    if not _modern_result_card_matches(task.model_name, title):
+        return False
+    capacities: list[str] = []
+    for requested in (task.ram, task.storage):
+        match = re.fullmatch(
+            r"(\d+(?:\.\d+)?)(GB|TB)", normalize_product_text(requested)
+        )
+        if match is None:
+            return False
+        number, unit = match.groups()
+        # JD's visible 16+512 shorthand omits GB, never TB.
+        capacities.append(re.escape(number) + (r"(?:GB)?" if unit == "GB" else unit))
+    model = re.escape(normalize_product_text(task.model_name)).replace(r"\ ", r"\s*")
+    color = re.escape(normalize_product_text(task.color))
+    pattern = (
+        rf"(?<![A-Z0-9]){model}\s+{capacities[0]}\s*\+\s*{capacities[1]}"
+        rf"\s+{color}(?=\s|$)"
+    )
+    return re.search(pattern, title) is not None
 
 
 def _is_attached_ascii(character: str) -> bool:

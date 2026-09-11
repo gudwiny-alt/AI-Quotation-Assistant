@@ -1104,6 +1104,103 @@ def test_jd_deduplicates_matching_cards_that_share_one_approved_item_url() -> No
     assert observation.url == "https://item.jd.com/100012345678.html"
 
 
+@pytest.mark.parametrize("capacity", ["16+512", "16GB+512GB"])
+@pytest.mark.parametrize("stock_suffix", ["", " 暂时缺货"])
+def test_jd_multiple_color_results_select_the_unique_requested_configuration(
+    capacity: str, stock_suffix: str,
+) -> None:
+    html = (FIXTURES / "honor_magic8_multiple_colors.html").read_text("utf-8")
+    html = html.replace("16+512 天青釉", f"{capacity} 天青釉{stock_suffix}")
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    task = _task(
+        brand="HONOR", model_name="荣耀Magic8", ram="16GB",
+        storage="512GB", color="天青釉",
+    )
+
+    detail_url = JDAdapter(_honor_spec())._search_result(task, page)
+
+    assert detail_url == "https://item.jd.com/100213070059.html"
+
+
+@pytest.mark.parametrize(
+    "target_title",
+    [
+        "荣耀Magic8 12+512 天青釉 5G AI手机",
+        "荣耀Magic8 16+256 天青釉 5G AI手机",
+        "荣耀Magic8 16+512 天青釉限定 5G AI手机",
+        "荣耀Magic8 16+512 5G AI手机",
+        "荣耀Magic8 Pro 16+512 天青釉 5G AI手机",
+        "适用荣耀Magic8 16+512 天青釉 手机壳",
+    ],
+)
+def test_jd_multiple_results_without_one_exact_configuration_fail_closed(
+    target_title: str,
+) -> None:
+    html = (FIXTURES / "honor_magic8_multiple_colors.html").read_text("utf-8")
+    html = html.replace(
+        "荣耀Magic8 16+512 天青釉 第五代骁龙8至尊版 超夜神长焦 新一代青海湖电池 5G AI手机",
+        target_title,
+    )
+    task = _task(
+        brand="HONOR", model_name="荣耀Magic8", ram="16GB",
+        storage="512GB", color="天青釉",
+    )
+
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
+        JDAdapter(_honor_spec())._search_result(task, page)
+
+
+def test_jd_multiple_urls_for_the_requested_configuration_remain_ambiguous() -> None:
+    html = (FIXTURES / "honor_magic8_multiple_colors.html").read_text("utf-8")
+    html = html.replace("16+512 雪域白", "16+512 天青釉")
+    task = _task(
+        brand="HONOR", model_name="荣耀Magic8", ram="16GB",
+        storage="512GB", color="天青釉",
+    )
+
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
+        JDAdapter(_honor_spec())._search_result(task, page)
+
+
+@pytest.mark.parametrize("capacity", ["12+512", "容量待确认"])
+def test_jd_unique_available_wrong_color_does_not_resolve_modern_sku_ambiguity(
+    capacity: str,
+) -> None:
+    html = (FIXTURES / "honor_magic8_multiple_colors.html").read_text("utf-8")
+    html = html.replace("16+512 天青釉", f"{capacity} 天青釉 暂时缺货")
+    html = html.replace("16+512 雪域白", "16+512 雪域白 暂时缺货")
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    task = _task(
+        brand="HONOR", model_name="荣耀Magic8", ram="16GB",
+        storage="512GB", color="天青釉",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
+        JDAdapter(_honor_spec())._search_result(task, page)
+
+
+def test_jd_configuration_match_does_not_hide_conflicting_links_in_one_card() -> None:
+    html = (FIXTURES / "honor_magic8_multiple_colors.html").read_text("utf-8")
+    html = html.replace(
+        '//item.jd.com/100213070059.html', '//item.jd.com/100213070099.html', 1,
+    )
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    task = _task(
+        brand="HONOR", model_name="荣耀Magic8", ram="16GB",
+        storage="512GB", color="天青釉",
+    )
+
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
+        JDAdapter(_honor_spec())._search_result(task, page)
+
+
 def test_jd_sold_out_selected_sku_with_bound_price_is_quoted() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         'data-sku="100012345678">现货</div>',
