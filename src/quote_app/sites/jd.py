@@ -2867,7 +2867,7 @@ def _result_card_is_unavailable(card: Any) -> bool:
 
 
 def _result_card_matches_configuration(card: Any, task: WebsiteTask) -> bool:
-    """Recognize JD's observed model/RAM+storage/colour product-title format."""
+    """Recognize explicit configurations, including the established fixed-RAM model."""
 
     titles = visible_locators(card, (".jDesc a",))
     if len(titles) != 1:
@@ -2875,6 +2875,15 @@ def _result_card_matches_configuration(card: Any, task: WebsiteTask) -> bool:
     title = normalize_product_text(titles[0].inner_text())
     if not _modern_result_card_matches(task.model_name, title):
         return False
+    model = re.escape(normalize_product_text(task.model_name)).replace(r"\ ", r"\s*")
+    color = re.escape(normalize_product_text(task.color))
+    if _allows_fixed_ram_storage_only_capacity(task):
+        # The same narrowly scoped 8GB rule already validates this model's
+        # detail-page capacity options; JD's search titles also omit its RAM.
+        storage = re.escape(normalize_product_text(task.storage))
+        storage_only = rf"(?<![A-Z0-9]){model}\s+{storage}\s+{color}(?=\s|$)"
+        if re.search(storage_only, title) is not None:
+            return True
     capacities: list[str] = []
     for requested in (task.ram, task.storage):
         match = re.fullmatch(
@@ -2885,8 +2894,6 @@ def _result_card_matches_configuration(card: Any, task: WebsiteTask) -> bool:
         number, unit = match.groups()
         # JD's visible 16+512 shorthand omits GB, never TB.
         capacities.append(re.escape(number) + (r"(?:GB)?" if unit == "GB" else unit))
-    model = re.escape(normalize_product_text(task.model_name)).replace(r"\ ", r"\s*")
-    color = re.escape(normalize_product_text(task.color))
     pattern = (
         rf"(?<![A-Z0-9]){model}\s+{capacities[0]}\s*\+\s*{capacities[1]}"
         rf"\s+{color}(?=\s|$)"

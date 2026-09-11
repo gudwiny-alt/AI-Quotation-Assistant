@@ -66,6 +66,7 @@ JD_MODERN_CURRENT_SKU_SELLING_PRICES = (
 )
 JD_MODERN_DELIVERY_REGIONS = (
     ".logistics-delivery-time",
+    '.logistics-address-main [class*="jd_area_text_"][data-id]',
 )
 JD_CURRENT_SKU_MARKERS = (
     ".choose-attrs[data-current-sku]",

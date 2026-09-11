@@ -1201,6 +1201,50 @@ def test_jd_configuration_match_does_not_hide_conflicting_links_in_one_card() ->
         JDAdapter(_honor_spec())._search_result(task, page)
 
 
+def _huawei_search_page(html: str) -> _FixturePage:
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-466323-1000004259-1000004259-0-0-0-0-1-1-60.html")
+    return page
+
+
+def test_huawei_search_resolves_storage_only_target_with_fixed_ram() -> None:
+    html = (FIXTURES / "huawei_changxiang_storage_only_results.html").read_text("utf-8")
+    task = _task(brand="华为", model_name="华为畅享 90 Pro Max", ram="8GB",
+                 storage="256GB", color="曜金黑")
+
+    assert JDAdapter(_huawei_spec())._search_result(task, _huawei_search_page(html)) == (
+        "https://item.jd.com/100331677402.html"
+    )
+
+
+@pytest.mark.parametrize("ram", ["12GB", "16GB"])
+def test_huawei_search_storage_only_does_not_infer_other_ram(ram: str) -> None:
+    html = (FIXTURES / "huawei_changxiang_storage_only_results.html").read_text("utf-8")
+    task = _task(brand="华为", model_name="华为畅享 90 Pro Max", ram=ram,
+                 storage="256GB", color="曜金黑")
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
+        JDAdapter(_huawei_spec())._search_result(task, _huawei_search_page(html))
+
+
+@pytest.mark.parametrize("replacement", ["512GB 曜金黑", "256GB 曜金黑限定", "256 曜金黑", "256GB"])
+def test_huawei_search_storage_only_rejects_wrong_or_incomplete_target(replacement: str) -> None:
+    html = (FIXTURES / "huawei_changxiang_storage_only_results.html").read_text("utf-8")
+    html = html.replace("256GB 曜金黑", replacement)
+    task = _task(brand="华为", model_name="华为畅享 90 Pro Max", ram="8GB",
+                 storage="256GB", color="曜金黑")
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
+        JDAdapter(_huawei_spec())._search_result(task, _huawei_search_page(html))
+
+
+def test_huawei_search_duplicate_target_urls_remain_ambiguous() -> None:
+    html = (FIXTURES / "huawei_changxiang_storage_only_results.html").read_text("utf-8")
+    html = html.replace("256GB 飞天青", "256GB 曜金黑")
+    task = _task(brand="华为", model_name="华为畅享 90 Pro Max", ram="8GB",
+                 storage="256GB", color="曜金黑")
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
+        JDAdapter(_huawei_spec())._search_result(task, _huawei_search_page(html))
+
+
 def test_jd_sold_out_selected_sku_with_bound_price_is_quoted() -> None:
     html = (FIXTURES / "normal.html").read_text("utf-8").replace(
         'data-sku="100012345678">现货</div>',
@@ -1979,6 +2023,40 @@ def test_jd_no_model_capture_rect_ends_at_real_results_not_recommendations() -> 
     assert rectangles[1].height == 220
 
 
+_JD_OBSERVED_ADDRESS = (
+    '<div class="logistics-address-main" id="area-2026">'
+    '<div class="jd_area_text_wrap_dvSeIXYN item"><div class="jd_custom__W1l8pjf">'
+    '<div class="jd_area_text_wBZaLGYG" data-id="16-1303">福建福州市</div>'
+    '</div></div></div>'
+)
+
+
+def test_jd_modern_address_without_delivery_estimate_is_recognized() -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text("utf-8")
+    html = html.replace(
+        '<div class="logistics-delivery-time">福建 &gt; 福州：预计明日送达</div>',
+        _JD_OBSERVED_ADDRESS,
+    )
+    observation = _observe(html=html)
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+@pytest.mark.parametrize("address", [
+    _JD_OBSERVED_ADDRESS.replace('data-id="16-1303"', 'hidden data-id="16-1303"'),
+    _JD_OBSERVED_ADDRESS.replace('福建福州市', ''),
+    _JD_OBSERVED_ADDRESS.replace('logistics-address-main', 'unrelated-address'),
+    _JD_OBSERVED_ADDRESS + _JD_OBSERVED_ADDRESS,
+])
+def test_jd_modern_address_fallback_requires_one_visible_bound_region(address: str) -> None:
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text("utf-8")
+    html = html.replace(
+        '<div class="logistics-delivery-time">福建 &gt; 福州：预计明日送达</div>',
+        address,
+    )
+    with pytest.raises(LayoutRecognitionError, match="delivery region"):
+        _observe(html=html)
+
+
 def test_huawei_changxiang_90_pro_max_matches_fixed_ram_storage_only_capacity() -> None:
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
@@ -2428,7 +2506,17 @@ def test_honor_store_entry_can_open_one_exact_item_without_legacy_search_form() 
     ]
 
 
-def test_modern_detail_reports_ineligible_subsidy_price_for_manual_completion() -> None:
+@pytest.mark.parametrize("price_panel", [
+    '<div class="product-price-panel"><span class="product-price--main">'
+    '¥4,299</span>国补领后价</div>',
+    '<div class="product-price-panel"><span class="product-price--main">'
+    '¥2140.18</span><span>到手价</span><div class="product-price--gray">'
+    '<span>¥2149</span><span class="product-price--gray-label">补贴价</span>'
+    '</div></div>',
+])
+def test_modern_detail_reports_ineligible_subsidy_price_for_manual_completion(
+    price_panel: str,
+) -> None:
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
     ).replace(
@@ -2440,7 +2528,7 @@ def test_modern_detail_reports_ineligible_subsidy_price_for_manual_completion() 
         1,
     ).replace(
         '<div class="product-price-panel"><span class="product-price--main">¥4,299</span></div>',
-        '<div class="product-price-panel"><span class="product-price--main">¥4,299</span>国补领后价</div>',
+        price_panel,
         1,
     )
 
