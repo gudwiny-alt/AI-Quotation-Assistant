@@ -67,7 +67,7 @@ def test_beta_notice_describes_execution_order_and_manual_resume() -> None:
 def test_app_build_label_uses_the_approved_short_title() -> None:
     from quote_app.app import APP_BUILD_LABEL
 
-    assert APP_BUILD_LABEL == "终端福建分公司铺货报价智能体 2026.09.04.170 · UI预览版"
+    assert APP_BUILD_LABEL == "终端福建分公司报价决策智能体 2026.09.04.170 · UI预览版"
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(
@@ -308,7 +308,9 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
             monkeypatch.setattr(module, name, Widget)
     monkeypatch.setattr(desktop_ui, "RoundedCard", Widget)
     monkeypatch.setattr(desktop_ui, "SoftButton", Widget)
-    monkeypatch.setattr(desktop_ui, "Artwork", lambda _root: SimpleNamespace(channel=lambda *args, **kwargs: None))
+    monkeypatch.setattr(desktop_ui, "Artwork", lambda _root: SimpleNamespace(
+        channel=lambda *args, **kwargs: None, get=lambda *args, **kwargs: None
+    ))
     app = object.__new__(app_module.QuoteApp)
     app.root = Widget()
     for name in ("base", "marketing", "bop", "output_dir", "year", "month", "brand_mode"):

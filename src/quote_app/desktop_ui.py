@@ -301,10 +301,14 @@ class DesktopWorkbench:
         sidebar.rowconfigure(9, weight=1)
         brand = tk.Frame(sidebar, bg=SIDEBAR)
         brand.grid(row=0, column=0, sticky="ew", padx=21, pady=(29, 33))
-        self._icon_label(brand, "box", size=30, bg=SIDEBAR).grid(
+        label(
+            brand,
+            image=self.artwork.get("ui-media/quotation-decision-logo", 36) or "",
+            bg=SIDEBAR,
+        ).grid(
             row=0, column=0, rowspan=2, padx=(0, 10)
         )
-        label(brand, "铺货报价智能体", size=15, bold=True, bg=SIDEBAR).grid(
+        label(brand, "报价决策智能体", size=15, bold=True, bg=SIDEBAR).grid(
             row=0, column=1, sticky="w"
         )
         label(brand, "福建分公司 · 终端业务", size=10, color=MUTED, bg=SIDEBAR).grid(
@@ -1081,7 +1085,7 @@ class DesktopWorkbench:
             label(item, name, size=10, color=MUTED, anchor="center").pack(pady=(3, 0))
         label(
             about,
-            "铺货报价智能体     ·     Mac .170 逻辑基线     ·     本地运行",
+            "报价决策智能体     ·     Mac .170 逻辑基线     ·     本地运行",
             size=11,
             color=MUTED,
         ).pack(anchor="w", pady=(8, 0))
