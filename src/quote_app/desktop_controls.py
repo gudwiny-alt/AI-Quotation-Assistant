@@ -210,7 +210,9 @@ class SoftSelect(SoftButton):
             selectbackground=PALE,
             selectforeground=BLUE,
             exportselection=False,
-            font=(FONT, 12),
+            font=(FONT, 11),
+            height=min(8, max(1, len(self.values))),
+            selectborderwidth=3,
             activestyle="none",
         )
         self.listbox.pack(side="left", fill="both", expand=True)
@@ -228,14 +230,18 @@ class SoftSelect(SoftButton):
         self.listbox.bind("<ButtonRelease-1>", self._clicked_option)
         self.listbox.bind("<Return>", self._keyboard_option)
         self.listbox.bind("<space>", self._keyboard_option)
-        self._present_popup(
-            max(self.winfo_width(), 160), min(8, max(1, len(self.values))) * 26 + 16, self.listbox
-        )
+        # Let Tk measure the configured rows, font and selection padding together.
+        popup.update_idletasks()
+        self._present_popup(max(self.winfo_width(), 160), popup.winfo_reqheight(), self.listbox)
 
     def _clicked_option(self, event):
         index = self.listbox.nearest(event.y)
-        if 0 <= index < len(self.values):
-            self.choose(self.values[index])
+        bounds = self.listbox.bbox(index)
+        if bounds and 0 <= event.y < self.listbox.winfo_height():
+            padding = int(self.listbox.cget("selectborderwidth"))
+            _, y, _, height = bounds
+            if y - padding <= event.y < y + height + padding:
+                self.choose(self.values[index])
 
     def _keyboard_option(self, _event):
         selection = self.listbox.curselection()

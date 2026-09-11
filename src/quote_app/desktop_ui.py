@@ -1202,20 +1202,18 @@ class DesktopWorkbench:
                 self.price_marks.append(mark)
             tile_title = label(tile, text, size=10, color=MUTED, bg="#F5F8FD")
             tile_title.pack(anchor="center")
+            # Monetary values must keep their natural single-line width; wrapping
+            # to the label's own width feeds the initial em dash back into layout.
             value = label(
                 tile,
                 "—",
-                size=17 if self.page == "decision" else 11,
+                size=12 if self.page == "decision" else 11,
                 bold=True,
                 color=BLUE,
                 bg="#F5F8FD",
-                wraplength=68,
+                wraplength=0,
             )
             value.pack(fill="x", pady=(7, 0))
-            value.bind(
-                "<Configure>",
-                lambda event: event.widget.configure(wraplength=max(30, event.width - 4)),
-            )
             self.detail_values.append(value)
             if self.page != "decision":
                 if index != 1:
@@ -1224,7 +1222,7 @@ class DesktopWorkbench:
                     tile.grid(row=0, column=0, columnspan=3, padx=0)
                     tile_title.pack_configure(side="left", padx=(5, 0))
                     value.pack_configure(side="right", fill="none", pady=0, padx=(12, 4))
-                    value.configure(font=(FONT, 18, "bold"), wraplength=160)
+                    value.configure(font=(FONT, 18, "bold"), wraplength=0)
         self.detail_rows = []
         for index, name in enumerate(
             ("最低有效价", "物料编码", "处理异常")
@@ -1237,7 +1235,7 @@ class DesktopWorkbench:
             label(line, name, color=MUTED, size=11).grid(row=0, column=0, sticky="w")
             primary_price = self.page == "decision" and index == 0
             value = (
-                label(line, "—", size=24, color=BLUE, bold=True, anchor="e", wraplength=190)
+                label(line, "—", size=24, color=BLUE, bold=True, anchor="e", wraplength=0)
                 if primary_price
                 else label(line, "—", size=10, color=INK, wraplength=160, justify="right")
                 if self.page == "decision" and index == 1

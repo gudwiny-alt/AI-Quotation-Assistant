@@ -458,3 +458,46 @@ def test_history_and_settings_do_not_keep_space_from_hidden_data_controls(workbe
     view.root.update()
     assert view.context.winfo_ismapped()
     assert view.run_controls.winfo_ismapped()
+
+
+@pytest.mark.parametrize("size", ["1000x720", "1280x850"])
+@pytest.mark.parametrize("page", ["intelligence", "decision", "audit"])
+def test_real_prices_remain_single_line_and_fit_after_selection_and_resize(workbench, size, page):
+    """Break caught: self-referential wrapping collapses prices into a vertical stack."""
+    from tkinter import font
+    from quote_app.domain.models import QuoteRow, WebQuery
+
+    view = workbench
+    view.root.deiconify()
+    view.root.geometry(size)
+    view.show_page(page)
+    view.root.update()
+    view.model.rows = [
+        TaskRow("price-1", "华为 Mate 80", "official", "5499", "price_found", "succeeded")
+    ]
+    view.model.quote_rows = (
+        QuoteRow(
+            2,
+            "material-1",
+            cells={"AK": 5499, "AJ": 5999, "AI": 5799, "AH": 5499},
+            web_query=WebQuery(model_name="华为 Mate 80"),
+        ),
+    )
+    view.refresh()
+    view.root.update()
+    prices = view.detail_values if page == "decision" else [view.detail_values[1]]
+    if page == "decision":
+        prices = prices + [view.detail_rows[0]]
+    expected = ["¥5,499", "¥5,999", "¥5,799", "¥5,499"] if page == "decision" else ["¥5,499"]
+    for target_size in (size, "1280x850" if size == "1000x720" else "1000x720", size):
+        view.root.geometry(target_size)
+        view.refresh()
+        view.root.update()
+        for widget, amount in zip(prices, expected):
+            assert widget.cget("text") == amount
+            text_font = font.Font(root=view.root, font=widget.cget("font"))
+            assert widget.winfo_height() <= text_font.metrics("linespace") + 8, (
+                page, target_size, amount, widget.winfo_width(), widget.winfo_height()
+            )
+            assert widget.winfo_width() >= text_font.measure(amount)
+            assert widget.winfo_x() + widget.winfo_width() <= widget.master.winfo_width()

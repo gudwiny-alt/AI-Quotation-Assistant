@@ -255,3 +255,79 @@ def test_escape_returns_focus_to_selector_and_tab_reaches_next_field(root):
     first.event_generate("<Tab>")
     root.update()
     assert root.focus_get() is second
+
+
+def test_scope_popup_height_matches_seven_actual_rows(root):
+    """Break caught: guessed pixel row height leaves several empty selectable rows."""
+    from quote_app.desktop_controls import SoftSelect
+
+    values = ("全品牌", "荣耀", "小米", "OPPO", "vivo", "华为", "苹果")
+    control = SoftSelect(root, textvariable=tk.StringVar(root, "荣耀"), values=values)
+    control.pack()
+    root.update()
+    control.open_popup()
+    root.update()
+    assert control.listbox.get(0, "end") == values
+    assert control.listbox.curselection() == (1,)
+    _, last_y, _, last_height = control.listbox.bbox(6)
+    assert 0 <= control.listbox.winfo_height() - last_y - last_height <= 8
+    assert control.popup.winfo_height() <= last_y + last_height + 26
+
+
+@pytest.mark.parametrize("inside", [False, True])
+def test_scope_popup_blank_area_does_not_choose_last_option(root, inside):
+    """Break caught: Listbox.nearest maps a release in empty space to the last value."""
+    from quote_app.desktop_controls import SoftSelect
+
+    variable = tk.StringVar(root, "全品牌")
+    control = SoftSelect(root, textvariable=variable, values=("全品牌", "荣耀", "苹果"))
+    control.pack()
+    root.update()
+    control.open_popup()
+    root.update()
+    if inside:
+        control.popup.geometry(
+            f"{control.popup.winfo_width()}x{control.popup.winfo_height() + 40}"
+        )
+        root.update()
+    y = control.listbox.winfo_height() + (-6 if inside else 6)
+    control.listbox.event_generate("<ButtonRelease-1>", x=10, y=y)
+    root.update()
+    assert variable.get() == "全品牌"
+    assert control.popup is not None
+    control.close_popup()
+
+
+def test_scope_popup_mouse_keyboard_and_overflow_wheel_keep_real_selection(root, scroll_event):
+    from quote_app.desktop_controls import SoftSelect
+
+    values = ("全品牌", "荣耀", "小米", "OPPO", "vivo", "华为", "苹果")
+    variable = tk.StringVar(root, "全品牌")
+    control = SoftSelect(root, textvariable=variable, values=values)
+    control.pack()
+    root.update()
+    control.open_popup()
+    control.listbox.focus_force()
+    root.update()
+    control.listbox.event_generate("<Down>")
+    control.listbox.event_generate("<Return>")
+    root.update()
+    assert variable.get() == "荣耀"
+    assert control.popup is None
+    control.open_popup()
+    root.update()
+    x, y, width, height = control.listbox.bbox(5)
+    control.listbox.event_generate("<Button-1>", x=x + width // 2, y=y + height // 2)
+    control.listbox.event_generate("<ButtonRelease-1>", x=x + width // 2, y=y + height // 2)
+    root.update()
+    assert variable.get() == "华为"
+    assert control.popup is None
+    control.values = tuple(f"品牌 {index}" for index in range(20))
+    variable.set("品牌 0")
+    control.open_popup()
+    root.update()
+    scroll_event(control.listbox, "<MouseWheel>", delta=-120)
+    root.update()
+    assert control.listbox.yview()[0] > 0
+    assert variable.get() == "品牌 0"
+    control.close_popup()
