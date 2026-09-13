@@ -290,6 +290,7 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
         def __init__(self, *_args: object, **kwargs: object) -> None:
             widgets.append(kwargs)
             self.tk = SimpleNamespace(call=tk_call)
+            self._font = SimpleNamespace(configure=lambda **_kwargs: None)
         def __getattr__(self, _name: str):
             return lambda *_args, **_kwargs: None
         def winfo_children(self):
@@ -298,6 +299,10 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
             geometries.append(value)
         def winfo_screenheight(self):
             return 1440
+        def winfo_screenwidth(self):
+            return 2560
+        def winfo_width(self):
+            return 1536
 
     for module, names in (
         (desktop_ui.tk, ("Frame", "Label", "Button", "Canvas", "Text")),
@@ -308,6 +313,7 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
             monkeypatch.setattr(module, name, Widget)
     monkeypatch.setattr(desktop_ui, "RoundedCard", Widget)
     monkeypatch.setattr(desktop_ui, "SoftButton", Widget)
+    monkeypatch.setattr(desktop_ui, "SidebarButton", Widget)
     monkeypatch.setattr(desktop_ui, "Artwork", lambda _root: SimpleNamespace(
         channel=lambda *args, **kwargs: None, get=lambda *args, **kwargs: None
     ))
@@ -316,7 +322,7 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
     for name in ("base", "marketing", "bop", "output_dir", "year", "month", "brand_mode"):
         setattr(app, name + "_var", SimpleNamespace(get=lambda: "", trace_add=lambda *_args: None))
     app._build()
-    assert geometries == ["1280x1020"]
+    assert geometries == ["1536x1020"]
     assert any(item.get("text") == "Design by Gudwin" for item in widgets)
     selectors = [item for item in widgets if "values" in item]
     dates = [item for item in widgets if "yearvariable" in item]

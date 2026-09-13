@@ -25,6 +25,7 @@ from quote_app.desktop_widgets import (
     StatusPill,
     product_subtitle,
     numeric_price,
+    rounded,
 )
 
 from quote_app.desktop_state import (
@@ -86,6 +87,29 @@ def label(
 
 def button(parent: tk.Misc, text: str, command, *, primary: bool = False, **kwargs):
     return SoftButton(parent, text=text, command=command, primary=primary, **kwargs)
+
+
+class SidebarButton(SoftButton):
+    """Image-led, rounded navigation preserving the existing page commands."""
+
+    def _draw(self, _event=None):
+        self.delete("all")
+        active = self.options["style"] == "NavActive.TButton"
+        fill = BLUE if active else PALE if self.hover else SIDEBAR
+        edge = BLUE if self.focus_get() is self else fill
+        width, height = self.winfo_width(), self.winfo_height()
+        rounded(self, 1, 1, max(2, width - 1), max(2, height - 1),
+                fill=fill, outline=edge, radius=9)
+        picture = self.options["image"]
+        if picture:
+            self.create_image(20, height / 2, image=picture, anchor="w")
+        self._font.configure(size=-20, weight="bold" if active else "normal")
+        self.create_text(60, height / 2, text=self.options["text"], anchor="w",
+                         fill=WHITE if active else INK, font=self._font)
+
+    def _measure(self):
+        tk.Canvas.configure(self, width=230, height=60)
+        self._draw()
 
 
 class RoundedCard(tk.Frame):
@@ -158,7 +182,8 @@ class DesktopWorkbench:
         self._configure_styles()
         self.root.title(title)
         startup_height = min(1020, max(720, self.root.winfo_screenheight() - 100))
-        self.root.geometry(f"1280x{startup_height}")
+        startup_width = min(1536, max(1000, self.root.winfo_screenwidth() - 100))
+        self.root.geometry(f"{startup_width}x{startup_height}")
         self.root.minsize(1000, 720)
         self.root.configure(bg=BG)
         self.root.columnconfigure(1, weight=1)
@@ -177,6 +202,7 @@ class DesktopWorkbench:
         self.body.rowconfigure(0, weight=1)
         self._log()
         self.root.bind("<Configure>", self._resize_log, add="+")
+        self.root.bind("<Configure>", self._resize_review_shell, add="+")
         bind_scrolling(self.root, self._scroll_wheel)
         modifier = "Command" if sys.platform == "darwin" else "Control"
         for index, (page, *_rest) in enumerate(PAGES, 1):
@@ -293,7 +319,7 @@ class DesktopWorkbench:
         return label(parent, image=picture or "", bg=bg, width=size if picture else 2)
 
     def _sidebar(self, credit):
-        sidebar = tk.Frame(self.root, width=236, bg=SIDEBAR, highlightthickness=0, borderwidth=0)
+        sidebar = self.sidebar = tk.Frame(self.root, width=272, bg=SIDEBAR, highlightthickness=0, borderwidth=0)
         sidebar.grid(row=0, column=0, sticky="ns")
         sidebar.grid_propagate(False)
         # A static divider must not turn into Tk's black keyboard-focus frame.
@@ -303,16 +329,17 @@ class DesktopWorkbench:
         sidebar.columnconfigure(0, weight=1)
         sidebar.rowconfigure(9, weight=1)
         brand = tk.Frame(sidebar, bg=SIDEBAR)
-        brand.grid(row=0, column=0, sticky="ew", padx=21, pady=(29, 33))
+        brand.grid(row=0, column=0, sticky="ew", padx=20, pady=(28, 40))
         label(
             brand,
-            image=self.artwork.get("ui-media/quotation-decision-logo", 36) or "",
+            image=self.artwork.get("ui-media/quotation-decision-logo", 48) or "",
             bg=SIDEBAR,
-        ).grid(row=0, column=0, rowspan=2, padx=(0, 10))
-        label(brand, "报价决策智能体", size=15, bold=True, bg=SIDEBAR).grid(
+        ).grid(row=0, column=0, rowspan=2, padx=(0, 8))
+        self.brand_title = label(brand, "报价决策智能体", size=15, bold=True, bg=SIDEBAR)
+        self.brand_title.grid(
             row=0, column=1, sticky="w"
         )
-        label(brand, "福建分公司 · 终端业务", size=10, color=MUTED, bg=SIDEBAR).grid(
+        label(brand, "福建分公司 · 终端业务", size=-13, color=MUTED, bg=SIDEBAR).grid(
             row=1, column=1, sticky="w", pady=(3, 0)
         )
         self.nav = {}
@@ -321,14 +348,11 @@ class DesktopWorkbench:
                 tk.Frame(sidebar, bg=LINE, height=1).grid(
                     row=5, column=0, sticky="ew", padx=20, pady=(20, 14)
                 )
-            nav = ttk.Button(
+            nav = SidebarButton(
                 sidebar,
-                text="   " + title,
+                text=title,
                 command=lambda key=key: self.show_page(key),
-                style="Nav.TButton",
                 image=self._icon(icon, "muted", 22) or "",
-                compound="left",
-                width=0,
                 cursor="hand2",
             )
             nav.grid(row=index + 1 + (index >= 4), column=0, sticky="ew", padx=14, pady=4)
@@ -345,7 +369,7 @@ class DesktopWorkbench:
             size=10,
             bg=SIDEBAR,
         ).pack(side="left")
-        label(
+        self.sidebar_version = label(
             sidebar,
             ".170 · UI 预览版  |  ⌘1–6 切页"
             if sys.platform == "darwin"
@@ -353,13 +377,15 @@ class DesktopWorkbench:
             color=MUTED,
             size=9,
             bg=SIDEBAR,
-        ).grid(row=11, column=0, sticky="w", padx=24, pady=(4, 3))
-        label(sidebar, credit, color=MUTED, size=9, bg=SIDEBAR).grid(
+        )
+        self.sidebar_version.grid(row=11, column=0, sticky="w", padx=24, pady=(4, 3))
+        self.sidebar_credit = label(sidebar, credit, color=MUTED, size=9, bg=SIDEBAR)
+        self.sidebar_credit.grid(
             row=12, column=0, sticky="w", padx=24, pady=(0, 20)
         )
 
     def _header(self):
-        frame = tk.Frame(self.main, bg=BG)
+        frame = self.header_frame = tk.Frame(self.main, bg=BG)
         frame.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         frame.columnconfigure(0, weight=1)
         self.heading = label(frame, size=24, bold=True, bg=BG)
@@ -370,6 +396,31 @@ class DesktopWorkbench:
         self.period.grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 16))
         self.start_button = button(frame, "开始自动报价", self.app.run, primary=True)
         self.start_button.grid(row=0, column=2, rowspan=2, sticky="e")
+
+    def _resize_review_shell(self, event=None):
+        if event is not None and event.widget is not self.root:
+            return
+        wide = self.root.winfo_width() >= 1400
+        self.sidebar.configure(width=272 if wide else 236)
+        self.brand_title.configure(font=(FONT, -20 if wide else -18, "bold"))
+
+    def _style_review_shell(self):
+        review = self.page in {"decision", "audit"}
+        self.main.configure(padx=24 if review else 26, pady=14 if review else 18)
+        self.header_frame.grid_configure(pady=(0, 4 if review else 14))
+        self.heading.configure(font=(FONT, -30 if review else 24, "bold"))
+        self.subheading.configure(font=(FONT, -17 if review else 12))
+        self.period.configure(font=(FONT, -16 if review else 11))
+        self.start_button._font.configure(size=-16 if review else 11)
+        self.start_button.configure(style="Primary.TButton")
+        self.start_button._measure()
+        if review:
+            self.sidebar_version.grid_remove()
+            self.sidebar_credit.grid_remove()
+        else:
+            self.sidebar_version.grid()
+            self.sidebar_credit.grid()
+        self._resize_review_shell()
 
     def _task_bar(self, modes):
         self.context = tk.Frame(self.main, bg=BG)
@@ -533,6 +584,7 @@ class DesktopWorkbench:
             self._review_view.destroy()
             self._review_view = None
         self.page = page
+        self._style_review_shell()
         self.filter = "全部"
         if page in {"history", "settings"}:
             self.context.grid_remove()
@@ -1532,13 +1584,15 @@ class DesktopWorkbench:
                 self.show_page(self.page)
                 return
             month = self._review_session.month
-            self.period.configure(text=f"{month.year}年{month.month}月报价\n本地报价决策与稽核")
+            self.period.configure(text=f"{month.year}年{month.month}月报价" +
+                                  (f" · {brand}" if self.page == "audit" else ""))
             self.start_button.configure(
                 text="导出稽核报告" if self.page == "audit" else "返回商品清单",
                 command=self._review_view.export_report
                 if self.page == "audit"
                 else self._review_view.back_to_products,
                 state="normal",
+                style="Primary.TButton" if self.page == "audit" else "Workbench.TButton",
             )
             self._review_view.refresh()
             return

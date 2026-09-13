@@ -1,19 +1,62 @@
-# Native form controls QA — 2026-09-10
+# 报价决策与稽核界面还原 QA
+
+日期：2026-09-13。平台：原生 macOS / Tk，浅色；基线 b4f7802。
+
+## 比较依据
+
+源设计（项目根目录 `/Users/yangguowei/Documents/资金物流平台铺货报价智能体`）：
+
+- `申报材料/报价决策智能辅助_两张优化图_2026-09-13/01_Redmi_K70_5G_未超过14个月.png`
+- `申报材料/报价决策智能辅助_两张优化图_2026-09-13/02_Redmi_Note_13_5G_优福包待确认.png`
+- `需求记录/稽核审查工作台需求说明书_2026-09-13/稽核审查工作台_未通过版.png`
+
+实际渲染：`tools/review_ui_fixture.py` 调用真实 DesktopWorkbench、DecisionView、AuditView 和规则服务，使用临时工作簿；采集和外部业务动作禁止执行。原生窗口截图保存在 `/tmp/quotation-review-qa/01-decision.png`、`02-youfu.png`、`03-audit.png`；交付目录中另存高清原图及对比图。回调异常列表为空。
+
+源图 1536×1024。原生窗口内容区 1536×976，2× Retina 截图 3072×2008（含 28 逻辑像素标题栏）。比较时将原生截图降采样至 1536×1004，去掉 28px 标题栏；源图去掉 47px 仿制窗口栏。比较内容区分别为 1536×976 / 1536×977，不拉伸页面内容。
+
+状态：普通报价、超过 14 个月且优福包待确认、六商品稽核。参考图是设计样例，真实程序返回的检查项、未通过/待处理数量、金额精度和证据状态不同。没有为了外观将待复核伪装成通过，也没有合成证据。
+
+## 比较证据
+
+同一比较图左为设计、右为原生实现：
+
+- `/tmp/quotation-review-qa/comparison-1.png`：普通报价全图；`comparison-1-detail.png`：金额表单、智能报价提示、日期和附件区域。
+- `/tmp/quotation-review-qa/comparison-2.png`：优福包全图；`comparison-2-detail.png`：确认交互与底部写回布局。
+- `/tmp/quotation-review-qa/comparison-3.png`：稽核全图；`comparison-3-detail.png`：六分类、商品清单、单品检查和依据区域。
+
+已打开源图和原生图并共同对照，也检查了上述归一化组合图和细节裁剪，未仅凭代码或文件名判断。
+
+## 五项还原检查
+
+| 范围 | 结果 |
+| --- | --- |
+| 字体与排版 | 审查相关页面改用逻辑像素字号，修正 Tk 点字号造成的过度放大；标题、金额、表头、说明建立层级。金额不折行；宽窄窗口品牌副标题和提示均不裁切。原生系统字体字形和抗锯齿不保证与生成图片逐像素相同。 |
+| 间距与布局 | 恢复步骤条、商品渠道条、等宽报价双栏、写回预览与底部操作；稽核四统计卡、六分类一行、约42/58左右工作区与下方依据。普通/优福包两态的保存入口在参考尺寸首屏内。窄窗口可滚动；大计数类别自适应增高。 |
+| 配色与状态 | 蓝白主色、浅蓝背景与细边框、绿色通过、橙色待处理、红色稽核未通过。保留现有报价页橙色调价提示，不改变规则判定。 |
+| 图片与图标 | 保留已选定 Logo、既有本地高清品牌素材及预制手机示意图；不增加现场取图。通用手机示意符合用户已批准的素材方案。证据区只显示实际关联图片，缺失时显示空态。 |
+| 文案与内容 | 保留“报价决策智能辅助”“智能报价提示”“稽核审查工作台”“未通过”。超过14个月需人工确认优福包才进入不报价，真实规则和计数保持原样。额外资格依据、完整依据与人工复核入口继续可达。 |
+
+## 迭代记录
+
+1. P2：原来报价页面字号/区块过高，保存和确认落在首屏外。修正像素字号、金额表单间距、步骤和预览高度、优福包布局。普通与优福包原生截图及两项首屏测试验证修复。
+2. P2：窄窗口副标题及金额符号裁切。修正品牌区域内边距和货币符号槽位；原生全页面适配及精确金额测试通过。
+3. P2：稽核页面分类缺少清晰的分状态计数、主体列表过高。改为六类状态统计、紧凑可滚动的三列表格、左右依据/证据区域；全图对比验证。
+4. P2：1000×720 下商品提示过长，以及分类多状态大数字换至第四行后裁切。提示按实际宽度换行；分类 Canvas 按文字边界增加高度并扩展页面滚动范围，常规保持84px。八位数五状态的宽→窄→宽回归通过。
+5. P2：报价规则行距造成首屏可见项目偏少。缩减每行内部留白；最终细节对比可见七项，全部真实规则仍保留在滚动区域。
+
+## 已接受差异与后续微调
+
+- P3：原生控件边角、系统字体抗锯齿及按钮细部与图片渲染有差异；本次不声称截图像素完全一致。
+- 用户已批准通用手机素材，因此不按每个具体型号重新下载产品照片。
+- 分类统计不固定为参考图里的60项。缺少证据时不复刻设计图的示例网页。
+- 原程序的资格补充、人工复核、真实文件打开和滚动能力保留；这些功能入口可能比设计样例多。
+
+## 验证清单
+
+- [x] 普通报价、优福包两态与稽核工作台视觉对照。
+- [x] 宽窗口首屏保存栏、窄窗口滚动及大计数完整性。
+- [x] 原生测试59项通过；非原生3074项通过（沙箱端口受限的一项在允许本地端口环境补测）。
+- [x] 独立代码审阅无剩余重要问题；保护的业务目录与基线无差异。
+- [x] 打包签名检查、命令行启动和真实 App 主窗口/稽核入口检查。
 
 final result: passed
-
-Scope: approved polish of month/year selection, brand/status dropdowns, task search, output directory field, and scrollbars across the existing native app. Stable .170 business logic is unchanged.
-
-Evidence: docs/testing/ui-refresh-evidence/controls-2026-09-10, with direct CUA captures of the final packaged QA build. Data is visibly labelled as a fixture. Prior product artwork and channel mark QA remains in docs/testing/ui-refresh-evidence/polish-2026-09-10.
-
-Verified changes:
-- One calendar field with draft year and twelve month buttons; cancel preserves values; invalid year does not commit.
-- Consistent 42px white controls, 8px rounded outlines, blue focus, native text editing and separate placeholders.
-- White dropdowns with pale blue selection, library chevrons, keyboard selection and Escape/outside dismissal; repeated clicks close correctly and cleanup removes popup bindings/traces.
-- Arrowless slim vertical/horizontal scrollbars across page containers, tables and logs; no painted thumb when all content fits.
-- Search changes, including pasted text, filter the existing read-only history data.
-- Actual geometry and content reachability verified in empty/populated pages and supported window sizes. The current display clamps a requested tall window to 946px; log expansion follows actual available height.
-
-Verification: 1,944 unit tests + 29 native UI tests passed; Ruff/mypy clean. Static review identified a selector focus/toggle race, fixed and covered. Escape focus return was also reproduced and fixed on macOS. Production and independent QA bundles built successfully. Release signature/archive checks are recorded alongside the package.
-
-No P0/P1/P2 findings remain for this scope. P3 differences: menus retain a plain rectangular popup surface; native text editors remain inside styled shells. The new visuals do not imply additional data collection functionality.

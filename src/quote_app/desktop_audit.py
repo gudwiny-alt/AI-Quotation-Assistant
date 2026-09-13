@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import font as tkfont
 from typing import Iterable, Sequence
+
+from quote_app.desktop_widgets import RichTable, rounded, TONES
 
 
 CATEGORY_NAMES = (
@@ -134,18 +137,100 @@ def build_audit_snapshot(
     )
 
 
+class AuditTable(RichTable):
+    """Compact workbench table; the shared stable-ID and scrolling API is unchanged."""
+
+    def __init__(self, parent, columns, *, rowheight=64):
+        super().__init__(parent, columns, rowheight=rowheight)
+        self.body_font.configure(size=-14)
+        self.small_font.configure(size=-13)
+        self.bold_font.configure(size=-14)
+        self.header.configure(height=28)
+        self.canvas.configure(height=240 if rowheight == 24 else 384)
+
+    def _paint(self):
+        self._pending = None
+        c = self.canvas
+        width, height = c.winfo_width(), c.winfo_height()
+        c.delete("all")
+        self.header.delete("all")
+        weights = [weight for _, weight in self.columns]
+        widths = [width * weight / sum(weights) for weight in weights]
+        rounded(self.header, 0, 0, width, 28, fill="#EDF5FF", radius=5)
+        x = 0
+        for (title, _), w in zip(self.columns, widths):
+            self.header.create_text(x + 8, 14, anchor="w", text=title,
+                                    font=self.bold_font, fill="#111B65")
+            x += w
+        total = len(self.records) * self.rowheight
+        region = (0, 0, width, max(height, total))
+        if region != self._region:
+            self._region = region
+            c.configure(scrollregion=region, yscrollincrement=1)
+        first = max(0, int(c.canvasy(0) // self.rowheight))
+        end = min(len(self.records), first + height // self.rowheight + 2)
+        for index, iid in enumerate(tuple(self.records)[first:end], first):
+            row, y = self.records[iid], index * self.rowheight
+            cy = y + self.rowheight / 2
+            if iid in self.selected:
+                rounded(c, 0, y + 1, width - 1, y + self.rowheight - 1,
+                        fill="#E5F0FF", radius=4)
+            c.create_line(0, y + self.rowheight, width, y + self.rowheight, fill="#E9F0FB")
+            x = 0
+            values = row.get("display_values", row["values"])
+            for col, (value, w) in enumerate(zip(values, widths)):
+                px = x + 8
+                if col:
+                    c.create_line(x, y + 5, x, y + self.rowheight - 5, fill="#E5EDFA")
+                image = row.get("image") if col == 0 else None
+                if image:
+                    c.create_image(px, cy, anchor="w", image=image)
+                    px += image.width() + 7
+                tone = row.get("badges", {}).get(col)
+                if tone:
+                    bg, fg = TONES[tone]
+                    if self.rowheight > 30:
+                        rounded(c, x + 4, cy - 15, x + w - 3, cy + 15, fill=bg, radius=5)
+                    c.create_oval(x + 7, cy - 9, x + 25, cy + 9, fill=fg, outline="")
+                    c.create_text(x + 16, cy, text="✓" if tone == "green" else "!" if tone == "red" else "·",
+                                  font=self.bold_font, fill="#FFFFFF")
+                    c.create_text(x + 31, cy, text=self._fit(value, w - 34, self.small_font),
+                                  anchor="w", font=self.small_font, fill=fg)
+                elif col == 0 and row.get("subtitle"):
+                    c.create_text(px, cy - 11, text=self._fit(value, x + w - px - 5, self.body_font),
+                                  anchor="w", font=self.body_font, fill="#111B65")
+                    c.create_text(px, cy + 11, text=self._fit(row["subtitle"], x + w - px - 5, self.small_font),
+                                  anchor="w", font=self.small_font, fill="#64719B")
+                else:
+                    lines = str(value).split("\n")
+                    for line_index, line in enumerate(lines):
+                        c.create_text(px, cy + (line_index - (len(lines) - 1) / 2) * 17,
+                                      text=self._fit(line, x + w - px - 5, self.body_font),
+                                      anchor="w", font=self.body_font,
+                                      fill="#185BCB" if col in row.get("emphasis", ()) else "#111B65")
+                x += w
+
+
 class AuditView:
     """Full-batch summary, one-row-per-product queue, and selectable check detail."""
 
     def __init__(self, workbench, parent, session):
         from quote_app.desktop_controls import SoftEntry, SoftSelect
         from quote_app.desktop_ui import BG, BLUE, FONT, INK, LINE, MUTED, WHITE, button, card, label
-        from quote_app.desktop_widgets import Artwork, RichTable, SlimScrollbar
+        from quote_app.desktop_widgets import Artwork, SlimScrollbar
 
         self.workbench, self.parent, self.session = workbench, parent, session
         self.colors = dict(bg=BG, blue=BLUE, ink=INK, line=LINE, muted=MUTED, white=WHITE)
-        self.font, self.label, self.button, self.card = FONT, label, button, card
-        self.Artwork, self.RichTable, self.SlimScrollbar = Artwork, RichTable, SlimScrollbar
+        self.font, self.card = FONT, card
+        def pixel_label(parent, text="", *, size=14, **kwargs):
+            return label(parent, text, size=-abs(size), **kwargs)
+        def pixel_button(parent, text, command, **kwargs):
+            control = button(parent, text=text, command=command, **kwargs)
+            control._font.configure(size=-14)
+            control._measure()
+            return control
+        self.label, self.button = pixel_label, pixel_button
+        self.Artwork, self.RichTable, self.SlimScrollbar = Artwork, AuditTable, SlimScrollbar
         self.SoftEntry, self.SoftSelect = SoftEntry, SoftSelect
         self.artwork = Artwork(parent.winfo_toplevel())
         self.category: str | None = None
@@ -171,7 +256,7 @@ class AuditView:
         self.page_window = self.page_canvas.create_window((0, 0), window=self.root, anchor="nw")
         self.page_canvas.bind(
             "<Configure>",
-            lambda event: self.page_canvas.itemconfigure(self.page_window, width=event.width),
+            self._resize_page,
         )
         self.root.bind(
             "<Configure>",
@@ -187,182 +272,230 @@ class AuditView:
         self._build_footer()
         self.refresh()
 
+    def _resize_page(self, event):
+        columns = 6 if event.width >= 1100 else 3
+        self._layout_categories(columns)
+        self.page_canvas.itemconfigure(self.page_window, width=event.width)
+        self._fit_page_height()
+
+    def _fit_page_height(self, _event=None):
+        columns = self._category_columns
+        baseline = 84 if columns == 6 else 176
+        extra = max(0, self.category_cards.winfo_reqheight() - baseline)
+        minimum = (812 if columns == 6 else 906) + extra
+        self.page_canvas.itemconfigure(self.page_window,
+                                       height=max(self.page_canvas.winfo_height(), minimum))
+
     def _build_summary(self):
-        row = tk.Frame(self.root, bg=self.colors["bg"])
-        row.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        row = tk.Frame(self.root, bg=self.colors["bg"], height=76)
+        row.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        row.grid_propagate(False)
+        row.rowconfigure(0, weight=1)
         for index in range(4):
             row.columnconfigure(index, weight=1, uniform="audit-metric")
         self.metric_values = {}
         specs = (
-            ("products", "本批次商品", "package", self.colors["ink"]),
-            ("checks", "检查结果", "list-checks", self.colors["ink"]),
-            ("通过", "通过", "circle-check", "#0B9975"),
-            ("需处理", "需处理", "clock-3", "#D88119"),
+            ("products", "本批次商品", "smartphone-blue", self.colors["ink"], "#EAF4FF", "款"),
+            ("checks", "检查结果", "files-blue", self.colors["ink"], "#EAF4FF", "项"),
+            ("通过", "通过", "circle-check-green", "#0B9975", "#E3F9F0", "项"),
+            ("需处理", "待处理", "clock-orange", "#EC8A12", "#FFF3E4", "项"),
         )
-        for index, (key, title, icon, color) in enumerate(specs):
-            panel = self.card(row, padx=14, pady=10)
+        for index, (key, title, icon, color, tint, unit) in enumerate(specs):
+            panel = self.card(row, padx=14, pady=8)
             panel.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 5, 5 if index < 3 else 0))
-            image = self.artwork.get("ui-icons/" + icon + "-blue", 24)
+            disc = tk.Canvas(panel, width=56, height=56, bg=self.colors["white"], highlightthickness=0)
+            disc.grid(row=0, column=0, rowspan=2, padx=(0, 14))
+            disc.create_oval(0, 0, 56, 56, fill=tint, outline="")
+            image = self.artwork.get("ui-icons/" + icon, 30)
             if image:
-                tk.Label(panel, image=image, bg=self.colors["white"]).grid(row=0, column=0, rowspan=2, padx=(0, 10))
-            self.label(panel, title, size=10, color=self.colors["muted"]).grid(row=0, column=1, sticky="w")
-            value = self.label(panel, "0", size=20, bold=True, color=color)
-            value.grid(row=1, column=1, sticky="w")
+                disc.create_image(28, 28, image=image)
+            self.label(panel, title, size=14, bold=True).grid(row=0, column=1, sticky="w")
+            numbers = tk.Frame(panel, bg=self.colors["white"])
+            numbers.grid(row=1, column=1, sticky="w")
+            value = self.label(numbers, "0", size=29, bold=True, color=color)
+            value.pack(side="left")
+            self.label(numbers, unit, size=14, color=self.colors["muted"]).pack(side="left", padx=7)
             self.metric_values[key] = value
-        self.summary_extra = self.label(row, "未检查 0 · 不适用 0", size=9, color=self.colors["muted"], bg=self.colors["bg"])
-        self.summary_extra.grid(row=1, column=0, columnspan=4, sticky="e", pady=(3, 0))
 
     def _build_categories(self):
         area = tk.Frame(self.root, bg=self.colors["bg"])
-        area.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        heading = tk.Frame(area, bg=self.colors["bg"])
-        heading.pack(fill="x", pady=(0, 5))
-        self.label(heading, "全批次分类统计", size=13, bold=True, bg=self.colors["bg"]).pack(side="left")
-        self.scope_label = self.label(heading, "当前范围：全部检查", size=10, color=self.colors["blue"], bg=self.colors["bg"])
+        area.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        heading = tk.Frame(area, bg=self.colors["bg"], height=28)
+        heading.pack(fill="x")
+        self.label(heading, "全批次分类统计", size=16, bold=True, bg=self.colors["bg"]).pack(side="left")
+        self.summary_extra = self.label(heading, "未检查 0 · 不适用 0", size=12, color=self.colors["muted"], bg=self.colors["bg"])
+        self.summary_extra.pack(side="left", padx=10)
+        self.scope_label = self.label(heading, "当前范围：全部检查", size=13, color=self.colors["blue"], bg=self.colors["bg"])
         self.scope_label.pack(side="right")
-        cards = tk.Frame(area, bg=self.colors["bg"])
-        cards.pack(fill="x")
-        self.category_buttons = {}
-        self.category_details = {}
-        for column in range(3):
-            cards.columnconfigure(column, weight=1, uniform="audit-category")
-        for index, name in enumerate(CATEGORY_NAMES):
-            row, column = divmod(index, 3)
-            panel = self.card(cards, padx=9, pady=5)
-            panel.grid(
-                row=row,
-                column=column,
-                sticky="nsew",
-                padx=(0 if column == 0 else 3, 3 if column < 2 else 0),
-                pady=(0 if row == 0 else 3, 3 if row == 0 else 0),
-            )
-            title = tk.Label(
-                panel,
-                text=name,
-                font=(self.font, 10, "bold"),
-                fg=self.colors["blue"],
-                bg=self.colors["white"],
-                cursor="hand2",
-                anchor="w",
-                padx=4,
-                pady=2,
-            )
-            title.bind("<Button-1>", lambda _event, value=name: self._choose_category(value))
-            title.grid(row=0, column=0, sticky="ew")
-            detail = self.label(panel, "尚无检查", size=9, color=self.colors["muted"])
-            detail.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.category_cards = tk.Frame(area, bg=self.colors["bg"])
+        self.category_cards.pack(fill="x", pady=(4, 0))
+        self.category_cards.bind("<Configure>", self._fit_page_height)
+        self.category_buttons, self.category_details, self.category_panels = {}, {}, []
+        self.category_status_canvases, self.category_status_values = {}, {}
+        self.category_status_font = tkfont.Font(root=self.root, family=self.font, size=-12)
+        icons = ("box-blue", "globe-blue", "image-blue", "file-text-blue", "settings-blue", "chart-no-axes-column-increasing-blue")
+        for name, icon in zip(CATEGORY_NAMES, icons):
+            panel = self.card(self.category_cards, padx=8, pady=6, height=84)
+            panel.grid_propagate(False)
+            panel.columnconfigure(1, weight=1)
+            image = self.artwork.get("ui-icons/" + icon, 26)
+            tk.Label(panel, image=image, bg=self.colors["white"]).grid(row=0, column=0, padx=(0, 4))
+            title = self.label(panel, name, size=14, bold=True, color=self.colors["ink"], cursor="hand2")
+            title.grid(row=0, column=1, sticky="w")
+            detail = self.label(panel, "尚无检查", size=12, color=self.colors["muted"], justify="left")
+            # Retain the aggregate label API for accessibility and existing callers.
+            # The visible counterpart separates statuses by their actual semantic color.
+            statuses = tk.Canvas(panel, width=1, height=40, bg=self.colors["white"], highlightthickness=0, cursor="hand2")
+            statuses.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+            self.category_status_canvases[name] = statuses
+            statuses.bind("<Configure>", lambda _event, value=name: self._paint_category_statuses(value))
+            for control in (panel, title, detail, statuses):
+                control.bind("<Button-1>", lambda _event, value=name: self._choose_category(value))
             self.category_buttons[name], self.category_details[name] = title, detail
+            self.category_panels.append(panel)
+        self._category_columns = None
+        self._layout_categories(6)
+
+    def _paint_category_statuses(self, name):
+        canvas = self.category_status_canvases[name]
+        canvas.delete("all")
+        values = self.category_status_values.get(name, ())
+        width = max(1, canvas.winfo_width())
+        if not values:
+            canvas.create_text(0, 0, anchor="nw", text=self.category_details[name].cget("text"),
+                               font=self.category_status_font, fill=self.colors["muted"], width=width)
+        else:
+            line_height = self.category_status_font.metrics("linespace") + 2
+            x, y, row_height = 0, 0, line_height
+            for text, color in values:
+                token_width = self.category_status_font.measure(text) + 17
+                if x and x + token_width > width:
+                    x, y, row_height = 0, y + row_height, line_height
+                canvas.create_oval(x, y + 3, x + 8, y + 11, fill=color, outline="")
+                text_id = canvas.create_text(x + 13, y, text=text, anchor="nw",
+                                             font=self.category_status_font, fill=color,
+                                             width=max(1, width - x - 13))
+                row_height = max(row_height, canvas.bbox(text_id)[3] - y + 2)
+                x += token_width + 5
+        # Normal cards remain 84 px. Dense counts grow the canvas/card and page
+        # scroll region together, so no real status is hidden below a fixed box.
+        bounds = canvas.bbox("all")
+        content_height = max(40, bounds[3] + 3 if bounds else 40)
+        if int(canvas.cget("height")) != content_height:
+            canvas.configure(height=content_height)
+        panel_height = max(84, content_height + 44)
+        if int(canvas.master.cget("height")) != panel_height:
+            canvas.master.configure(height=panel_height)
+
+    def _layout_categories(self, columns):
+        if not hasattr(self, "category_panels") or self._category_columns == columns:
+            return
+        self._category_columns = columns
+        for col in range(6):
+            self.category_cards.columnconfigure(col, weight=1 if col < columns else 0,
+                                                uniform="audit-category" if col < columns else "")
+        for index, panel in enumerate(self.category_panels):
+            row, col = divmod(index, columns)
+            panel.grid(row=row, column=col, sticky="nsew", padx=(0 if col == 0 else 4, 4 if col < columns - 1 else 0),
+                       pady=(0 if row == 0 else 8, 0))
 
     def _build_workspace(self):
-        body = tk.Frame(self.root, bg=self.colors["bg"])
+        body = tk.Frame(self.root, bg=self.colors["bg"], height=555)
         body.grid(row=2, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=4, uniform="audit-body")
-        body.columnconfigure(1, weight=7, uniform="audit-body")
+        body.grid_propagate(False)
+        body.columnconfigure(0, weight=42, uniform="audit-body")
+        body.columnconfigure(1, weight=58, uniform="audit-body")
         body.rowconfigure(0, weight=1)
         self._build_product_panel(body)
         self._build_check_panel(body)
 
-    def _list_with_scrollbar(self, parent, **kwargs):
-        frame = tk.Frame(parent, bg=self.colors["white"])
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
-        widget = tk.Listbox(
-            frame,
-            activestyle="none",
-            borderwidth=0,
-            highlightthickness=0,
-            selectborderwidth=0,
-            font=(self.font, 11),
-            bg=self.colors["white"],
-            fg=self.colors["ink"],
-            selectbackground="#EAF1FF",
-            selectforeground=self.colors["ink"],
-            exportselection=False,
-            height=kwargs.pop("height", 2),
-            **kwargs,
-        )
-        bar = self.SlimScrollbar(frame, orient="vertical", command=widget.yview)
-        widget.configure(yscrollcommand=bar.set)
-        widget.grid(row=0, column=0, sticky="nsew")
-        bar.grid(row=0, column=1, sticky="ns")
-        return frame, widget
-
     def _build_product_panel(self, body):
-        panel = self.card(body, padx=13, pady=12)
+        panel = self.card(body, padx=10, pady=9)
         panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         panel.columnconfigure(0, weight=1)
-        panel.rowconfigure(2, weight=1)
+        panel.rowconfigure(1, weight=1)
         title = tk.Frame(panel, bg=self.colors["white"])
-        title.grid(row=0, column=0, sticky="ew")
-        self.label(title, "商品稽核清单", size=16, bold=True).pack(side="left")
-        self.queue_button = self.button(title, text="异常与待办", command=self._toggle_queue, padding=(9, 6))
+        title.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.label(title, "商品稽核清单", size=20, bold=True).pack(side="left")
+        self.queue_button = self.button(title, text="异常与待办", command=lambda: self._set_queue(True), padding=(8, 6))
         self.queue_button.pack(side="right")
-        self.product_hint = self.label(panel, "一条商品规格记录一行", size=9, color=self.colors["muted"])
-        self.product_hint.grid(row=1, column=0, sticky="w", pady=(5, 7))
-        self.product_list = self.RichTable(
-            panel, (("商品", 178), ("检查汇总", 112), ("状态", 82)), rowheight=66
-        )
-        self.product_list.grid(row=2, column=0, sticky="nsew")
+        self.all_products_button = self.button(title, text="全部商品", command=lambda: self._set_queue(False), primary=True, padding=(8, 6))
+        self.all_products_button.pack(side="right", padx=(5, 0))
+        self.product_list = self.RichTable(panel, (("商品", 43), ("检查汇总", 35), ("状态", 22)), rowheight=64)
+        self.product_list.grid(row=1, column=0, sticky="nsew")
         self.product_list.bind("<<TreeviewSelect>>", self._select_product)
+        self.product_hint = self.label(panel, "", size=13, color=self.colors["muted"], justify="left", wraplength=250)
+        self.product_hint.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        panel.bind("<Configure>", lambda event: self.product_hint.configure(wraplength=max(1, event.width - 24)))
 
     def _build_check_panel(self, body):
-        panel = self.card(body, padx=13, pady=12)
+        panel = self.card(body, padx=10, pady=9)
         panel.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         panel.columnconfigure(0, weight=1)
-        panel.rowconfigure(3, weight=2)
-        panel.rowconfigure(5, weight=3)
+        panel.rowconfigure(5, weight=1)
         top = tk.Frame(panel, bg=self.colors["white"])
         top.grid(row=0, column=0, sticky="ew")
-        self.product_title = self.label(top, "选择商品查看稽核结果", size=16, bold=True)
-        self.product_title.pack(fill="x")
-        self.all_checks_button = self.button(top, text="查看该商品全部检查", command=self._toggle_all_checks, padding=(9, 6))
-        self.all_checks_button.pack(anchor="e", pady=(3, 0))
-        self.product_summary = self.label(panel, "", size=10, color=self.colors["muted"])
-        self.product_summary.grid(row=1, column=0, sticky="w", pady=(3, 7))
-        self.check_list = self.RichTable(
-            panel, (("稽核点", 260), ("编号", 70), ("结果", 80)), rowheight=42
-        )
-        self.check_list.grid(row=3, column=0, sticky="nsew")
+        image = self.artwork.phone(48)
+        tk.Label(top, image=image, bg=self.colors["white"]).pack(side="left", padx=(0, 9))
+        titles = tk.Frame(top, bg=self.colors["white"])
+        titles.pack(side="left", fill="x", expand=True)
+        self.label(titles, "单品稽核结果", size=20, bold=True).pack(anchor="w")
+        self.product_title = self.label(titles, "选择商品查看稽核结果", size=16)
+        self.product_title.pack(anchor="w")
+        self.all_checks_button = self.button(top, text="全部检查", command=self._toggle_all_checks, padding=(6, 5))
+        self.all_checks_button.pack(side="right")
+        self.product_summary = self.label(panel, "", size=13, color=self.colors["muted"])
+        self.product_summary.grid(row=1, column=0, sticky="w", pady=(3, 6))
+        self.check_list = self.RichTable(panel, (("稽核点", 34), ("检查摘要", 48), ("结果", 18)), rowheight=24)
+        self.check_list.grid(row=3, column=0, sticky="ew")
         self.check_list.bind("<<TreeviewSelect>>", self._select_check)
-        self.detail_heading = self.label(panel, "检查依据与处理", size=13, bold=True)
-        self.detail_heading.grid(row=4, column=0, sticky="w", pady=(10, 5))
-        self.detail = tk.Frame(panel, bg="#F8FAFE", padx=9, pady=7)
+        self.detail_heading = self.label(panel, "检查依据与处理", size=15, bold=True, bg="#EDF5FF")
+        self.detail_heading.grid(row=4, column=0, sticky="ew", pady=(8, 0), ipady=6)
+        self.detail = tk.Frame(panel, bg="#F8FAFE", padx=7, pady=6)
         self.detail.grid(row=5, column=0, sticky="nsew")
         self.detail.columnconfigure(0, weight=1)
-        self.comparison = self.label(self.detail, "请选择稽核点", size=11, bg="#F8FAFE", wraplength=560, justify="left")
-        self.comparison.grid(row=0, column=0, columnspan=3, sticky="w")
-        self.reason = self.label(self.detail, "", size=10, color=self.colors["muted"], bg="#F8FAFE", wraplength=560, justify="left")
-        self.reason.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 5))
+        self.detail.columnconfigure(1, weight=1)
+        self.detail.rowconfigure(0, weight=1)
+        text_area = tk.Frame(self.detail, bg="#F8FAFE")
+        text_area.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.comparison = self.label(text_area, "请选择稽核点", size=14, bg="#F8FAFE", wraplength=285, justify="left")
+        self.comparison.pack(anchor="nw", fill="x")
+        self.reason = self.label(text_area, "", size=13, color=self.colors["muted"], bg="#F8FAFE", wraplength=285, justify="left")
+        self.reason.pack(anchor="nw", fill="x", pady=(5, 0))
         self.evidence_frame = tk.Frame(self.detail, bg="#F8FAFE")
-        self.evidence_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 5))
+        self.evidence_frame.grid(row=0, column=1, sticky="nsew")
         self.review_conclusion = tk.StringVar(self.root, "通过")
         self.review_reason = tk.StringVar(self.root)
         self.review_operator = tk.StringVar(self.root)
-        self.review_button = self.button(
-            self.detail, text="人工复核", command=self._review, primary=True, padding=(8, 5)
-        )
-        self.review_button.grid(row=3, column=2, sticky="e")
-        self.correct_button = self.button(
-            self.detail, text="修正报价", command=self._correct, padding=(8, 5)
-        )
-        self.correct_button.grid(row=3, column=0, sticky="w")
+        actions = tk.Frame(panel, bg=self.colors["white"])
+        actions.grid(row=6, column=0, sticky="ew", pady=(6, 0))
+        self.correct_button = self.button(actions, text="修正报价", command=self._correct, padding=(8, 5))
+        self.correct_button.pack(side="right", padx=(7, 0))
+        self.review_button = self.button(actions, text="人工复核", command=self._review, primary=True, padding=(8, 5))
+        self.review_button.pack(side="right", padx=(7, 0))
+        self.button(actions, text="查看完整依据", command=self._show_detail_dialog, padding=(8, 5)).pack(side="right")
         self.detail.bind("<Configure>", self._rewrap_detail)
 
     def _rewrap_detail(self, event):
-        width = max(180, event.width - 24)
+        width = max(160, (event.width - 38) // 2)
         self.comparison.configure(wraplength=width)
         self.reason.configure(wraplength=width)
 
     def _build_footer(self):
-        footer = self.card(self.root, padx=12, pady=9)
-        footer.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        footer = self.card(self.root, padx=12, pady=10, height=56)
+        footer.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        footer.grid_propagate(False)
         footer.columnconfigure(0, weight=1)
-        self.final_state = self.label(footer, "尚未执行稽核", size=11, bold=True)
+        self.final_state = self.label(footer, "尚未执行稽核", size=14, bold=True)
         self.final_state.grid(row=0, column=0, sticky="w")
-        self.export_button = self.button(footer, text="导出草稿", command=self.export_report, padding=(12, 7))
+        self.export_button = self.button(footer, text="导出草稿", command=self.export_report, padding=(16, 7))
         self.export_button.grid(row=0, column=1, padx=(8, 0))
-        self.final_button = self.button(footer, text="确认最终报送版", command=lambda: self.export_report(final=True), primary=True, padding=(12, 7))
+        self.final_button = self.button(footer, text="确认最终报送版", command=lambda: self.export_report(final=True), primary=True, padding=(16, 7))
         self.final_button.grid(row=0, column=2, padx=(8, 0))
+
+    def _set_queue(self, enabled):
+        self.exceptions_only = enabled
+        self.refresh()
 
     def _choose_category(self, category):
         self.category = None if self.category == category else category
@@ -423,8 +556,6 @@ class AuditView:
         for item in checks:
             summary = getattr(item, "title", item.code)
             comparison = getattr(item, "comparison", "")
-            if comparison:
-                summary = f"{summary} · {comparison}"
             tone = (
                 "green"
                 if item.status == "通过"
@@ -438,7 +569,7 @@ class AuditView:
                 "",
                 "end",
                 iid=item.id,
-                values=(summary, item.code, item.status),
+                values=(summary, comparison or "暂无检查摘要", item.status),
                 badges={2: tone},
                 emphasis=(0,),
             )
@@ -453,7 +584,7 @@ class AuditView:
                 if not self.snapshot.available
                 else "当前范围没有该商品的检查项",
             )
-        self.all_checks_button.configure(text="返回当前分类" if self.show_all_selected else "查看该商品全部检查")
+        self.all_checks_button.configure(text="返回分类" if self.show_all_selected else "全部检查")
 
     def _select_check(self, _event=None):
         selection = self.check_list.selection()
@@ -480,14 +611,14 @@ class AuditView:
         self.label(
             shell,
             getattr(item, "comparison", "") or "暂无可展示的对照数据",
-            size=11,
+            size=14,
             wraplength=520,
             justify="left",
         ).pack(anchor="w", fill="x")
         self.label(
             shell,
             "判断原因：" + (getattr(item, "reason", "") or "尚无说明"),
-            size=10,
+            size=13,
             color=self.colors["muted"],
             wraplength=520,
             justify="left",
@@ -505,7 +636,7 @@ class AuditView:
                     padding=(8, 5),
                 ).pack(side="left", padx=(0, 5))
         else:
-            self.label(shell, "暂无附件证据", size=9, color=self.colors["muted"]).pack(
+            self.label(shell, "暂无附件证据", size=13, color=self.colors["muted"]).pack(
                 anchor="w"
             )
         self.button(shell, text="关闭", command=dialog.destroy, padding=(12, 7)).pack(
@@ -519,6 +650,7 @@ class AuditView:
             child.destroy()
         self.current_check = item
         if item is None:
+            self.detail_heading.configure(text="检查依据与处理")
             self.comparison.configure(text=empty)
             self.reason.configure(text="")
             self.review_button.configure(state="disabled")
@@ -527,13 +659,33 @@ class AuditView:
         self.comparison.configure(text=getattr(item, "comparison", "") or "暂无可展示的对照数据")
         self.reason.configure(text="判断原因：" + (getattr(item, "reason", "") or "尚无说明"))
         evidence = tuple(getattr(item, "evidence_paths", ()) or ())
-        if evidence:
-            for index, path in enumerate(evidence[:3]):
-                path = Path(path)
-                control = self.button(self.evidence_frame, text=f"查看证据 {index + 1} · {path.name}", command=lambda value=path: self.workbench._open_path(value), padding=(8, 5))
-                control.pack(side="left", padx=(0, 5))
+        self.label(self.evidence_frame, "证据预览", size=13, bold=True, bg="#F8FAFE").pack(anchor="w")
+        self._evidence_image = None
+        preview_path = None
+        from PIL import Image, ImageTk
+        for path in evidence:
+            try:
+                candidate = Path(path)
+                if not candidate.is_file():
+                    continue
+                with Image.open(candidate) as source:
+                    source = source.convert("RGB")
+                    source.thumbnail((270, 92), Image.Resampling.LANCZOS)
+                    self._evidence_image = ImageTk.PhotoImage(source, master=self.root)
+                preview_path = candidate
+                break
+            except (OSError, ValueError, tk.TclError):
+                continue
+        if preview_path:
+            preview = tk.Label(self.evidence_frame, image=self._evidence_image, bg="#F8FAFE", cursor="hand2")
+            preview.pack(anchor="w", pady=(3, 0))
+            preview.bind("<Button-1>", lambda _event, path=preview_path: self.workbench._open_path(path))
+            self.label(self.evidence_frame, "点击查看原始截图 ↗", size=12, color=self.colors["blue"], bg="#F8FAFE").pack(anchor="w")
         else:
-            self.label(self.evidence_frame, "暂无附件证据", size=9, color=self.colors["muted"], bg="#F8FAFE").pack(side="left")
+            self.label(self.evidence_frame, "暂无可预览的本地截图" if evidence else "暂无附件证据", size=13,
+                       color=self.colors["muted"], bg="#F8FAFE").pack(anchor="w", pady=(14, 0))
+            if evidence:
+                self.button(self.evidence_frame, text="查看附件", command=lambda: self.workbench._open_path(Path(evidence[0])), padding=(8, 5)).pack(anchor="w", pady=5)
         reviewable = bool(getattr(item, "human_reviewable", False))
         self.review_button.configure(state="normal" if reviewable else "disabled")
 
@@ -614,6 +766,14 @@ class AuditView:
         messagebox.showinfo("稽核报告已导出", str(path), parent=self.parent.winfo_toplevel())
         return path
 
+    @staticmethod
+    def _product_count_text(counts):
+        lines = [f"{counts['通过']}通过 · {counts['未通过']}未通过"]
+        pending = [f"{counts[status]}{status}" for status in ("待复核", "待补充", "未检查") if counts[status]]
+        if pending:
+            lines.append(" · ".join(pending))
+        return "\n".join(lines)
+
     def refresh(self):
         read_error = None
         try:
@@ -654,17 +814,23 @@ class AuditView:
             counts = self.snapshot.category_counts[name]
             pieces = [f"{counts[s]}{s}" for s in ("通过", "未通过", "待复核", "待补充", "未检查") if counts[s]]
             widget.configure(
-                text="结果不可用" if read_error is not None else " · ".join(pieces) or "尚无检查"
+                text="结果不可用" if read_error is not None else "\n".join(" · ".join(pieces[i:i + 2]) for i in range(0, len(pieces), 2)) or "尚无检查"
             )
+            self.category_status_values[name] = (
+                () if read_error is not None else tuple(
+                    (f"{counts[status]}{status}", STATUS_TONES[status][1])
+                    for status in ("通过", "未通过", "待复核", "待补充", "未检查") if counts[status]
+                )
+            )
+            self._paint_category_statuses(name)
             self.category_buttons[name].configure(
                 bg=self.colors["blue"] if name == self.category else self.colors["white"],
                 fg=self.colors["white"] if name == self.category else self.colors["blue"],
             )
-        self.queue_button.configure(text="全部商品" if self.exceptions_only else "异常与待办")
+        self.queue_button.configure(style="Primary.TButton" if self.exceptions_only else "Workbench.TButton")
+        self.all_products_button.configure(style="Workbench.TButton" if self.exceptions_only else "Primary.TButton")
         self.product_hint.configure(
-            text=f"当前范围：{self.category or '全部检查'} · "
-            f"{'异常与待办' if self.exceptions_only else '全部商品'}\n"
-            "过/未/待：通过/未通过/待处理"
+            text=f"共 {len(self.snapshot.rows)} 款商品  ·  选择商品，查看该商品的全部稽核点"
         )
         for iid in self.product_list.get_children():
             self.product_list.delete(iid)
@@ -692,8 +858,9 @@ class AuditView:
                 "end",
                 iid=p.id,
                 values=(p.title, summary, row.overall),
+                display_values=(p.title, self._product_count_text(row.counts) if self.snapshot.available else "待重检", row.overall),
                 subtitle=getattr(p, "specification", "") or getattr(p, "material_code", ""),
-                image=self.artwork.phone(42),
+                image=self.artwork.phone(36),
                 badges={2: tone},
                 emphasis=(1,),
             )

@@ -53,7 +53,7 @@ def main():
     view = DesktopWorkbench(
         app, title="报价与稽核 · 隔离布局测试", credit="仅供原生界面校验", modes=("全品牌",)
     )
-    view.root.geometry("1440x1040+30+50")
+    view.root.geometry("1536x976+30+50")
     book = load_workbook("resources/templates/quote_template.xlsx")
     sheet = book["5G手机"]
     sheet["K1"] = "2026年9月结算报价（元/台）"
@@ -62,6 +62,8 @@ def main():
         ("Redmi Note 13 5G", "小米", 1199),
         ("华为畅享 90 Pro Max", "华为", 2299),
         ("荣耀 Magic8", "荣耀", 5499),
+        ("vivo Y200", "vivo", 1799),
+        ("小米 14", "小米", 3299),
     )
     quotes, tasks = [], []
     for i, (title, brand, price) in enumerate(products, 2):
@@ -77,9 +79,9 @@ def main():
             "AI": price,
             "K": price - 99,
             "L": 2000 if i == 2 else price - 180,
-            "M": price,
+            "M": 2050 if i == 2 else price,
             "P": price - 100,
-            "Q": price + 400,
+            "Q": 2499 if i == 2 else price + 400,
         }
         for key, value in cells.items():
             sheet[f"{key}{i}"] = value

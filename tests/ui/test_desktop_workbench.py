@@ -571,6 +571,59 @@ def test_history_and_settings_do_not_keep_space_from_hidden_data_controls(workbe
     assert view.run_controls.winfo_ismapped()
 
 
+@pytest.mark.parametrize("entry_date", ["2026-03-27", "2025-03-01"])
+def test_reference_size_decision_exposes_preview_and_save_without_page_scroll(workbench, entry_date):
+    """The approved composition must expose save controls for either qualification state."""
+    from quote_app.domain.models import QuoteRow, WebQuery
+
+    view = workbench
+    view.model.quote_rows = (QuoteRow(2, "sku", cells={}, web_query=WebQuery(
+        model_name="Redmi K70 5G", ram="12GB", storage="256GB", color="墨羽")),)
+    view.root.deiconify()
+    view.root.geometry("1536x976")
+    view.show_page("decision")
+    product = view._review_session.products[0]
+    product.context.update(category="手机", stock="在库", entry_date=entry_date,
+                           first_quote_date="2026-07-01", qualification_note="测试依据")
+    view._review_view.select(product.id)
+    view.root.update()
+    form = view._review_view
+    bottom = form.confirm_button.winfo_rooty() + form.confirm_button.winfo_height()
+    assert bottom <= view.root.winfo_rooty() + view.root.winfo_height(), "保存/确认栏仍在首屏之外"
+    assert all(widget.winfo_ismapped() for widget in form.preview_values.values())
+
+
+def test_audit_dense_category_counts_fit_when_window_changes(workbench):
+    """Real batch counts may need more lines than the illustrated sample card."""
+    view = workbench
+    view.root.deiconify()
+    view.root.geometry("1536x976")
+    view.show_page("audit")
+    view.root.update()
+    audit = view._review_view
+    name = next(iter(audit.category_status_canvases))
+    canvas = audit.category_status_canvases[name]
+    audit.category_status_values[name] = tuple(
+        (f"{12345678 + i}{status}", color)
+        for i, (status, color) in enumerate((
+            ("通过", "#0B9975"), ("未通过", "#E1251B"), ("待复核", "#C77912"),
+            ("待补充", "#C77912"), ("未检查", "#64748B")))
+    )
+    for size in ("1536x976", "1000x720", "1536x976"):
+        view.root.geometry(size)
+        view.root.update()
+        audit._paint_category_statuses(name)
+        view.root.update()
+        bounds = canvas.bbox("all")
+        assert bounds[3] <= canvas.winfo_height(), (size, bounds)
+        assert bounds[2] <= canvas.winfo_width(), (size, bounds)
+        assert canvas.winfo_y() + canvas.winfo_height() <= canvas.master.winfo_height()
+    audit.category_status_values[name] = (("8通过", "#0B9975"), ("1未通过", "#E1251B"))
+    audit._paint_category_statuses(name)
+    view.root.update()
+    assert canvas.master.winfo_height() == 84
+
+
 @pytest.mark.parametrize("size", ["1000x720", "1280x850"])
 @pytest.mark.parametrize("page", ["intelligence"])
 def test_real_prices_remain_single_line_and_fit_after_selection_and_resize(workbench, size, page):
