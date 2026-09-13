@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import TYPE_CHECKING
 
 from PIL import Image, ImageTk
@@ -150,6 +150,11 @@ class DesktopWorkbench:
         self._run_context: tuple[str, str, str, str] | None = None
         self._icons: dict[tuple[str, str, int], ImageTk.PhotoImage | None] = {}
         self._trace_ids: list[tuple[tk.StringVar, str]] = []
+        self._review_session = None
+        self._review_key = None
+        self._review_manual = False
+        self._review_view = None
+        self.review_product_id = None
         self._configure_styles()
         self.root.title(title)
         startup_height = min(1020, max(720, self.root.winfo_screenheight() - 100))
@@ -288,9 +293,7 @@ class DesktopWorkbench:
         return label(parent, image=picture or "", bg=bg, width=size if picture else 2)
 
     def _sidebar(self, credit):
-        sidebar = tk.Frame(
-            self.root, width=236, bg=SIDEBAR, highlightthickness=0, borderwidth=0
-        )
+        sidebar = tk.Frame(self.root, width=236, bg=SIDEBAR, highlightthickness=0, borderwidth=0)
         sidebar.grid(row=0, column=0, sticky="ns")
         sidebar.grid_propagate(False)
         # A static divider must not turn into Tk's black keyboard-focus frame.
@@ -305,9 +308,7 @@ class DesktopWorkbench:
             brand,
             image=self.artwork.get("ui-media/quotation-decision-logo", 36) or "",
             bg=SIDEBAR,
-        ).grid(
-            row=0, column=0, rowspan=2, padx=(0, 10)
-        )
+        ).grid(row=0, column=0, rowspan=2, padx=(0, 10))
         label(brand, "报价决策智能体", size=15, bold=True, bg=SIDEBAR).grid(
             row=0, column=1, sticky="w"
         )
@@ -434,7 +435,7 @@ class DesktopWorkbench:
             self.metrics.append((title, number))
 
     def _log(self):
-        panel = card(self.main, padx=18, pady=12)
+        panel = self.log_panel = card(self.main, padx=18, pady=12)
         panel.grid(row=4, column=0, sticky="ew")
         panel.columnconfigure(0, weight=1)
         self.log_heading = label(panel, "最近执行动态", size=14, bold=True)
@@ -528,6 +529,9 @@ class DesktopWorkbench:
         text.configure(state="disabled")
 
     def show_page(self, page: str):
+        if self._review_view is not None:
+            self._review_view.destroy()
+            self._review_view = None
         self.page = page
         self.filter = "全部"
         if page in {"history", "settings"}:
@@ -579,9 +583,96 @@ class DesktopWorkbench:
             self._settings()
         elif page == "history":
             self._history()
+        elif page == "decision":
+            from quote_app.desktop_decision import DecisionView
+
+            self.heading.configure(text="报价决策智能辅助")
+            self.subheading.configure(text="补齐手工价格，查看智能报价提示并写回本次报价表")
+            self._review_view = DecisionView(self, self.body, self._get_review_session())
+        elif page == "audit":
+            from quote_app.desktop_audit import AuditView
+
+            self.heading.configure(text="稽核审查工作台")
+            self.subheading.configure(text="全批次分类检查 · 单品结果 · 检查依据与处理")
+            self._review_view = AuditView(self, self.body, self._get_review_session())
         else:
             self._workbench()
+        if page in {"decision", "audit"}:
+            # Post-generation editing gets its own full-height work surface.
+            # Existing task controls remain alive for controller updates and other pages.
+            self.context.grid_remove()
+            self.metrics_frame.grid_remove()
+            self.log_panel.grid_remove()
+            self.task_status.grid_remove()
+        else:
+            self.log_panel.grid()
+            self.task_status.grid()
         self.refresh()
+
+    def _review_context(self):
+        from quote_app.domain.models import QuoteMonth
+
+        year, month = (self._run_context or (self.app.year_var.get(), self.app.month_var.get()))[:2]
+        return QuoteMonth(int(year), int(month))
+
+    def _current_review_key(self):
+        month = self._review_context()
+        return (
+            self.model.run_id,
+            str(self.model.quote_path),
+            len(self.model.quote_rows),
+            month.year,
+            month.month,
+        )
+
+    def _get_review_session(self):
+        from quote_app.services.review_support import ReviewSession
+
+        key = self._current_review_key()
+        if self._review_session is None or (not self._review_manual and key != self._review_key):
+            self._review_session = ReviewSession(self.model, self._review_context())
+            self._review_key = key
+            self.review_product_id = None
+        return self._review_session
+
+    def open_review_workbook(self):
+        """Load an already generated workbook for local editing, without rerunning collection."""
+        import re
+        from quote_app.domain.models import QuoteMonth
+        from quote_app.services.review_support import ReviewSession
+
+        if self.model.running:
+            messagebox.showinfo(
+                "任务运行中", "请等待当前任务结束后再打开其他报价表。", parent=self.root
+            )
+            return
+        chosen = filedialog.askopenfilename(
+            parent=self.root, title="打开已生成的报价表", filetypes=(("Excel 工作簿", "*.xlsx"),)
+        )
+        if not chosen:
+            return
+        month = self._review_context()
+        match = re.search(r"(20\d{2})年\s*(\d{1,2})月", Path(chosen).name)
+        suggested = (
+            f"{int(match[1])}-{int(match[2]):02d}" if match else f"{month.year}-{month.month:02d}"
+        )
+        value = simpledialog.askstring(
+            "报价月份",
+            "请核对这张报价表的报价月份（YYYY-MM）",
+            initialvalue=suggested,
+            parent=self.root,
+        )
+        if value is None:
+            return
+        try:
+            year, number = value.strip().split("-")
+            session = ReviewSession.from_workbook(Path(chosen), QuoteMonth(int(year), int(number)))
+        except (ValueError, OSError) as error:
+            messagebox.showerror("无法打开报价表", str(error), parent=self.root)
+            return
+        self._review_session, self._review_manual = session, True
+        self.review_product_id = None
+        self.show_page("decision")
 
     def _navigate_key(self, _event=None, *, page, tab=None):
         if tab is not None:
@@ -601,9 +692,7 @@ class DesktopWorkbench:
         viewport.grid(row=0, column=0, sticky="nsew")
         viewport.columnconfigure(0, weight=1)
         viewport.rowconfigure(0, weight=1)
-        canvas = tk.Canvas(
-            viewport, bg=BG, highlightthickness=0, borderwidth=0, yscrollincrement=1
-        )
+        canvas = tk.Canvas(viewport, bg=BG, highlightthickness=0, borderwidth=0, yscrollincrement=1)
         scrollbar = SlimScrollbar(viewport, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.grid(row=0, column=0, sticky="nsew")
@@ -1438,6 +1527,21 @@ class DesktopWorkbench:
                 **({"tone": icon_color} if isinstance(icon_widget, IconMedallion) else {}),
             )
         self.task_status.configure(text=self.model.summary)
+        if self.page in {"decision", "audit"} and self._review_view is not None:
+            if not self._review_manual and self._current_review_key() != self._review_key:
+                self.show_page(self.page)
+                return
+            month = self._review_session.month
+            self.period.configure(text=f"{month.year}年{month.month}月报价\n本地报价决策与稽核")
+            self.start_button.configure(
+                text="导出稽核报告" if self.page == "audit" else "返回商品清单",
+                command=self._review_view.export_report
+                if self.page == "audit"
+                else self._review_view.back_to_products,
+                state="normal",
+            )
+            self._review_view.refresh()
+            return
         if self.page == "settings":
             self.start_button.configure(
                 text="检查运行环境", command=self.app.check_readiness, state="normal"
@@ -1957,6 +2061,10 @@ class DesktopWorkbench:
             self.append_log(f"无法打开文件：{error}")
 
     def begin_run(self):
+        self._review_manual = False
+        self._review_key = None
+        self._review_session = None
+        self.review_product_id = None
         self._run_context = (
             self.app.year_var.get(),
             self.app.month_var.get(),

@@ -415,31 +415,142 @@ def test_bundled_artwork_is_cached_and_missing_assets_do_not_trigger_downloads(w
     assert view.artwork.get("ui-brands/absent", 24) is None
 
 
-@pytest.mark.parametrize(
-    "values, expected",
-    [
-        (("2199.00", "2199", "2249", "2199.0"), (True, False, True)),
-        (("无", "无", "无", "无"), (False, False, False)),
-        (("0", "0.00", "1", "2"), (True, False, False)),
-    ],
-)
-def test_price_highlight_matches_numeric_output_only(workbench, values, expected):
+def test_decision_draft_persists_across_navigation_without_running_collection(workbench):
     from quote_app.domain.models import QuoteRow, WebQuery
-    from quote_app.desktop_ui import BLUE, LINE
 
     view = workbench
+    calls = []
+    view.app.run = lambda: calls.append("run")
     view.model.quote_rows = (
-        QuoteRow(
-            1,
-            "sku",
-            cells=dict(zip(("AH", "AK", "AJ", "AI"), values)),
-            web_query=WebQuery(model_name="商品"),
-        ),
+        QuoteRow(7, "sku", cells={"J": 2099}, web_query=WebQuery(model_name="Redmi K70 5G")),
     )
     view.show_page("decision")
-    assert tuple(tile.cget("highlightbackground") == BLUE for tile in view.price_tiles) == expected
-    view._filter("含异常")
-    assert all(tile.cget("highlightbackground") == LINE for tile in view.price_tiles)
+    product = view._review_session.products[0]
+    view._review_view.select(product.id)
+    view._review_view.vars["K"].set("2090.0001")
+    view._review_view.vars["L"].set("2000")
+    view._review_view.vars["M"].set("2050")
+    product.context.update(category="手机", qualification_note="测试分类依据")
+    view._review_view.refresh()
+    checks = view._review_session.evaluate(product)
+    assert next(c for c in checks if c.code == "E02").status == "未通过"
+    assert next(c for c in checks if c.code == "E01").status == "通过"
+    retained_session = view._review_session
+    view.show_page("audit")
+    view.show_page("decision")
+    assert view._review_session is retained_session
+    assert view._review_view.vars["K"].get() == "2090.0001"
+    assert view.review_product_id == product.id
+    assert calls == []
+    assert view._review_view.confirm_button["state"] == "disabled"
+
+
+def test_native_decision_save_writes_five_prices_and_remarks_only(workbench, tmp_path, monkeypatch):
+    from openpyxl import load_workbook
+    from quote_app.domain.models import QuoteRow, WebQuery
+
+    book = load_workbook("resources/templates/quote_template.xlsx")
+    sheet = book["5G手机"]
+    for address, value in {
+        "K1": "2026年9月结算报价（元/台）",
+        "C2": "QA-001",
+        "D2": "Redmi K70 5G",
+        "E2": "Redmi K70 5G",
+        "F2": "12GB / 256GB",
+        "N2": "原有手工货源",
+        "Z2": "=K2/L2-1",
+    }.items():
+        sheet[address] = value
+    path = tmp_path / "quote.xlsx"
+    book.save(path)
+    book.close()
+    view = workbench
+    view.model.quote_path = path
+    view.model.quote_rows = (
+        QuoteRow(
+            8,
+            "QA-001",
+            cells={"D": "Redmi K70 5G", "E": "Redmi K70 5G", "F": "12GB / 256GB"},
+            web_query=WebQuery(model_name="Redmi K70 5G"),
+        ),
+    )
+    errors = []
+    monkeypatch.setattr(
+        "quote_app.desktop_decision.messagebox.showerror", lambda *a, **k: errors.append(a)
+    )
+    original = path.read_bytes()
+    view.show_page("decision")
+    view._review_view.select(view._review_session.products[0].id)
+    form = view._review_view
+    for column, value in {
+        "K": "2100",
+        "L": "2000",
+        "M": "2050",
+        "P": "2099",
+        "Q": "2499",
+        "AO": "产品经理补充说明",
+    }.items():
+        form.vars[column].set(value)
+    assert path.read_bytes() == original, "Typing or navigation must not write business output"
+    assert form.save_button["state"] == "normal"
+    form.save_button.invoke()
+    assert not errors
+    after = load_workbook(path)
+    saved = after["5G手机"]
+    assert [saved[f"{c}2"].value for c in ("K", "L", "M", "P", "Q", "AO")] == [
+        2100,
+        2000,
+        2050,
+        2099,
+        2499,
+        "产品经理补充说明",
+    ]
+    assert saved["N2"].value == "原有手工货源"
+    assert saved["Z2"].value == "=K2/L2-1"
+    after.close()
+    assert list(tmp_path.glob("quote.xlsx.*.bak"))
+    assert form.confirm_button["state"] == "disabled"
+
+
+@pytest.mark.parametrize("size", ["1000x720", "1280x850", "1280x1020"])
+def test_decision_form_money_stays_single_line_and_scrolls(workbench, size):
+    from quote_app.domain.models import QuoteRow, WebQuery
+    from tkinter import font
+
+    view = workbench
+    view.model.rows = [
+        TaskRow(f"price-{channel}", "Redmi K70 5G", channel, "5499.0001", "price_found", "succeeded", source_row_number=2, material_code="sku")
+        for channel in ("jd", "tmall", "official")
+    ]
+    view.model.quote_rows = (
+        QuoteRow(
+            2,
+            "sku",
+            cells={},
+            web_query=WebQuery(
+                model_name="Redmi K70 5G", ram="12GB", storage="256GB", color="墨羽"
+            ),
+        ),
+    )
+    view.root.deiconify()
+    view.root.geometry(size)
+    view.show_page("decision")
+    view._review_view.select(view._review_session.products[0].id)
+    form = view._review_view
+    for key, amount in (("K", "5499"), ("L", "5999"), ("M", "5799"), ("P", "5000"), ("Q", "6499")):
+        form.vars[key].set(amount)
+    view.root.update()
+    issues = []
+    _check_geometry(view.root, issues)
+    assert not issues, issues
+    for widget in form.preview_values.values():
+        text_font = font.Font(root=view.root, font=widget.cget("font"))
+        assert widget.winfo_height() <= text_font.metrics("linespace") + 22
+        assert widget.winfo_width() >= text_font.measure(widget.cget("text"))
+    canvas = form.content._workbench_scroll_canvas
+    canvas.yview_moveto(1)
+    view.root.update()
+    assert form.content.winfo_y() + form.content.winfo_height() <= canvas.winfo_height() + 1
 
 
 def test_history_and_settings_do_not_keep_space_from_hidden_data_controls(workbench):
@@ -461,7 +572,7 @@ def test_history_and_settings_do_not_keep_space_from_hidden_data_controls(workbe
 
 
 @pytest.mark.parametrize("size", ["1000x720", "1280x850"])
-@pytest.mark.parametrize("page", ["intelligence", "decision", "audit"])
+@pytest.mark.parametrize("page", ["intelligence"])
 def test_real_prices_remain_single_line_and_fit_after_selection_and_resize(workbench, size, page):
     """Break caught: self-referential wrapping collapses prices into a vertical stack."""
     from tkinter import font
@@ -497,7 +608,11 @@ def test_real_prices_remain_single_line_and_fit_after_selection_and_resize(workb
             assert widget.cget("text") == amount
             text_font = font.Font(root=view.root, font=widget.cget("font"))
             assert widget.winfo_height() <= text_font.metrics("linespace") + 8, (
-                page, target_size, amount, widget.winfo_width(), widget.winfo_height()
+                page,
+                target_size,
+                amount,
+                widget.winfo_width(),
+                widget.winfo_height(),
             )
             assert widget.winfo_width() >= text_font.measure(amount)
             assert widget.winfo_x() + widget.winfo_width() <= widget.master.winfo_width()

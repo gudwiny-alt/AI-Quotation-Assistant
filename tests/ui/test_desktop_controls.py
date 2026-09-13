@@ -200,6 +200,10 @@ def test_popup_cleanup_and_keyboard_selection(root):
     first.pack()
     second.pack()
     root.update()
+    # macOS starts an automated Tk window inactive; key events need the same
+    # foreground focus a real user gives it by clicking the selector.
+    root.focus_force()
+    root.update()
     first.open_popup()
     root.update()
     assert first.popup and first.popup.winfo_ismapped()

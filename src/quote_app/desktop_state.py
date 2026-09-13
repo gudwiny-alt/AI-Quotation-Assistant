@@ -63,6 +63,8 @@ class TaskRow:
     url: str = ""
     error: str = ""
     specification: str = ""
+    source_row_number: int = 0
+    material_code: str = ""
 
     @property
     def outcome_label(self) -> str:
@@ -200,6 +202,8 @@ def read_task_rows(path: Path, run_id: str) -> tuple[list[TaskRow], str]:
                 task.channel.value,
                 state=record["state"],
                 specification=f"{task.ram} / {task.storage} / {task.color}",
+                source_row_number=task.source_row_number,
+                material_code=task.material_code,
             )
             if record["observation"]:
                 observed = from_payload(json.loads(record["observation"]))

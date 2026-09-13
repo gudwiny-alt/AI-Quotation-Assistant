@@ -18,6 +18,7 @@ INK, MUTED, BLUE = "#132443", "#72829D", "#2468F5"
 LINE, PALE, WHITE = "#DFE7F3", "#EAF1FF", "#FFFFFF"
 TONES = {
     "green": ("#E6F8F1", "#0B9975"),
+    "red": ("#FFECEC", "#E1251B"),
     "orange": ("#FFF3E3", "#C77912"),
     "blue": ("#E9F1FF", BLUE),
     "muted": ("#F0F4F9", MUTED),
