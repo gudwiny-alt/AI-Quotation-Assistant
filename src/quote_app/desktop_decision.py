@@ -9,7 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from quote_app.desktop_controls import SoftEntry, SoftSelect
+from quote_app.desktop_controls import SoftEntry, SoftSelect, DateSelect
 from quote_app.desktop_widgets import SlimScrollbar
 
 
@@ -364,6 +364,8 @@ class DecisionView:
         self._price_entry(self.kbox, "K", emphasis=True).grid(row=1, column=0, sticky="ew")
         self.ceiling_hint = self._wrap(self.kbox, color=self.ORANGE, size=14, bg="#FFF4EC")
         self.ceiling_hint.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+        self.profit_label = self._wrap(self.kbox, color=self.INK, size=13, bg="#FFF4EC")
+        self.profit_label.grid(row=3, column=0, sticky="ew", pady=(5, 0))
         self.ceiling_label = self._wrap(left, color=self.BLUE, size=19, bold=True, bg="#EAF5FF")
         self.ceiling_label.grid(row=3, column=0, sticky="ew", ipady=9, pady=(0, 10))
         self.label(left, "报价说明（写入 AO 备注）", size=15).grid(row=4, column=0, sticky="w", pady=(0, 5))
@@ -498,8 +500,11 @@ class DecisionView:
         self._update_rules()
 
     def _update_rules(self):
-        from quote_app.services.review_support import can_confirm, price_ceiling
+        from quote_app.services.review_support import can_confirm, price_ceiling, profit_trial
 
+        trial = profit_trial(self.vars['L'].get(), self.vars['K'].get())
+        self.profit_label.configure(text=(f"毛利率 {trial['margin']:.2f}%　价差 {money_preview(str(trial['difference']))}　加价率 {trial['markup']:.6f}%"
+            if trial else "填写采购价与结算价后，自动试算毛利率和加价率"))
         checks = self.session.evaluate(self.product)
         rules = [c for c in checks if c.category == "报价规则与资格"]
         failed = any(c.status == "未通过" for c in rules)
@@ -530,7 +535,7 @@ class DecisionView:
                 cell.grid(row=index, column=col, sticky="nsew", ipady=5, padx=(0, 1), pady=(1, 0))
                 cell.bind('<Button-1>', lambda event, code=check.code: self._rule_details(code))
                 cell.bind('<Return>', lambda event, code=check.code: self._rule_details(code))
-        ceiling, reason = price_ceiling(self.product)
+        ceiling, reason = price_ceiling(self.product, checks)
         self.ceiling_label.configure(text=f"当前价格上限   {money_preview(str(ceiling)) if ceiling is not None else '待补充依据'}")
         # Use the same bounded decimal parser as the service. In-progress enormous
         # exponents must never cause an unbounded subtraction/format operation.
@@ -634,7 +639,7 @@ class DecisionView:
         )
         self._wrap(
             box,
-            "当前仅按手机规则报价。在库资格和入库日期优先读取营销商品表；首次报价日期须另有报价依据，不能用入库日期代替。日期格式：YYYY-MM-DD。",
+            "当前仅按手机规则报价。在库资格和入库日期优先读取营销商品表；首次报价日期须另有报价依据，不能用入库日期代替。首次报价日期通过下方年月日选择。",
             color=self.MUTED,
             size=10,
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 18))
@@ -653,12 +658,14 @@ class DecisionView:
                 dialog, value=self.product.context.get(key, "") or (options[0] if options else "")
             )
             control = (
-                SoftSelect(box, textvariable=var, values=options, width=270)
-                if options
+                DateSelect(box, textvariable=var) if key == "first_quote_date" else SoftSelect(box, textvariable=var, values=options, width=270)
+                if options or key == "first_quote_date"
                 else SoftEntry(box, textvariable=var, placeholder="YYYY-MM-DD", width=270)
             )
             control.grid(row=row, column=1, sticky="ew", pady=6)
-            if key == 'category' or self.product.context.get(key + '_source'):
+            if key == "first_quote_date":
+                first_date_control = control
+            if key == 'category' or (key != "first_quote_date" and self.product.context.get(key + '_source')):
                 (control.entry if isinstance(control, SoftEntry) else control).configure(state='disabled')
         self.label(box, "依据来源 / 核实说明", size=11).grid(
             row=6, column=0, columnspan=2, sticky="w", pady=(12, 6)
@@ -681,14 +688,16 @@ class DecisionView:
         def apply():
             values = {key: var.get().strip() for key, var in variables.items()}
             try:
+                if first_date_control.incomplete:
+                    raise ValueError("请选择完整的首次报价年月日")
                 for key in ("entry_date", "first_quote_date"):
                     if values[key]:
                         parsed = date.fromisoformat(values[key])
                         if parsed > date.today():
                             raise ValueError("日期不能晚于今天")
                 reason = note.get("1.0", "end-1c").strip()
-                if not reason:
-                    raise ValueError("请填写依据来源或核实说明")
+                if not reason and any(values[key] != self.product.context.get(key, "") for key in ("stock", "entry_date")):
+                    raise ValueError("手工变更库存或入库日期时，请填写依据来源或核实说明")
             except ValueError as error:
                 messagebox.showerror("请核对补充信息", str(error), parent=dialog)
                 return

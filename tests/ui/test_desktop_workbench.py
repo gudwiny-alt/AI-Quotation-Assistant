@@ -595,7 +595,7 @@ def test_reference_size_decision_exposes_preview_and_save_without_page_scroll(wo
 
 def test_decision_rule_opens_explanation_and_source_fields_are_locked(workbench):
     from quote_app.domain.models import QuoteRow, WebQuery
-    from quote_app.desktop_controls import SoftSelect, SoftEntry
+    from quote_app.desktop_controls import SoftSelect, SoftEntry, DateSelect
 
     view = workbench
     view.model.quote_rows = (QuoteRow(2, 'sku', cells={}, web_query=WebQuery(model_name='测试手机')),)
@@ -614,11 +614,25 @@ def test_decision_rule_opens_explanation_and_source_fields_are_locked(workbench)
     form._qualifications()
     view.root.update()
     box = form.dialog.winfo_children()[0]
-    fields = [child for child in box.winfo_children() if isinstance(child, (SoftSelect, SoftEntry))]
+    fields = [child for child in box.winfo_children() if isinstance(child, (SoftSelect, SoftEntry, DateSelect))]
     assert len(fields) == 4
     assert all((field.entry if isinstance(field, SoftEntry) else field).cget('state') == 'disabled' for field in fields[:3])
-    assert fields[3].entry.cget('state') == 'normal'
-    form.dialog.destroy()
+    assert isinstance(fields[3], DateSelect)
+    assert all(control.cget('state') == 'readonly' for control in fields[3].controls)
+    for control, choice in zip(fields[3].controls, ('2026', '8', '1')):
+        control.choose(choice)
+    next(child for child in box.winfo_children() if getattr(child, 'options', {}).get('text') == '应用并返回').invoke()
+    assert product.context['first_quote_date'] == '2026-08-01'
+    form.vars['L'].set('4200')
+    form.vars['K'].set('4400')
+    view.root.update()
+    assert '4.55%' in form.profit_label.cget('text')
+    assert '4.761905%' in form.profit_label.cget('text')
+    form.vars['K'].set('4389')
+    view.root.update()
+    assert '4.500000%' in form.profit_label.cget('text')
+    if form.dialog.winfo_exists():
+        form.dialog.destroy()
 
 
 def test_audit_dense_category_counts_fit_when_window_changes(workbench):

@@ -22,7 +22,8 @@ from quote_app.services.review_workbook import (
     rollback,
 )
 from quote_app.services.review_sources import warehouse_limit, workbook_channels, matching_run_paths, source_facts, recover_task_provenance
-from quote_app.services.screenshot_review import request_scan, assess
+from quote_app.services.screenshot_review import request_scan
+from quote_app.services.channel_audit import inspect_channel
 
 CATEGORIES = (
     "商品分类与关联",
@@ -32,7 +33,7 @@ CATEGORIES = (
     "报价规则与资格",
     "报表与报送一致性",
 )
-RULE_VERSION = "decision-audit-2026-09-13-v2"
+RULE_VERSION = "decision-audit-2026-09-14-v1"
 
 
 @dataclass(slots=True)
@@ -47,6 +48,7 @@ class ReviewCheck:
     reason: str = ""
     evidence_paths: tuple[Path, ...] = ()
     human_reviewable: bool = False
+    channel: str = ''
 
 
 @dataclass(slots=True)
@@ -100,7 +102,18 @@ def _phone_limit(value):
         return value * Decimal("1.045")
 
 
-def price_ceiling(product):
+def profit_trial(purchase, settlement):
+    purchase, settlement = money(purchase), money(settlement)
+    if purchase is None or settlement is None:
+        return None
+    with localcontext() as context:
+        context.prec = max(40, len(purchase.as_tuple().digits) + len(settlement.as_tuple().digits) + 10)
+        difference = settlement - purchase
+        return {'difference': difference, 'margin': difference / settlement * 100,
+                'markup': difference / purchase * 100}
+
+
+def price_ceiling(product, checks=()):
     """Only known numeric bounds, never an overall eligibility conclusion."""
     candidates = []
     if product.context.get("category") == "手机" and money(product.values.get("L")):
@@ -114,7 +127,11 @@ def price_ceiling(product):
             candidates.append((money(value), label))
     for period, value in supplied_history(product):
         candidates.append((value, f'{period}已提供历史报价'))
-    # Unreviewed raw channel observations are not valid price ceilings.
+    # Include only channels whose four checks passed, never raw observations.
+    for task in product.channels:
+        reviewed = [c for c in checks if c.channel == task.channel and c.code in ('B01', 'B02', 'B03', 'C01')]
+        if len(reviewed) == 4 and can_confirm(reviewed) and money(task.price) is not None and task.outcome == 'price_found':
+            candidates.append((money(task.price), '已核验渠道有效价'))
     if not candidates:
         return None, "尚无可计算约束；渠道有效性及其他资格仍须核验"
     low = min(v for v, _ in candidates)
@@ -246,8 +263,8 @@ class ReviewSession:
                 raise ValueError(f"工作簿第{number}行缺少稳定物料编码，无法安全定位")
         if not source:
             raise ValueError("工作簿中没有可报价商品记录")
-        run_ids = []
-        paths = matching_run_paths(path, month, rows, task_database, run_ids=run_ids)
+        run_ids, source_rows = [], []
+        paths = matching_run_paths(path, month, rows, task_database, run_ids=run_ids, source_rows=source_rows)
         paths.update({k: Path(v) for k, v in (source_paths or {}).items() if v and Path(v).is_file() and k not in paths})
         result = cls(
             DesktopState(quote_rows=tuple(source), quote_path=Path(path)),
@@ -256,6 +273,14 @@ class ReviewSession:
             _source_metadata=False,
             source_paths=paths,
         )
+        if source_rows:
+            from quote_app.domain.models import WebQuery
+            for product, original in zip(result.products, source_rows):
+                result._sources[product.id] = QuoteRow(
+                    original['source_row_number'], original['material_code'], original['cells'],
+                    [Issue(**issue) for issue in original.get('issues', [])],
+                    WebQuery(**original.get('web_query', {})))
+                result._source_known[product.id] = True
         recovered = recover_task_provenance(workbook_channels(path, rows), task_database,
                                             run_id=run_ids[0] if run_ids else None)
         for product in result.products:
@@ -402,7 +427,7 @@ class ReviewSession:
         checks = []
         fingerprint = self._fingerprint(p)
 
-        def add(code, title, status, comparison="", reason="", paths=(), human=False, suffix=""):
+        def add(code, title, status, comparison="", reason="", paths=(), human=False, suffix="", channel=""):
             c = ReviewCheck(
                 f"{self.batch_id}:{p.id}:{code}:{suffix}",
                 p.id,
@@ -414,6 +439,7 @@ class ReviewSession:
                 reason,
                 tuple(paths),
                 human,
+                channel,
             )
             record = self._reviews.get(c.id)
             if human and status == "待复核" and record and record["version"] == fingerprint:
@@ -434,30 +460,15 @@ class ReviewSession:
             category,
             "当前智能报价仅适用于手机；按手机4.5%规则计算" if category == "手机" else "当前版本暂不支持非手机产品智能报价",
         )
-        add(
-            "A02",
-            "基础与资源规格一致",
-            "待复核",
-            p.specification,
-            "请核对基础表、营销商品及资源规格",
-            human=bool(p.specification),
-        )
         association_issues = [i for i in source.issues if "MARKETING" in i.code or "BOP" in i.code]
-        add(
-            "A03",
-            "业务记录关联",
-            "待补充"
-            if association_issues or not p.material_code or not self._source_known[p.id]
-            else "待复核",
-            p.material_code,
-            "；".join(i.message for i in association_issues)
-            or (
-                "需核对业务编码与资源关联依据"
-                if self._source_known[p.id]
-                else "缺少原始关联检查记录，请补充来源与冲突检查依据"
-            ),
-            human=self._source_known[p.id] and not association_issues and bool(p.material_code),
-        )
+        output_identity = tuple(str(self._rows.get(p.output_row, {}).get(c, '') or '') for c in ('C', 'D', 'E', 'F', 'G'))
+        identity_ok = output_identity == self._identities[p.id]
+        source_ok = self._source_known[p.id] and bool(p.material_code) and identity_ok and not association_issues
+        add('A02', '商品与源表一致性',
+            '未通过' if not identity_ok or association_issues else '通过' if source_ok else '待补充',
+            p.title + ' · ' + p.specification,
+            '物料编码及商品规格与本批次源表关联记录一致，未发现营销或资源关联冲突' if source_ok else
+            '；'.join(i.message for i in association_issues) or ('输出商品与源表身份不一致' if not identity_ok else '未找到本批次原始关联记录，请关联本批次源表'))
         duplicate = (
             sum(
                 x.material_code == p.material_code and x.specification == p.specification
@@ -468,9 +479,9 @@ class ReviewSession:
         add(
             "A04",
             "重复与漏项",
-            "未通过" if duplicate else "待复核",
+            "未通过" if duplicate else "通过" if all(self._source_known.values()) and len(self._rows) == len(self.products) else "待复核",
             f"本批次{len(self.products)}条商品",
-            "存在重复编码与规格" if duplicate else "未见同编码同规格重复；源表完整范围仍需核对",
+            "存在重复编码与规格" if duplicate else "输出商品数量与已关联源表范围一致，未发现重复" if all(self._source_known.values()) and len(self._rows) == len(self.products) else "未见同编码同规格重复；源表完整范围仍需核对",
             human=not duplicate,
         )
         add(
@@ -481,111 +492,33 @@ class ReviewSession:
             "检查官网、天猫、京东三个渠道记录是否齐全；取价失败和无机型的业务结果另列核验",
             human=False,
         )
-        eligible = []
+        eligible, channel_results = [], []
         for t in p.channels:
-            suffix = t.task_id
-            channel_label = {'jd': '京东', 'tmall': '天猫', 'official': '官网'}.get(t.channel, t.channel)
             paths = (t.evidence_path,) if t.evidence_path else ()
-            record_ok = (
-                t.state == "succeeded" and t.outcome == "price_found" and money(t.price) is not None
-            )
-            for code, title, comparison, reason in (
-                ("B01", "渠道与店铺", t.channel + " " + t.url, "核对是否规定官方来源"),
-                ("B02", "报价对象", t.specification or p.specification, "核对可售状态和目标配置"),
-                ("B03", "优惠条件", t.price, "优惠接受口径未定义，不能直接认定有效"),
-            ):
-                add(
-                    code,
-                    title,
-                    "待复核" if t.evidence_path else "待补充",
-                    comparison,
-                    reason,
-                    paths,
-                    human=bool(t.evidence_path) and code != "B03",
-                    suffix=suffix,
-                )
-            file_ok = False
+            scan = None
             if t.evidence_path and t.evidence_path.is_file():
                 try:
-                    from PIL import Image
-
-                    with Image.open(t.evidence_path) as im:
-                        im.verify()
-                    file_ok = t.evidence_path.stat().st_size > 0
+                    scan = request_scan(t.evidence_path)
                 except (OSError, ValueError):
                     pass
-            add(
-                "D02",
-                "截图文件有效",
-                "通过" if file_ok else "待补充",
-                str(t.evidence_path or ""),
-                "文件可读取；不代表内容已通过" if file_ok else "截图缺失、空文件或无法解码",
-                paths,
-                suffix=suffix,
-            )
-            content = assess(request_scan(t.evidence_path), p.title,
-                             t.specification or p.specification, t.channel, t.price,
-                             outcome=t.outcome) if file_ok else {}
-            for code, title in (
-                ("C01", "截图页面内容"),
-                ("C02", "截图规格对照"),
-                ("C03", "截图价格与店铺"),
-                ("C04", "截图可读与完整"),
-            ):
-                add(
-                    code,
-                    title,
-                    content[code][0] if file_ok else "待补充",
-                    channel_label + ' · ' + (content[code][1] if file_ok else "没有可读取的截图"),
-                    content[code][2] if file_ok else (
-                        "本次取价未完成：仅识别到补贴价或划线原价，未取得符合规则的售价与截图"
-                        if t.error == 'NO_VALID_SELLING_PRICE' else
-                        f"截图缺失、空文件或无法解码，请补充证据{('；任务原因：' + t.error) if t.error else ''}"),
-                    paths,
-                    human=file_ok and content[code][0] == '待复核',
-                    suffix=suffix,
-                )
-            reused = (
-                t.evidence_path
-                and sum(
-                    x.evidence_path == t.evidence_path
-                    for item in self.products
-                    for x in item.channels
-                )
-                > 1
-            )
-            add(
-                "D03",
-                "证据关联完整",
-                "未通过" if reused else ("通过" if file_ok and t.material_code == p.material_code and t.source_row_number else "待补充"),
-                t.task_id,
-                "同一截图被多条记录重复引用" if reused else "截图按商品物料编码、数据行和渠道关联；内容及价格口径另项核验",
-                paths,
-                human=file_ok and bool(t.url) and not reused,
-                suffix=suffix,
-            )
-            if record_ok:
+            column = {'jd': 'AI', 'tmall': 'AJ', 'official': 'AK'}.get(t.channel)
+            written = self._rows.get(p.output_row, {}).get(column)
+            findings = inspect_channel(t, p.title, t.specification or p.specification, scan, written)
+            reused = t.evidence_path and sum(x.evidence_path == t.evidence_path for item in self.products for x in item.channels) > 1
+            if reused or (t.material_code and t.material_code != p.material_code):
+                findings[-1].status = '未通过'
+                findings[-1].reason = '同一截图被多条记录引用或商品关联不一致，请修正证据关联'
+                for item in findings[:3]:
+                    item.status, item.reason = '未检查', '等待修正截图关联'
+            results = [add(f.code, f.title, f.status, f.comparison, f.reason, paths,
+                           human=f.status == '待复核', suffix=t.task_id, channel=t.channel) for f in findings]
+            channel_results.extend(results)
+            if can_confirm(results) and money(t.price) is not None and t.outcome == 'price_found':
                 eligible.append(t)
-        if not p.channels:
-            for code, title in (
-                ("B01", "渠道与店铺"),
-                ("B02", "报价对象"),
-                ("B03", "优惠条件"),
-                ("C01", "截图页面内容"),
-                ("C02", "截图规格对照"),
-                ("C03", "截图价格与店铺"),
-                ("C04", "截图可读与完整"),
-                ("D02", "截图文件有效"),
-                ("D03", "证据关联完整"),
-            ):
-                add(code, title, "待补充", reason="尚无可精确关联到该商品的渠道与证据记录")
-        add(
-            "B04",
-            "最低有效价",
-            "待复核" if eligible else "待补充",
-            " / ".join(t.price for t in eligible),
-            "有效价格须先完成来源、规格及优惠口径核验",
-        )
+        for missing_channel in sorted({'jd', 'tmall', 'official'} - {t.channel for t in p.channels}):
+            for finding in inspect_channel(TaskRow('missing', channel=missing_channel), p.title, p.specification, None, None):
+                add(finding.code, finding.title, '未检查', '等待渠道记录', '请先关联本批次渠道采集记录',
+                    suffix='missing-' + missing_channel, channel=missing_channel)
         add(
             "D04",
             "数据与证据版本",
@@ -635,26 +568,34 @@ class ReviewSession:
         history_min = min(bounds) if bounds else None
         history_detail = '；'.join(f'{period}：{value}' for period, value in history)
         history_fail = k is not None and history_min is not None and k > history_min
+        first = _date(p.context.get('first_quote_date'))
+        first_month = bool(first and (first.year, first.month) == (self.month.year, self.month.month))
         add(
             "E03",
-            "适用历史报价",
-            "未通过" if history_fail else ("待补充" if k is None or history_min is None else "待复核"),
+            "历史报价上限",
+            "未通过" if history_fail else ("不适用" if history_min is None and first_month else "待补充" if k is None or history_min is None else "通过"),
             f"当月 {k if k is not None else '待填写'}；已知历史上限 {history_min if history_min is not None else '待补充'}",
-            ("当月高于已提供历史报价。" if history_fail else "已提供月份的数值比较未超上限；请确认这些月份覆盖本次适用历史范围。")
-            + (p.context.get('history_source', '') + '；' + history_detail if history else "当前仅有报价表J列上期价格；需要确认是否还应提供其他历史月份。"),
-            human=k is not None and history_min is not None and not history_fail,
+            ("当月高于已提供历史报价。" if history_fail else "已按本次提供的有效往期报价自动比较。" if history_min is not None else
+             "用户确认本月首次报价，且本批次未发现有效往期报价。" if first_month else "缺少有效历史报价，请关联基础表；首次报价请填写实际首次报价日期。")
+            + (p.context.get('history_source', '') + '；' + history_detail if history else "；采用报价表J列已知上期价格" if previous is not None else ''),
         )
         warehouse_raw = p.context.get('warehouse_price', '')
         q, o = money(p.values.get("Q")), warehouse_limit(warehouse_raw)
-        known_fail = k and any(v is not None and k > v for v in (q, o))
-        add(
-            "E04",
-            "零售与一级库上限",
-            "未通过" if known_fail else ("待补充" if not k or not q or not o else "待复核"),
-            f"当月 {k if k is not None else '待填写'}；分销 {q if q is not None else '待填写'}；一级库 {o if o is not None else (warehouse_raw or '待补充')}",
-            ("高于已知价格上限" if known_fail else "分销/一级库数值符合时，还须核验规定渠道有效官方零售价")
-            + f"；营销建议零售价：{warehouse_raw or '缺失'}；采用区间上限：{o if o is not None else '无法识别，请核对源表'}；{p.context.get('warehouse_source', '报价表O列')}",
-        )
+        comparison('E04', '分销零售价上限', k, q,
+                   f"当月 {k if k is not None else '待填写'}；分销零售价 {q if q is not None else '待填写'}")
+        comparison('E08', '一级库价格上限', k, o,
+                   f"当月 {k if k is not None else '待填写'}；一级库上限 {o if o is not None else '待补充'}")
+        checks[-1].reason += f"；建议零售价：{warehouse_raw or '缺失'}；采用区间上端；{p.context.get('warehouse_source', '报价表O列')}"
+        external_limit = min((money(t.price) for t in eligible), default=None)
+        channels_complete = {t.channel for t in p.channels} == {'jd', 'tmall', 'official'} and can_confirm(channel_results)
+        if external_limit is not None and k is not None and k > external_limit:
+            add('E09', '三网有效最低价上限', '未通过', f'当月 {k}；已核验最低价 {external_limit}', '当月报价高于已核验渠道有效价')
+        elif channels_complete and external_limit is not None:
+            comparison('E09', '三网有效最低价上限', k, external_limit, f'当月 {k if k is not None else "待填写"}；三网最低价 {external_limit}')
+        elif channels_complete:
+            add('E09', '三网有效最低价上限', '不适用', '三个渠道均无匹配机型', '已核验三个渠道均无匹配机型，本次无可用外部报价')
+        else:
+            add('E09', '三网有效最低价上限', '未检查', '等待渠道核验完成', '请在稽核工作台处理对应渠道问题，完成后自动比较；不影响分销及一级库上限判断')
         stock = p.context.get("stock")
         add(
             "E05",

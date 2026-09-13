@@ -335,3 +335,24 @@ def test_scope_popup_mouse_keyboard_and_overflow_wheel_keep_real_selection(root,
     assert control.listbox.yview()[0] > 0
     assert variable.get() == "品牌 0"
     control.close_popup()
+
+
+def test_date_select_empty_iso_roundtrip_and_calendar_days(root):
+    from quote_app.desktop_controls import DateSelect
+    value = tk.StringVar(root)
+    control = DateSelect(root, textvariable=value)
+    control.pack()
+    root.update()
+    assert value.get() == ''
+    value.set('2024-02-29')
+    assert (control.year.get(), control.month.get(), control.day.get()) == ('2024', '2', '29')
+    control.year.set('2025')
+    assert value.get() == '2025-02-28'
+    value.set('2025-01-31')
+    control.month.set('4')
+    assert value.get() == '2025-04-30'
+    assert control.day_control.values == tuple(str(n) for n in range(1, 31))
+    value.set('')
+    assert control.year.get() == '年' and not control.incomplete
+    control.year.set('2026')
+    assert control.incomplete and value.get() == ''

@@ -172,7 +172,7 @@ def test_from_workbook_reopens_manual_values(session):
     assert opened.products[0].values["K"] == "2090"
     assert opened.products[0].material_code == "001"
     assert not opened.products[0].channels
-    assert check(opened, "C01").status == "待补充"
+    assert check(opened, "C01").status == "未检查"
 
 
 def test_safe_save_rejects_invalid_numeric_without_touching_file(session):
@@ -244,7 +244,7 @@ def test_corrupt_png_does_not_pass_integrity(session, tmp_path):
     image.write_bytes(b"not a png")
     p = session.products[0]
     p.channels.append(TaskRow("t", evidence_path=image))
-    assert check(session, "D02").status == "待补充"
+    assert check(session, "C01").status == "待补充"
     assert not check(session, "C01").human_reviewable
 
 
@@ -366,20 +366,20 @@ def test_reopen_retains_known_source_conflict(session):
     row.issues.append(Issue("MARKETING_CONFLICT", "营销表存在冲突候选", False))
     original = ReviewSession(session.model, MONTH)
     original.products[0].values.update(session.products[0].values)
-    assert check(original, "A03").status == "待补充"
+    assert check(original, "A02").status == "未通过"
     original.save(original.products[0])
     reopened = ReviewSession.from_workbook(session.quote_path, MONTH)
-    assert check(reopened, "A03").status == "待补充"
-    assert not check(reopened, "A03").human_reviewable
-    assert "冲突候选" in check(reopened, "A03").reason
+    assert check(reopened, "A02").status == "未通过"
+    assert not check(reopened, "A02").human_reviewable
+    assert "冲突候选" in check(reopened, "A02").reason
     with pytest.raises(ValueError):
-        reopened.review(check(reopened, "A03").id, "通过", "不能忽略冲突", "张三")
+        reopened.review(check(reopened, "A02").id, "通过", "不能忽略冲突", "张三")
 
 
 def test_without_source_metadata_association_cannot_be_reviewed_as_clean(session):
     reopened = ReviewSession.from_workbook(session.quote_path, MONTH)
-    assert check(reopened, "A03").status == "待补充"
-    assert not check(reopened, "A03").human_reviewable
+    assert check(reopened, "A02").status == "待补充"
+    assert not check(reopened, "A02").human_reviewable
 
 
 def test_extreme_future_qualification_dates_do_not_crash(session):
@@ -404,7 +404,7 @@ def test_confirmed_wrong_row_remains_business_failure(session):
     assert check(session, "F01").status == "未通过"
 
 
-def test_actual_previous_quote_limits_ceiling_but_not_full_history_status(session):
+def test_actual_previous_quote_is_automatically_compared_with_scope(session):
     from quote_app.services.review_support import price_ceiling
 
     w = load_workbook(session.quote_path)
@@ -417,7 +417,7 @@ def test_actual_previous_quote_limits_ceiling_but_not_full_history_status(sessio
     ceiling, explanation = price_ceiling(product)
     assert ceiling == 1800
     assert "上期" in explanation
-    assert check(opened, "E03").status == "待复核"
+    assert check(opened, "E03").status == "通过"
     product.values["K"] = "2000"
     assert check(opened, "E03").status == "未通过"
 

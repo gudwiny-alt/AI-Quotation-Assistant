@@ -236,6 +236,7 @@ class AuditView:
         self.category: str | None = None
         self.exceptions_only = False
         self.show_all_selected = False
+        self.group = None
         self.snapshot = build_audit_snapshot([], [])
         self._checks_by_list_index: list[object] = []
         self._products_by_list_index: list[object] = []
@@ -295,7 +296,7 @@ class AuditView:
         columns = self._category_columns
         baseline = 84 if columns == 6 else 176
         extra = max(0, self.category_cards.winfo_reqheight() - baseline)
-        minimum = (812 if columns == 6 else 906) + extra
+        minimum = (862 if columns == 6 else 956) + extra
         self.page_canvas.itemconfigure(self.page_window,
                                        height=max(self.page_canvas.winfo_height(), minimum))
 
@@ -459,6 +460,13 @@ class AuditView:
         self.all_checks_button.pack(side="right")
         self.product_summary = self.label(panel, "", size=13, color=self.colors["muted"])
         self.product_summary.grid(row=1, column=0, sticky="w", pady=(3, 6))
+        groups = tk.Frame(panel, bg=self.colors['white'])
+        groups.grid(row=2, column=0, sticky='ew', pady=(0, 7))
+        self.group_buttons = {}
+        for key, title in ((None, '全部'), ('base', '基础资料'), ('official', '官网'), ('tmall', '天猫'), ('jd', '京东'), ('quote', '报价与报表')):
+            button = self.button(groups, title, lambda k=key: self._choose_group(k), padding=(7, 4))
+            button.pack(side='left', padx=(0, 4))
+            self.group_buttons[key] = button
         self.check_list = self.RichTable(panel, (("稽核点", 34), ("检查摘要", 48), ("结果", 18)), rowheight=24)
         self.check_list.grid(row=3, column=0, sticky="ew")
         self.check_list.bind("<<TreeviewSelect>>", self._select_check)
@@ -524,7 +532,13 @@ class AuditView:
         self.exceptions_only = enabled
         self.refresh()
 
+    def _choose_group(self, group):
+        self.group = group
+        self.show_all_selected = True
+        self._fill_checks()
+
     def _choose_category(self, category):
+        self.group = None
         self.category = None if self.category == category else category
         self.show_all_selected = False
         self.refresh()
@@ -535,6 +549,7 @@ class AuditView:
 
     def _toggle_all_checks(self):
         self.show_all_selected = not self.show_all_selected
+        self.group = None
         self._fill_checks()
 
     def _select_product(self, _event=None):
@@ -547,7 +562,7 @@ class AuditView:
         if product is None:
             return
         self.workbench.review_product_id = product.id
-        self.show_all_selected = False
+        self.show_all_selected = self.group is not None
         self._fill_checks()
 
     def _selected_product(self):
@@ -556,6 +571,7 @@ class AuditView:
 
     def _fill_checks(self):
         product = self._selected_product()
+        previous = self.check_list.selection()
         for iid in self.check_list.get_children():
             self.check_list.delete(iid)
         self._checks_by_list_index = []
@@ -569,8 +585,14 @@ class AuditView:
             text=f"{product.title} · {specification}" if specification else product.title
         )
         checks = self.snapshot.visible_checks(product.id, all_categories=self.show_all_selected)
+        if self.group:
+            checks = [c for c in checks if (c.code[0] in 'AD' and not getattr(c, 'channel', '') if self.group == 'base' else
+                      c.code[0] in 'EF' if self.group == 'quote' else getattr(c, 'channel', '') == self.group)]
+        for key, button in self.group_buttons.items():
+            button.configure(style="Primary.TButton" if key == self.group else "Workbench.TButton")
         counts = _counts(checks)
         single_scope = "全部检查" if self.show_all_selected or not self.category else self.category
+        single_scope = {'base': '基础资料', 'quote': '报价与报表', 'official': '官网', 'tmall': '天猫', 'jd': '京东'}.get(self.group, single_scope)
         pending = sum(counts[s] for s in ("待复核", "待补充", "未检查"))
         if self.snapshot.available:
             summary_text = (
@@ -602,8 +624,9 @@ class AuditView:
             )
             self._checks_by_list_index.append(item)
         if checks:
-            self.check_list.selection_set(checks[0].id)
-            self._show_check(checks[0])
+            selected = next((c for c in checks if previous and c.id == previous[0]), checks[0])
+            self.check_list.selection_set(selected.id)
+            self._show_check(selected)
         else:
             self._show_check(
                 None,

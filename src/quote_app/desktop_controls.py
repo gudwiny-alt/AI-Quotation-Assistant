@@ -392,3 +392,69 @@ class MonthPicker(SoftSelect):
         self.monthvariable.set(str(month))
         self.close_popup()
         self.event_generate("<<ComboboxSelected>>", when="tail")
+
+
+class DateSelect(tk.Frame):
+    """Three coordinated native-styled selects backed by one optional ISO date."""
+    def __init__(self, parent, *, textvariable):
+        from calendar import monthrange
+        self._monthrange = monthrange
+        super().__init__(parent, bg=parent.cget('bg'), borderwidth=0)
+        self.variable = textvariable
+        self.year, self.month, self.day = (tk.StringVar(self, p) for p in ('年', '月', '日'))
+        self._changing = False
+        self.controls = []
+        for col, (var, values, width) in enumerate(((self.year, tuple(str(n) for n in range(date.today().year, 1899, -1)), 95),
+                (self.month, tuple(str(n) for n in range(1, 13)), 75),
+                (self.day, tuple(str(n) for n in range(1, 32)), 75))):
+            self.columnconfigure(col, weight=1)
+            control = SoftSelect(self, textvariable=var, values=values, width=width)
+            control.grid(row=0, column=col, sticky='ew', padx=(0, 5 if col < 2 else 0))
+            self.controls.append(control)
+        self.day_control = self.controls[2]
+        self._traces = [(var, var.trace_add('write', self._selected)) for var in (self.year, self.month, self.day)]
+        self._traces.append((self.variable, self.variable.trace_add('write', self._external)))
+        self.bind('<Destroy>', self._cleanup, add='+')
+        self._external()
+
+    @property
+    def incomplete(self):
+        return not self.variable.get() and any(v.get().isdigit() for v in (self.year, self.month, self.day))
+
+    def _cleanup(self, event):
+        if event.widget is self:
+            for var, token in self._traces:
+                var.trace_remove('write', token)
+
+    def _external(self, *_):
+        if self._changing:
+            return
+        self._changing = True
+        try:
+            try:
+                value = date.fromisoformat(self.variable.get())
+                parts = tuple(str(n) for n in (value.year, value.month, value.day))
+            except ValueError:
+                parts = ('年', '月', '日')
+            for var, part in zip((self.year, self.month, self.day), parts):
+                var.set(part)
+            self._days()
+        finally:
+            self._changing = False
+
+    def _days(self):
+        count = self._monthrange(int(self.year.get()), int(self.month.get()))[1] if self.year.get().isdigit() and self.month.get().isdigit() else 31
+        self.day_control.values = tuple(str(n) for n in range(1, count + 1))
+        if self.day.get().isdigit() and int(self.day.get()) > count:
+            self.day.set(str(count))
+
+    def _selected(self, *_):
+        if self._changing:
+            return
+        self._changing = True
+        try:
+            self._days()
+            parts = [v.get() for v in (self.year, self.month, self.day)]
+            self.variable.set(date(*(int(p) for p in parts)).isoformat() if all(p.isdigit() for p in parts) else '')
+        finally:
+            self._changing = False

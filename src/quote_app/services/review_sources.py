@@ -150,7 +150,7 @@ def recover_task_provenance(observations, database, *, run_id=None):
         return observations
 
 
-def matching_run_paths(path, month, rows, database, *, run_ids=None):
+def matching_run_paths(path, month, rows, database, *, run_ids=None, source_rows=None):
     """Recover input references only; never attach another run's channel results."""
     if not database or not Path(database).is_file():
         return {}
@@ -187,6 +187,8 @@ def matching_run_paths(path, month, rows, database, *, run_ids=None):
                 continue
             if run_ids is not None:
                 run_ids.append(item["run_id"])
+            if source_rows is not None:
+                source_rows.extend(saved)
             return {
                 f["source_role"]: Path(f["path"])
                 for f in data["input_fingerprints"]

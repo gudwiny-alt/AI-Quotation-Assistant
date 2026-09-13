@@ -44,25 +44,33 @@ def recognize(path):
             b"performRequests:error:",
             {"arguments": {3: {"type_modifier": b"o"}}},
         )
-        request = objc.lookUpClass("VNRecognizeTextRequest").alloc().init()
-        request.setRecognitionLevel_(0)
-        request.setRecognitionLanguages_(["zh-Hans", "en-US"])
-        request.setUsesLanguageCorrection_(False)
         handler = (
             objc.lookUpClass("VNImageRequestHandler")
             .alloc()
             .initWithURL_options_(NSURL.fileURLWithPath_(str(Path(path).resolve())), {})
         )
-        ok, error = handler.performRequests_error_([request], None)
-        if not ok:
-            raise RuntimeError(
-                "本机文字识别未完成" + (f"：{error}" if error else "，请重试或打开原图复核")
+        # Full Retina desktops can downsample small product/store text. A second
+        # central-region pass improves legibility without editing the saved image.
+        regions = [None, ((0.2, 0.1), (0.6, 0.8))] if width >= 2400 else [None]
+        lines = []
+        for region in regions:
+            request = objc.lookUpClass("VNRecognizeTextRequest").alloc().init()
+            request.setRecognitionLevel_(0)
+            request.setRecognitionLanguages_(["zh-Hans", "en-US"])
+            request.setUsesLanguageCorrection_(False)
+            if region is not None:
+                request.setRegionOfInterest_(region)
+            ok, error = handler.performRequests_error_([request], None)
+            if not ok:
+                if region is not None:
+                    continue
+                raise RuntimeError("本机文字识别未完成" + (f"：{error}" if error else "，请重试或打开原图复核"))
+            lines.extend(
+                str(candidates[0].string())
+                for item in (request.results() or ())
+                if (candidates := item.topCandidates_(1)) and candidates[0].confidence() >= 0.45
             )
-        lines = [
-            str(candidates[0].string())
-            for item in (request.results() or ())
-            if (candidates := item.topCandidates_(1)) and candidates[0].confidence() >= 0.45
-        ]
+            lines.append('')
         return Recognition("done", "\n".join(lines), width, height)
 
 

@@ -91,10 +91,10 @@ def test_marketing_stock_and_entry_are_automatic_and_range_uses_upper_end(tmp_pa
     assert product.context["entry_date"] == "2025-10-14"
     checks = {c.code: c for c in session.evaluate(product)}
     assert checks["E05"].status == "通过"
-    assert "5000" in checks["E04"].comparison
-    assert "4500到5000" in checks["E04"].reason
-    assert "None" not in checks["E04"].comparison
-    assert checks["E04"].status != "通过"
+    assert "5000" in checks["E08"].comparison
+    assert "4500到5000" in checks["E08"].reason
+    assert "None" not in checks["E08"].comparison
+    assert checks["E08"].status == "通过"
 
 
 def test_warehouse_limit_uses_exact_upper_end():
@@ -179,3 +179,33 @@ def test_missing_file_cannot_gain_task_provenance(tmp_path, monkeypatch):
     monkeypatch.setattr(sources, "read_task_rows", lambda *a: ([task], ""))
     observed = TaskRow("workbook:2:jd", channel="jd", material_code="001", source_row_number=2)
     assert sources.recover_task_provenance([observed], database, run_id="run") == [observed]
+
+
+def test_source_snapshot_recovery_requires_hash_and_exact_output_identity(tmp_path):
+    import hashlib
+    import json
+    import sqlite3
+    from quote_app.services.review_workbook import inspect
+    quote = make_quote(tmp_path)
+    rows = inspect(quote, MONTH)
+    saved = [{'source_row_number': number, 'material_code': cells['C'], 'cells': cells,
+              'web_query': {'model_name': '荣耀Magic8', 'ram': '16GB', 'storage': '512GB', 'color': '天青釉'},
+              'issues': []} for number, cells in rows.items() if cells.get('C')]
+    snapshot = json.dumps({'rows': saved}, default=str)
+    data = {'quote_month': {'year': 2026, 'month': 8}, 'output_dir': str(quote.parent),
+            'associated_rows_snapshot': snapshot,
+            'associated_rows_snapshot_sha256': hashlib.sha256(snapshot.encode()).hexdigest(),
+            'input_fingerprints': []}
+    db = tmp_path / 'tasks.sqlite3'
+    with sqlite3.connect(db) as con:
+        con.execute('CREATE TABLE quotation_runs (run_id TEXT, payload_json TEXT, created_at TEXT)')
+        con.execute('INSERT INTO quotation_runs VALUES (?, ?, ?)', ('run', json.dumps({'data': data}), '2026-09-13'))
+    recovered = ReviewSession.from_workbook(quote, MONTH, task_database=db)
+    assert recovered._source_known[recovered.products[0].id]
+    assert next(c for c in recovered.evaluate(recovered.products[0]) if c.code == 'A02').status == '通过'
+    data['associated_rows_snapshot_sha256'] = 'incorrect'
+    with sqlite3.connect(db) as con:
+        con.execute('UPDATE quotation_runs SET payload_json=?', (json.dumps({'data': data}),))
+    rejected = ReviewSession.from_workbook(quote, MONTH, task_database=db)
+    assert not rejected._source_known[rejected.products[0].id]
+    assert next(c for c in rejected.evaluate(rejected.products[0]) if c.code == 'A02').status == '待补充'

@@ -132,6 +132,24 @@ def test_native_audit_selection_persists_and_category_filter_keeps_header_counts
         assert workbench.review_product_id == "p2"
         assert view.metric_values["checks"].cget("text") == "3"
         assert view.scope_label.cget("text") == "当前范围：截图内容核验"
+        total = view.metric_values['checks'].cget('text')
+        checks[1].channel = 'jd'
+        workbench.review_product_id = 'p1'
+        view._choose_group('jd')
+        root.update()
+        assert [c.id for c in view._checks_by_list_index] == [checks[1].id]
+        assert view.metric_values['checks'].cget('text') == total
+        assert '京东' in view.product_summary.cget('text')
+        view._choose_group('base')
+        assert [c.id for c in view._checks_by_list_index] == [checks[0].id]
+        extra = SimpleNamespace(**vars(checks[1]))
+        extra.id, extra.product_id = 'p2-channel', 'p2'
+        checks.append(extra)
+        view._choose_category('商品分类与关联')
+        view._choose_group('jd')
+        view.product_list.selection_set('p2')
+        view._select_product()
+        assert [c.id for c in view._checks_by_list_index] == ['p2-channel']
         assert not errors
     finally:
         root.destroy()
