@@ -271,6 +271,19 @@ class AuditView:
         self._build_workspace()
         self._build_footer()
         self.refresh()
+        from quote_app.services.screenshot_review import revision
+        self._scan_revision = revision()
+        self._scan_timer = self.container.after(1000, self._poll_scans)
+
+    def _poll_scans(self):
+        from quote_app.services.screenshot_review import revision
+        if not self.container.winfo_exists():
+            return
+        current = revision()
+        if current != self._scan_revision:
+            self._scan_revision = current
+            self.refresh()
+        self._scan_timer = self.container.after(1000, self._poll_scans)
 
     def _resize_page(self, event):
         columns = 6 if event.width >= 1100 else 3
@@ -453,15 +466,30 @@ class AuditView:
         self.detail_heading.grid(row=4, column=0, sticky="ew", pady=(8, 0), ipady=6)
         self.detail = tk.Frame(panel, bg="#F8FAFE", padx=7, pady=6)
         self.detail.grid(row=5, column=0, sticky="nsew")
-        self.detail.columnconfigure(0, weight=1)
-        self.detail.columnconfigure(1, weight=1)
+        self.detail.columnconfigure(0, weight=1, uniform='detail-evidence')
+        self.detail.columnconfigure(1, weight=1, uniform='detail-evidence')
         self.detail.rowconfigure(0, weight=1)
-        text_area = tk.Frame(self.detail, bg="#F8FAFE")
-        text_area.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self.comparison = self.label(text_area, "请选择稽核点", size=14, bg="#F8FAFE", wraplength=285, justify="left")
+        reader = tk.Frame(self.detail, bg='#F8FAFE')
+        reader.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+        reader.columnconfigure(0, weight=1)
+        reader.rowconfigure(0, weight=1)
+        text_canvas = tk.Canvas(reader, bg='#F8FAFE', borderwidth=0, highlightthickness=0,
+                                width=1, height=130, yscrollincrement=1)
+        text_canvas.grid(row=0, column=0, sticky='nsew')
+        text_bar = self.SlimScrollbar(reader, orient='vertical', command=text_canvas.yview)
+        text_bar.grid(row=0, column=1, sticky='ns')
+        text_canvas.configure(yscrollcommand=text_bar.set)
+        text_area = tk.Frame(text_canvas, bg='#F8FAFE')
+        text_window = text_canvas.create_window(0, 0, window=text_area, anchor='nw')
+        text_canvas.bind('<Configure>', lambda event: text_canvas.itemconfigure(text_window, width=event.width))
+        text_area.bind('<Configure>', lambda event: text_canvas.configure(scrollregion=text_canvas.bbox('all')))
+        text_area._workbench_scroll_canvas = text_canvas
+        text_canvas._workbench_scroll_canvas = text_canvas
+        self.comparison = self.label(text_area, "请选择稽核点", size=14, bg="#F8FAFE", wraplength=285, justify="left", width=1)
         self.comparison.pack(anchor="nw", fill="x")
-        self.reason = self.label(text_area, "", size=13, color=self.colors["muted"], bg="#F8FAFE", wraplength=285, justify="left")
+        self.reason = self.label(text_area, "", size=13, color=self.colors["muted"], bg="#F8FAFE", wraplength=285, justify="left", width=1)
         self.reason.pack(anchor="nw", fill="x", pady=(5, 0))
+        text_area.bind('<Configure>', self._rewrap_detail, add='+')
         self.evidence_frame = tk.Frame(self.detail, bg="#F8FAFE")
         self.evidence_frame.grid(row=0, column=1, sticky="nsew")
         self.review_conclusion = tk.StringVar(self.root, "通过")
@@ -474,10 +502,9 @@ class AuditView:
         self.review_button = self.button(actions, text="人工复核", command=self._review, primary=True, padding=(8, 5))
         self.review_button.pack(side="right", padx=(7, 0))
         self.button(actions, text="查看完整依据", command=self._show_detail_dialog, padding=(8, 5)).pack(side="right")
-        self.detail.bind("<Configure>", self._rewrap_detail)
 
     def _rewrap_detail(self, event):
-        width = max(160, (event.width - 38) // 2)
+        width = max(1, event.width - 4)
         self.comparison.configure(wraplength=width)
         self.reason.configure(wraplength=width)
 
@@ -896,5 +923,7 @@ class AuditView:
         self._fill_checks()
 
     def destroy(self):
+        if getattr(self, '_scan_timer', None):
+            self.container.after_cancel(self._scan_timer)
         if self.container.winfo_exists():
             self.container.destroy()

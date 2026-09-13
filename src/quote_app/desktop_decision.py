@@ -55,6 +55,8 @@ def channel_presentation(records) -> ChannelPresentation:
         status = "采集失败"
     elif record.state == "paused":
         status = "已暂停"
+    elif record.state == 'workbook':
+        status = '表内价格' if record.price else '已有截图' if record.evidence_path else '待核对'
     elif record.state == "succeeded" and record.outcome == "price_found":
         status = "待复核"
     elif record.outcome:
@@ -523,9 +525,11 @@ class DecisionView:
             for col, (text, ink) in enumerate(((check.title, self.INK),
                     (check.comparison or check.reason, self.INK),
                     (("✓  " if check.status == "通过" else "!  " if check.status == "未通过" else "") + check.status, color))):
-                self._wrap(table, text, size=14 if col != 1 else 13, color=ink, width=1,
-                           anchor="center").grid(row=index, column=col, sticky="nsew", ipady=5,
-                                                  padx=(0, 1), pady=(1, 0))
+                cell = self._wrap(table, text, size=14 if col != 1 else 13, color=ink, width=1,
+                                  anchor="center", cursor='hand2', takefocus=True)
+                cell.grid(row=index, column=col, sticky="nsew", ipady=5, padx=(0, 1), pady=(1, 0))
+                cell.bind('<Button-1>', lambda event, code=check.code: self._rule_details(code))
+                cell.bind('<Return>', lambda event, code=check.code: self._rule_details(code))
         ceiling, reason = price_ceiling(self.product)
         self.ceiling_label.configure(text=f"当前价格上限   {money_preview(str(ceiling)) if ceiling is not None else '待补充依据'}")
         # Use the same bounded decimal parser as the service. In-progress enormous
@@ -578,6 +582,39 @@ class DecisionView:
         self._update_rules()
         self.feedback.configure(text="已更新本品优福包确认，请保存草稿以保留处理记录。")
 
+    def _rule_details(self, code):
+        check = next(c for c in self.session.evaluate(self.product) if c.code == code)
+        dialog = tk.Toplevel(self.parent)
+        dialog.title(check.title + ' · 检查依据')
+        dialog.geometry('660x430')
+        dialog.configure(bg=self.WHITE)
+        dialog.transient(self.wb.root)
+        shell = tk.Frame(dialog, bg=self.WHITE, padx=24, pady=22)
+        shell.pack(fill='both', expand=True)
+        shell.columnconfigure(0, weight=1)
+        self.label(shell, check.title + ' · ' + check.status, size=18, bold=True).grid(sticky='w')
+        self._wrap(shell, check.comparison, size=15).grid(sticky='ew', pady=14)
+        self._wrap(shell, check.reason or '按所填价格精确比较；修改左侧价格后自动重新计算。', size=14).grid(sticky='ew', pady=10)
+        if check.code == 'E03' and check.human_reviewable:
+            reason = tk.StringVar(dialog)
+            operator = tk.StringVar(dialog)
+            SoftEntry(shell, textvariable=reason, placeholder='确认适用历史范围的依据（必填）', width=560).grid(sticky='ew', pady=6)
+            SoftEntry(shell, textvariable=operator, placeholder='操作人（必填）', width=560).grid(sticky='ew', pady=6)
+
+            def confirm():
+                try:
+                    self.session.review(check.id, '通过', reason.get(), operator.get())
+                except (ValueError, OSError) as error:
+                    messagebox.showerror('无法确认', str(error), parent=dialog)
+                    return
+                dialog.destroy()
+                self._update_rules()
+            self.button(shell, '确认适用历史范围', confirm, primary=True).grid(sticky='e', pady=12)
+        elif check.code in ('E05', 'E06', 'E07'):
+            self.button(shell, '查看资格与日期依据', lambda: (dialog.destroy(), self._qualifications())).grid(sticky='e', pady=12)
+        else:
+            self.button(shell, '返回调整报价', dialog.destroy).grid(sticky='e', pady=12)
+
     def _qualifications(self):
         if self.dialog is not None and self.dialog.winfo_exists():
             self.dialog.lift()
@@ -597,13 +634,13 @@ class DecisionView:
         )
         self._wrap(
             box,
-            "仅填写已经核实的信息。此处会记录为人工补充，不能把历史关联记录当作当前在库。日期格式：YYYY-MM-DD。",
+            "当前仅按手机规则报价。在库资格和入库日期优先读取营销商品表；首次报价日期须另有报价依据，不能用入库日期代替。日期格式：YYYY-MM-DD。",
             color=self.MUTED,
             size=10,
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 18))
         variables = {}
         definitions = (
-            ("category", "商品分类", ("未确认", "手机", "多形态")),
+            ("category", "适用商品", ("手机",)),
             ("stock", "一级库库存", ("未确认", "在库", "不在库")),
             ("entry_date", "入总部一级库日期", None),
             ("first_quote_date", "首次报价日期", None),
@@ -621,6 +658,8 @@ class DecisionView:
                 else SoftEntry(box, textvariable=var, placeholder="YYYY-MM-DD", width=270)
             )
             control.grid(row=row, column=1, sticky="ew", pady=6)
+            if key == 'category' or self.product.context.get(key + '_source'):
+                (control.entry if isinstance(control, SoftEntry) else control).configure(state='disabled')
         self.label(box, "依据来源 / 核实说明", size=11).grid(
             row=6, column=0, columnspan=2, sticky="w", pady=(12, 6)
         )

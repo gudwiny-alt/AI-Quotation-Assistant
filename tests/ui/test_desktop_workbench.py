@@ -593,6 +593,34 @@ def test_reference_size_decision_exposes_preview_and_save_without_page_scroll(wo
     assert all(widget.winfo_ismapped() for widget in form.preview_values.values())
 
 
+def test_decision_rule_opens_explanation_and_source_fields_are_locked(workbench):
+    from quote_app.domain.models import QuoteRow, WebQuery
+    from quote_app.desktop_controls import SoftSelect, SoftEntry
+
+    view = workbench
+    view.model.quote_rows = (QuoteRow(2, 'sku', cells={}, web_query=WebQuery(model_name='测试手机')),)
+    view.show_page('decision')
+    product = view._review_session.products[0]
+    product.context.update(stock='在库', stock_source='营销表第2行',
+                           entry_date='2025-10-14', entry_date_source='营销表第2行')
+    view._review_view.select(product.id)
+    form = view._review_view
+    form._rule_details('E02')
+    view.root.update()
+    dialogs = [child for child in view.body.winfo_children() if isinstance(child, tk.Toplevel)]
+    assert any('手机加价率上限' in dialog.title() for dialog in dialogs)
+    for dialog in dialogs:
+        dialog.destroy()
+    form._qualifications()
+    view.root.update()
+    box = form.dialog.winfo_children()[0]
+    fields = [child for child in box.winfo_children() if isinstance(child, (SoftSelect, SoftEntry))]
+    assert len(fields) == 4
+    assert all((field.entry if isinstance(field, SoftEntry) else field).cget('state') == 'disabled' for field in fields[:3])
+    assert fields[3].entry.cget('state') == 'normal'
+    form.dialog.destroy()
+
+
 def test_audit_dense_category_counts_fit_when_window_changes(workbench):
     """Real batch counts may need more lines than the illustrated sample card."""
     view = workbench

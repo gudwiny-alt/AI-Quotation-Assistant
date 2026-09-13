@@ -682,10 +682,15 @@ class DesktopWorkbench:
 
         key = self._current_review_key()
         if self._review_session is None or (not self._review_manual and key != self._review_key):
-            self._review_session = ReviewSession(self.model, self._review_context())
+            self._review_session = ReviewSession(self.model, self._review_context(), source_paths=self._review_source_paths())
             self._review_key = key
             self.review_product_id = None
         return self._review_session
+
+    def _review_source_paths(self):
+        return {role: Path(variable.get()) for role in ('base', 'marketing')
+                if (variable := getattr(self.app, role + '_var', None)) is not None
+                and variable.get() and Path(variable.get()).is_file()}
 
     def open_review_workbook(self):
         """Load an already generated workbook for local editing, without rerunning collection."""
@@ -718,7 +723,8 @@ class DesktopWorkbench:
             return
         try:
             year, number = value.strip().split("-")
-            session = ReviewSession.from_workbook(Path(chosen), QuoteMonth(int(year), int(number)))
+            session = ReviewSession.from_workbook(Path(chosen), QuoteMonth(int(year), int(number)),
+                source_paths=self._review_source_paths(), task_database=self.app.app_paths.task_database)
         except (ValueError, OSError) as error:
             messagebox.showerror("无法打开报价表", str(error), parent=self.root)
             return

@@ -21,6 +21,8 @@ from quote_app.services.review_workbook import (
     atomic_json,
     rollback,
 )
+from quote_app.services.review_sources import warehouse_limit, workbook_channels, matching_run_paths, source_facts, recover_task_provenance
+from quote_app.services.screenshot_review import request_scan, assess
 
 CATEGORIES = (
     "商品分类与关联",
@@ -30,7 +32,7 @@ CATEGORIES = (
     "报价规则与资格",
     "报表与报送一致性",
 )
-RULE_VERSION = "decision-audit-2026-09-13-v1"
+RULE_VERSION = "decision-audit-2026-09-13-v2"
 
 
 @dataclass(slots=True)
@@ -105,11 +107,13 @@ def price_ceiling(product):
         candidates.append((_phone_limit(money(product.values["L"])), "手机采购价×1.045"))
     for value, label in (
         (product.values.get("Q"), "分销零售价"),
-        (product.context.get("warehouse_price"), "一级库价格"),
+        (warehouse_limit(product.context.get("warehouse_price")), "一级库建议零售价上限"),
         (product.context.get("previous_price"), "已知上期报价（不代表历史全量）"),
     ):
         if money(value):
             candidates.append((money(value), label))
+    for period, value in supplied_history(product):
+        candidates.append((value, f'{period}已提供历史报价'))
     # Unreviewed raw channel observations are not valid price ceilings.
     if not candidates:
         return None, "尚无可计算约束；渠道有效性及其他资格仍须核验"
@@ -119,8 +123,16 @@ def price_ceiling(product):
     ) + "；其余资格与价格口径仍须核验"
 
 
+def supplied_history(product):
+    try:
+        rows = json.loads(product.context.get('history_prices', '[]'))
+        return [(str(period), money(value)) for period, value in rows if money(value) is not None]
+    except (ValueError, TypeError):
+        return []
+
+
 class ReviewSession:
-    def __init__(self, model, month: QuoteMonth, *, _output_rows=None, _source_metadata=True):
+    def __init__(self, model, month: QuoteMonth, *, _output_rows=None, _source_metadata=True, source_paths=None):
         self.model = model
         self.month = month
         self.products = []
@@ -135,6 +147,7 @@ class ReviewSession:
         self._confirmed = {}
         self.load_error = ""
         self._inspection_error = ""
+        self.source_paths = dict(source_paths or {})
         try:
             self._rows = inspect(self.quote_path, month)
         except ValueError as error:
@@ -163,7 +176,7 @@ class ReviewSession:
                 str(v) for v in (query.ram, query.storage, query.color) if v
             ) or str(row.cells.get("E", ""))
             context = {
-                "category": "未确认",
+                "category": "手机" if not row.cells.get("A") or "手机" in str(row.cells.get("A")) else "暂不支持",
                 "stock": "未确认",
                 "entry_date": "",
                 "first_quote_date": "",
@@ -208,24 +221,54 @@ class ReviewSession:
             )
         self._inspection_version = self._version
         self._restore()
+        for p in self.products:
+            # Source facts override older manual placeholders; no invented dates.
+            p.context.update(source_facts(self.source_paths, p.material_code, self.month))
+            if p.context.get('category') == '未确认':
+                source_category = str(self._sources[p.id].cells.get('A') or '')
+                p.context['category'] = '手机' if not source_category or '手机' in source_category else '暂不支持'
+            if p.context.get('source_title'):
+                p.title = p.context['source_title']
+                p.specification = ' / '.join(p.context.get(k, '') for k in ('source_ram', 'source_storage', 'source_color') if p.context.get(k))
+            elif not _source_metadata:
+                p.title = str(self._sources[p.id].cells.get('E') or p.title)
 
     @classmethod
-    def from_workbook(cls, path: Path, month: QuoteMonth):
+    def from_workbook(cls, path: Path, month: QuoteMonth, *, source_paths=None, task_database=None):
         rows = inspect(Path(path), month)
         source = []
         for number, cells in rows.items():
             if cells.get("C"):
-                source.append(QuoteRow(number, str(cells["C"]), dict(cells)))
+                from quote_app.domain.models import WebQuery
+                source.append(QuoteRow(number, str(cells["C"]), dict(cells), web_query=WebQuery(
+                    model_name=str(cells.get('E') or cells.get('D') or cells['C']), brand=str(cells.get('B') or ''))))
             elif any(cells.get(c) for c in ("D", "E", "K", "L")):
                 raise ValueError(f"工作簿第{number}行缺少稳定物料编码，无法安全定位")
         if not source:
             raise ValueError("工作簿中没有可报价商品记录")
-        return cls(
+        run_ids = []
+        paths = matching_run_paths(path, month, rows, task_database, run_ids=run_ids)
+        paths.update({k: Path(v) for k, v in (source_paths or {}).items() if v and Path(v).is_file() and k not in paths})
+        result = cls(
             DesktopState(quote_rows=tuple(source), quote_path=Path(path)),
             month,
             _output_rows=[row.source_row_number for row in source],
             _source_metadata=False,
+            source_paths=paths,
         )
+        recovered = recover_task_provenance(workbook_channels(path, rows), task_database,
+                                            run_id=run_ids[0] if run_ids else None)
+        for product in result.products:
+            # Existing saved task provenance is stronger than workbook-only observations.
+            for channel in recovered:
+                if channel.source_row_number != product.output_row or channel.material_code != product.material_code:
+                    continue
+                old = next((c for c in product.channels if c.channel == channel.channel), None)
+                if old is None:
+                    product.channels.append(channel)
+                elif channel.state != 'workbook' or not old.evidence_path or not old.evidence_path.is_file():
+                    product.channels[product.channels.index(old)] = channel
+        return result
 
     @property
     def running(self):
@@ -351,6 +394,11 @@ class ReviewSession:
     def evaluate(self, p):
         if not any(item is p for item in self.products):
             raise ValueError("商品不属于当前批次")
+        source_row = self._sources[p.id].source_row_number
+        current = [t for t in self.model.rows if t.source_row_number == source_row
+                   and t.material_code == p.material_code]
+        if current:
+            p.channels = current
         checks = []
         fingerprint = self._fingerprint(p)
 
@@ -382,9 +430,9 @@ class ReviewSession:
         add(
             "A01",
             "商品分类",
-            "通过" if category in ("手机", "多形态") and note else "待补充",
+            "通过" if category == "手机" else "待补充",
             category,
-            "人工补充依据：" + note if note else "请确认分类并填写人工补充依据",
+            "当前智能报价仅适用于手机；按手机4.5%规则计算" if category == "手机" else "当前版本暂不支持非手机产品智能报价",
         )
         add(
             "A02",
@@ -428,14 +476,15 @@ class ReviewSession:
         add(
             "D01",
             "应有渠道记录",
-            "未检查" if self.running else ("待补充" if not p.channels else "待复核"),
+            "未检查" if self.running else ("通过" if {t.channel for t in p.channels} == {'jd', 'tmall', 'official'} else "待补充"),
             f"{len(p.channels)}条渠道记录",
-            "按应执行渠道核对覆盖；缺项原因与可接受口径需确认",
+            "检查官网、天猫、京东三个渠道记录是否齐全；取价失败和无机型的业务结果另列核验",
             human=False,
         )
         eligible = []
         for t in p.channels:
             suffix = t.task_id
+            channel_label = {'jd': '京东', 'tmall': '天猫', 'official': '官网'}.get(t.channel, t.channel)
             paths = (t.evidence_path,) if t.evidence_path else ()
             record_ok = (
                 t.state == "succeeded" and t.outcome == "price_found" and money(t.price) is not None
@@ -448,11 +497,11 @@ class ReviewSession:
                 add(
                     code,
                     title,
-                    "待复核" if record_ok and t.url else "待补充",
+                    "待复核" if t.evidence_path else "待补充",
                     comparison,
                     reason,
                     paths,
-                    human=record_ok and bool(t.url) and code != "B03",
+                    human=bool(t.evidence_path) and code != "B03",
                     suffix=suffix,
                 )
             file_ok = False
@@ -474,6 +523,9 @@ class ReviewSession:
                 paths,
                 suffix=suffix,
             )
+            content = assess(request_scan(t.evidence_path), p.title,
+                             t.specification or p.specification, t.channel, t.price,
+                             outcome=t.outcome) if file_ok else {}
             for code, title in (
                 ("C01", "截图页面内容"),
                 ("C02", "截图规格对照"),
@@ -483,11 +535,14 @@ class ReviewSession:
                 add(
                     code,
                     title,
-                    "待复核" if file_ok else "待补充",
-                    t.price + " / " + p.specification,
-                    "须打开原图核对，保存成功不等于内容通过",
+                    content[code][0] if file_ok else "待补充",
+                    channel_label + ' · ' + (content[code][1] if file_ok else "没有可读取的截图"),
+                    content[code][2] if file_ok else (
+                        "本次取价未完成：仅识别到补贴价或划线原价，未取得符合规则的售价与截图"
+                        if t.error == 'NO_VALID_SELLING_PRICE' else
+                        f"截图缺失、空文件或无法解码，请补充证据{('；任务原因：' + t.error) if t.error else ''}"),
                     paths,
-                    human=file_ok,
+                    human=file_ok and content[code][0] == '待复核',
                     suffix=suffix,
                 )
             reused = (
@@ -502,9 +557,9 @@ class ReviewSession:
             add(
                 "D03",
                 "证据关联完整",
-                "未通过" if reused else ("待复核" if file_ok and t.url else "待补充"),
+                "未通过" if reused else ("通过" if file_ok and t.material_code == p.material_code and t.source_row_number else "待补充"),
                 t.task_id,
-                "同一截图被多条记录重复引用" if reused else "核对商品、渠道、价格与截图对应关系",
+                "同一截图被多条记录重复引用" if reused else "截图按商品物料编码、数据行和渠道关联；内容及价格口径另项核验",
                 paths,
                 human=file_ok and bool(t.url) and not reused,
                 suffix=suffix,
@@ -575,31 +630,39 @@ class ReviewSession:
                 "分类或多形态适用规则待明确，不能套用手机规则",
             )
         previous = money(source.cells.get("J"))
+        history = supplied_history(p)
+        bounds = [v for _, v in history] + ([previous] if previous is not None else [])
+        history_min = min(bounds) if bounds else None
+        history_detail = '；'.join(f'{period}：{value}' for period, value in history)
+        history_fail = k is not None and history_min is not None and k > history_min
         add(
             "E03",
             "适用历史报价",
-            "未通过" if k and previous and k > previous else "待复核",
-            f"当月 {k}；已知上期 {previous}",
-            "当月高于已知上期"
-            if k and previous and k > previous
-            else "历史全量范围与来源口径未明确，上一期比较不代表全部往期通过",
+            "未通过" if history_fail else ("待补充" if k is None or history_min is None else "待复核"),
+            f"当月 {k if k is not None else '待填写'}；已知历史上限 {history_min if history_min is not None else '待补充'}",
+            ("当月高于已提供历史报价。" if history_fail else "已提供月份的数值比较未超上限；请确认这些月份覆盖本次适用历史范围。")
+            + (p.context.get('history_source', '') + '；' + history_detail if history else "当前仅有报价表J列上期价格；需要确认是否还应提供其他历史月份。"),
+            human=k is not None and history_min is not None and not history_fail,
         )
-        q, o = money(p.values.get("Q")), money(p.context.get("warehouse_price"))
+        warehouse_raw = p.context.get('warehouse_price', '')
+        q, o = money(p.values.get("Q")), warehouse_limit(warehouse_raw)
         known_fail = k and any(v is not None and k > v for v in (q, o))
         add(
             "E04",
             "零售与一级库上限",
             "未通过" if known_fail else ("待补充" if not k or not q or not o else "待复核"),
-            f"当月 {k}；分销 {q}；一级库 {o}",
-            "高于已知价格上限" if known_fail else "还须核验规定渠道有效官方零售价",
+            f"当月 {k if k is not None else '待填写'}；分销 {q if q is not None else '待填写'}；一级库 {o if o is not None else (warehouse_raw or '待补充')}",
+            ("高于已知价格上限" if known_fail else "分销/一级库数值符合时，还须核验规定渠道有效官方零售价")
+            + f"；营销建议零售价：{warehouse_raw or '缺失'}；采用区间上限：{o if o is not None else '无法识别，请核对源表'}；{p.context.get('warehouse_source', '报价表O列')}",
         )
         stock = p.context.get("stock")
         add(
             "E05",
             "一级库在库资格",
-            "未通过" if stock == "不在库" else ("通过" if stock == "在库" and note else "待补充"),
+            "未通过" if stock == "不在库" else ("通过" if stock == "在库" and (note or p.context.get('stock_source')) else "待补充"),
             stock or "未确认",
-            "人工补充依据：" + note if note else "业务编码或历史资源关联不能证明当前在库",
+            ("营销表已匹配：" + p.context['stock_source']) if p.context.get('stock_source') else
+            ("人工补充依据：" + note if note else p.context.get('marketing_source_error', '请关联营销商品信息表，自动核验在库记录')),
         )
         entry = _date(p.context.get("entry_date"))
         today = date(self.month.year, self.month.month, 1)
