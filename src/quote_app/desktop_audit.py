@@ -732,7 +732,7 @@ class AuditView:
             preview.bind("<Button-1>", lambda _event, path=preview_path: self.workbench._open_path(path))
             self.label(self.evidence_frame, "点击查看原始截图 ↗", size=12, color=self.colors["blue"], bg="#F8FAFE").pack(anchor="w")
         else:
-            self.label(self.evidence_frame, "暂无可预览的本地截图" if evidence else "暂无附件证据", size=13,
+            self.label(self.evidence_frame, "工作簿依据（点击查看）" if evidence and all(Path(a).suffix.lower() == ".xlsx" for a in evidence) else "暂无可预览的本地截图" if evidence else "本项依据见左侧自动检查说明", size=13,
                        color=self.colors["muted"], bg="#F8FAFE").pack(anchor="w", pady=(14, 0))
             if evidence:
                 self.button(self.evidence_frame, text="查看附件", command=lambda: self.workbench._open_path(Path(evidence[0])), padding=(8, 5)).pack(anchor="w", pady=5)

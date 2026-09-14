@@ -657,7 +657,18 @@ class TmallAdapter:
         browser_page = _playwright_page(page)
         try:
             ensure_capture_scale(browser_page, scale=0.8)
-            self._prepare_capture_view_at_scale(task, browser_page, expected)
+            try:
+                self._prepare_capture_view_at_scale(task, browser_page, expected)
+            except CaptureViewGeometryError as error:
+                if not (normalize_product_text(task.brand) == "HONOR"
+                        and expected.outcome is BusinessOutcome.PRICE_FOUND
+                        and error.safe_stage == "结果区域定位"):
+                    raise
+                # Give the scaled SKU panel one bounded chance to settle on the
+                # same verified page. The full semantic checks run again below;
+                # changed price/configuration is never swallowed as geometry.
+                browser_page.wait_for_timeout(_CAPTURE_SETTLE_MS)
+                self._prepare_capture_view_at_scale(task, browser_page, expected)
         except BaseException:
             try:
                 restore_capture_scale(browser_page)
@@ -773,7 +784,7 @@ class TmallAdapter:
             ),
             upward_recovery_steps=(
                 4
-                if normalize_product_text(task.brand) in {"华为", "苹果"}
+                if normalize_product_text(task.brand) in {"华为", "HONOR", "苹果"}
                 else 0
             ),
             minimum_upward_nudges=(

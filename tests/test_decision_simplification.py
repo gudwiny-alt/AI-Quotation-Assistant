@@ -93,5 +93,5 @@ def test_verified_external_ceiling_updates_price_guidance(session, tmp_path, mon
     checks = session.evaluate(p)
     assert next(c for c in checks if c.code == "E09").status == "未通过"
     assert price_ceiling(p, checks)[0] == 1900
-    assert "已核验" in price_ceiling(p, checks)[1]
-    assert price_ceiling(p)[0] == 2090
+    assert "已取" in price_ceiling(p, checks)[1]
+    assert price_ceiling(p)[0] == 1900

@@ -57,6 +57,15 @@ def inspect_channel(task, title, specification, scan, written_price):
         return checks
     text = scan.text
     normalized = compact(text)
+    system_prompt = ("打开系统设置" in normalized and
+                     ("正在请求绕过系统" in normalized or "录制屏幕和系统音频" in normalized))
+    if system_prompt:
+        evidence.status = "未通过"
+        evidence.comparison = "截图包含macOS权限弹窗"
+        evidence.reason = "系统权限弹窗遮挡商品页面；请完成系统授权、关闭弹窗后重新截图，不能以文件已保存代替证据合格"
+        for check in checks[:3]:
+            check.reason = "等待补充无遮挡的商品页面截图"
+        return checks
     auth = any(
         word in text for word in ("请完成安全验证", "请先登录", "拖动滑块完成拼图", "访问过于频繁")
     )

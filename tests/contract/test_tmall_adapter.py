@@ -4141,3 +4141,47 @@ def test_adapter_navigates_only_to_approved_entry_and_exact_item_url() -> None:
         spec.entry_url,
         "https://detail.tmall.com/item.htm?id=123456789018",
     ]
+
+
+@pytest.mark.parametrize('permanent', [False, True])
+def test_honor_capture_retries_geometry_on_same_page_once(monkeypatch, permanent):
+    from quote_app.sites.detail_capture_view import CaptureViewGeometryError
+    html = _live_observed_html().replace('小米官方旗舰店', '荣耀官方旗舰店').replace('xiaomi.tmall.com', 'hihonor.tmall.com').replace('小米 15', '荣耀Power2').replace('小米15', '荣耀Power2')
+    task = _task(brand='HONOR', model_name='荣耀Power2')
+    page = _FixturePage(html=html, after_search_url=_honor_power2_result_url())
+    adapter = TmallAdapter(_honor_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    original = TmallAdapter._prepare_capture_view_at_scale
+    calls = []
+    navigations = list(page.goto_calls)
+    def transient(self, *args):
+        calls.append(1)
+        if permanent or len(calls) == 1:
+            raise CaptureViewGeometryError('geometry test', safe_stage='结果区域定位')
+        return original(self, *args)
+    monkeypatch.setattr(TmallAdapter, '_prepare_capture_view_at_scale', transient)
+    if permanent:
+        with pytest.raises(CaptureViewGeometryError):
+            adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+        assert page.capture_scale_restore_count == 1
+    else:
+        adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+        assert observation.price == Decimal('4399')
+    assert len(calls) == 2
+    assert page.goto_calls == navigations
+
+
+def test_honor_semantic_change_is_never_retried_as_geometry(monkeypatch):
+    html = _live_observed_html().replace('小米官方旗舰店', '荣耀官方旗舰店').replace('xiaomi.tmall.com', 'hihonor.tmall.com').replace('小米 15', '荣耀Power2').replace('小米15', '荣耀Power2')
+    task = _task(brand='HONOR', model_name='荣耀Power2')
+    page = _FixturePage(html=html, after_search_url=_honor_power2_result_url())
+    adapter = TmallAdapter(_honor_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    calls = []
+    def fail(self, *args):
+        calls.append(1)
+        raise LayoutRecognitionError('selected price changed')
+    monkeypatch.setattr(TmallAdapter, '_prepare_capture_view_at_scale', fail)
+    with pytest.raises(LayoutRecognitionError):
+        adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    assert len(calls) == 1

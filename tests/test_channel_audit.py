@@ -121,3 +121,12 @@ def test_unlabelled_price_under_subsidy_banner_needs_price_review():
     from quote_app.services.channel_audit import inspect_channel
     scan = Recognition('done', '荣耀京东自营旗舰店\n国家补贴\n领后减¥500立即领取\n荣耀Magic8 512GB\n¥4999\n可再享：\n最高返224京豆', 1600, 1000)
     assert inspect_channel(task(), '荣耀Magic8', '512GB', scan, '4999')[2].status == '待复核'
+
+
+def test_system_permission_prompt_is_failed_evidence_not_approved_page():
+    from quote_app.services.channel_audit import inspect_channel
+    scan = Recognition('done', '荣耀Magic8 16GB 512GB 天青釉\n京东荣耀自营旗舰店\n售价¥4999\n正在请求绕过系统无痕浏览窗口选择器，直接访问屏幕和音频。\n打开系统设置\n允许', 3840, 2160)
+    checks = inspect_channel(task(), '荣耀Magic8', '16GB / 512GB / 天青釉', scan, '4999')
+    assert checks[-1].status == '未通过'
+    assert '权限弹窗' in checks[-1].reason
+    assert all(c.status == '未检查' for c in checks[:3])

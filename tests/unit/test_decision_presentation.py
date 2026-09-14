@@ -16,10 +16,10 @@ def test_technical_failure_keeps_observed_price_but_marks_collection_failed() ->
     )
 
     assert presentation.price == "¥2,090.0001"
-    assert presentation.status == "采集失败"
+    assert presentation.status == "截图待补"
 
 
-def test_successful_price_collection_still_requires_review() -> None:
+def test_successful_collection_shows_price_available_before_final_audit() -> None:
     presentation = channel_presentation(
         [
             SimpleNamespace(
@@ -32,7 +32,7 @@ def test_successful_price_collection_still_requires_review() -> None:
     )
 
     assert presentation.price == "¥2,090.0001"
-    assert presentation.status == "待复核"
+    assert presentation.status == "已取价"
 
 
 def test_channel_without_record_is_clearly_waiting_for_price() -> None:

@@ -46,7 +46,7 @@ def channel_presentation(records) -> ChannelPresentation:
     record = records[-1]
     price = money_preview(record.price)
     if record.state == "technical_failure":
-        status = "采集失败"
+        status = "截图待补" if record.outcome == "price_found" and record.price else "采集失败"
     elif record.state == "waiting_for_login":
         status = "等待验证"
     elif record.state == "running":
@@ -56,9 +56,9 @@ def channel_presentation(records) -> ChannelPresentation:
     elif record.state == "paused":
         status = "已暂停"
     elif record.state == 'workbook':
-        status = '表内价格' if record.price else '已有截图' if record.evidence_path else '待核对'
+        status = ('截图待补' if not record.evidence_path else '表内价格') if record.price else '已有截图' if record.evidence_path else '待核对'
     elif record.state == "succeeded" and record.outcome == "price_found":
-        status = "待复核"
+        status = "已取价"
     elif record.outcome:
         status = record.outcome_label
     else:
@@ -351,7 +351,7 @@ class DecisionView:
                                               ("P", "渠道买断价（P）"), ("Q", "分销零售价（Q）"))):
             box = tk.Frame(fields, bg=self.WHITE)
             box.grid(row=index // 2, column=index % 2, sticky="ew",
-                     padx=(0, 10) if index % 2 == 0 else (10, 0), pady=(0, 10))
+                     padx=(0, 10) if index % 2 == 0 else (10, 0), pady=(0, 6))
             box.columnconfigure(0, weight=1)
             self._wrap(box, title, size=15).grid(row=0, column=0, sticky="ew", pady=(0, 5))
             self._price_entry(box, key).grid(row=1, column=0, sticky="ew")
@@ -367,7 +367,7 @@ class DecisionView:
         self.profit_label = self._wrap(self.kbox, color=self.INK, size=13, bg="#FFF4EC")
         self.profit_label.grid(row=3, column=0, sticky="ew", pady=(5, 0))
         self.ceiling_label = self._wrap(left, color=self.BLUE, size=19, bold=True, bg="#EAF5FF")
-        self.ceiling_label.grid(row=3, column=0, sticky="ew", ipady=9, pady=(0, 10))
+        self.ceiling_label.grid(row=3, column=0, sticky="ew", ipady=9, pady=(0, 6))
         self.label(left, "报价说明（写入 AO 备注）", size=15).grid(row=4, column=0, sticky="w", pady=(0, 5))
         self.remarks = tk.Text(left, height=2, width=1, relief="flat", highlightthickness=1,
             highlightbackground=self.LINE, highlightcolor=self.BLUE, borderwidth=0,
@@ -500,7 +500,7 @@ class DecisionView:
         self._update_rules()
 
     def _update_rules(self):
-        from quote_app.services.review_support import can_confirm, price_ceiling, profit_trial
+        from quote_app.services.review_support import can_confirm_decision, price_ceiling, profit_trial
 
         trial = profit_trial(self.vars['L'].get(), self.vars['K'].get())
         self.profit_label.configure(text=(f"毛利率 {trial['margin']:.2f}%　价差 {money_preview(str(trial['difference']))}　加价率 {trial['markup']:.6f}%"
@@ -562,7 +562,7 @@ class DecisionView:
             self.dates.grid()
             self.rule_advice.grid()
             self.rule_advice.configure(text=f"!  建议将当月报价调整至 {money_preview(str(ceiling))} 或以下，再次确认全部规则。"
-                if difference else "请完成全部待核验事项，再确认本品报价。")
+                if difference else "报价规则已通过，最终截图与报表另行稽核。" if can_confirm_decision(checks) else "请完成报价规则中的待处理事项，再确认本品报价。")
         self.attachment_label.configure(text=f"已关联 {len(self.product.attachments)} 个附件")
         for key, control in self.preview_values.items():
             control.configure(text=money_preview(self.vars[key].get()))
@@ -570,14 +570,14 @@ class DecisionView:
         editable = not self.session.running and self.session.quote_path is not None
         self.save_button.configure(state="normal" if editable else "disabled")
         self.confirm_button.configure(
-            state="normal" if editable and can_confirm(checks) else "disabled"
+            state="normal" if editable and can_confirm_decision(checks) else "disabled"
         )
         for entry in self.entries:
             entry.configure(state="normal" if editable else "disabled")
         self.remarks.configure(state="normal" if editable else "disabled")
         self.feedback.configure(
             text=("未通过规则：可保存草稿，不可确认报送" if failed else
-                  "仍有待核验事项，暂不可确认报价" if not can_confirm(checks) else "本品检查已完成，可确认报价")
+                  "仍有待核验事项，暂不可确认报价" if not can_confirm_decision(checks) else "报价规则已通过，可确认本品报价；最后到稽核工作台复核截图与报表")
             if editable
             else "本次报价表尚未就绪，请等待任务完成。"
         )
@@ -627,8 +627,8 @@ class DecisionView:
         dialog = self.dialog = tk.Toplevel(self.parent)
         dialog.title("补充资格与日期依据")
         dialog.configure(bg=self.WHITE)
-        dialog.geometry("560x550")
-        dialog.minsize(520, 520)
+        dialog.geometry("600x650")
+        dialog.minsize(560, 620)
         dialog.transient(self.wb.root)
         dialog.columnconfigure(0, weight=1)
         box = tk.Frame(dialog, bg=self.WHITE, padx=22, pady=20)
@@ -639,7 +639,7 @@ class DecisionView:
         )
         self._wrap(
             box,
-            "当前仅按手机规则报价。在库资格和入库日期优先读取营销商品表；首次报价日期须另有报价依据，不能用入库日期代替。首次报价日期通过下方年月日选择。",
+            "当前仅按手机规则报价。在库资格和入库日期优先读取营销商品表；首次报价日期须另有报价依据，不能用入库日期代替。首次报价日期和金额由产品经理补充；第7个月起按首次报价下调5%，满12个月按首次报价下调10%。",
             color=self.MUTED,
             size=10,
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 18))
@@ -649,6 +649,7 @@ class DecisionView:
             ("stock", "一级库库存", ("未确认", "在库", "不在库")),
             ("entry_date", "入总部一级库日期", None),
             ("first_quote_date", "首次报价日期", None),
+            ("first_quote_price", "首次报价金额（元/台）", None),
         )
         for row, (key, title, options) in enumerate(definitions, 2):
             self.label(box, title, size=11).grid(
@@ -660,7 +661,7 @@ class DecisionView:
             control = (
                 DateSelect(box, textvariable=var) if key == "first_quote_date" else SoftSelect(box, textvariable=var, values=options, width=270)
                 if options or key == "first_quote_date"
-                else SoftEntry(box, textvariable=var, placeholder="YYYY-MM-DD", width=270)
+                else SoftEntry(box, textvariable=var, placeholder="首次实际报价金额" if key == "first_quote_price" else "YYYY-MM-DD", width=270)
             )
             control.grid(row=row, column=1, sticky="ew", pady=6)
             if key == "first_quote_date":
@@ -668,7 +669,7 @@ class DecisionView:
             if key == 'category' or (key != "first_quote_date" and self.product.context.get(key + '_source')):
                 (control.entry if isinstance(control, SoftEntry) else control).configure(state='disabled')
         self.label(box, "依据来源 / 核实说明", size=11).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(12, 6)
+            row=7, column=0, columnspan=2, sticky="w", pady=(12, 6)
         )
         note = tk.Text(
             box,
@@ -682,7 +683,7 @@ class DecisionView:
             padx=8,
             pady=8,
         )
-        note.grid(row=7, column=0, columnspan=2, sticky="ew")
+        note.grid(row=8, column=0, columnspan=2, sticky="ew")
         note.insert("1.0", self.product.context.get("qualification_note", ""))
 
         def apply():
@@ -695,6 +696,9 @@ class DecisionView:
                         parsed = date.fromisoformat(values[key])
                         if parsed > date.today():
                             raise ValueError("日期不能晚于今天")
+                from quote_app.services.review_workbook import money
+                if values["first_quote_price"] and money(values["first_quote_price"]) is None:
+                    raise ValueError("首次报价金额请输入大于0的有效数字")
                 reason = note.get("1.0", "end-1c").strip()
                 if not reason and any(values[key] != self.product.context.get(key, "") for key in ("stock", "entry_date")):
                     raise ValueError("手工变更库存或入库日期时，请填写依据来源或核实说明")
@@ -708,7 +712,7 @@ class DecisionView:
             self._update_rules()
 
         self.button(box, "应用并返回", apply, primary=True).grid(
-            row=8, column=0, columnspan=2, sticky="e", pady=(16, 0)
+            row=9, column=0, columnspan=2, sticky="e", pady=(16, 0)
         )
 
     def _attachments(self):

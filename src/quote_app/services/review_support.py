@@ -11,6 +11,7 @@ import html
 import json
 from collections import Counter
 from quote_app.domain.models import QuoteMonth, QuoteRow, Issue
+from quote_app.core.formulas import formula_cells
 from quote_app.desktop_state import TaskRow, DesktopState
 from quote_app.services.review_workbook import (
     COLUMNS,
@@ -33,7 +34,7 @@ CATEGORIES = (
     "报价规则与资格",
     "报表与报送一致性",
 )
-RULE_VERSION = "decision-audit-2026-09-14-v1"
+RULE_VERSION = "decision-audit-2026-09-14-v2"
 
 
 @dataclass(slots=True)
@@ -68,6 +69,13 @@ def can_confirm(checks):
     return bool(checks) and all(
         c.status == "通过" or (c.status == "不适用" and c.reason.strip()) for c in checks
     )
+
+
+def can_confirm_decision(checks):
+    rules = [c for c in checks if c.code.startswith('E')]
+    return ({c.code for c in rules} == {f'E{i:02}' for i in range(1, 10)}
+            and can_confirm(rules)
+            and not any(c.code == 'E06' and c.status == '不适用' for c in rules))
 
 
 def _hash(value):
@@ -113,6 +121,28 @@ def profit_trial(purchase, settlement):
                 'markup': difference / purchase * 100}
 
 
+def collected_offers(product):
+    """Collection observations are decision inputs; image audit remains independent."""
+    return [t for t in product.channels if t.channel in ('jd', 'tmall', 'official')
+            and t.outcome == 'price_found' and money(t.price) is not None
+            and (not t.material_code or t.material_code == product.material_code)]
+
+
+def periodic_adjustment(product):
+    first = _date(product.context.get('first_quote_date'))
+    month = _date(product.context.get('quote_month'))
+    if not first or not month or first < date(1900, 1, 1) or first > date(month.year, month.month, monthrange(month.year, month.month)[1]):
+        return None, None, None
+    # Monthly quotations: first month is month 1, month 7 starts the 5% step.
+    elapsed = (month.year - first.year) * 12 + month.month - first.month
+    reduction = Decimal('0.10') if elapsed >= 12 else Decimal('0.05') if elapsed >= 6 else Decimal('0')
+    base = money(product.context.get('first_quote_price'))
+    with localcontext() as ctx:
+        ctx.prec = max(40, len(base.as_tuple().digits) + 5) if base else 40
+        limit = base * (1 - reduction) if base and reduction else None
+    return elapsed, reduction, limit
+
+
 def price_ceiling(product, checks=()):
     """Only known numeric bounds, never an overall eligibility conclusion."""
     candidates = []
@@ -127,16 +157,16 @@ def price_ceiling(product, checks=()):
             candidates.append((money(value), label))
     for period, value in supplied_history(product):
         candidates.append((value, f'{period}已提供历史报价'))
-    # Include only channels whose four checks passed, never raw observations.
-    for task in product.channels:
-        reviewed = [c for c in checks if c.channel == task.channel and c.code in ('B01', 'B02', 'B03', 'C01')]
-        if len(reviewed) == 4 and can_confirm(reviewed) and money(task.price) is not None and task.outcome == 'price_found':
-            candidates.append((money(task.price), '已核验渠道有效价'))
+    for task in collected_offers(product):
+        candidates.append((money(task.price), '本批次已取渠道最低价'))
+    _, reduction, periodic_limit = periodic_adjustment(product)
+    if periodic_limit is not None:
+        candidates.append((periodic_limit, f'首次报价下调{reduction * 100:.0f}%'))
     if not candidates:
         return None, "尚无可计算约束；渠道有效性及其他资格仍须核验"
     low = min(v for v, _ in candidates)
     return low, "、".join(
-        label for v, label in candidates if v == low
+        dict.fromkeys(label for v, label in candidates if v == low)
     ) + "；其余资格与价格口径仍须核验"
 
 
@@ -239,6 +269,7 @@ class ReviewSession:
         self._inspection_version = self._version
         self._restore()
         for p in self.products:
+            p.context["quote_month"] = f"{month.year:04d}-{month.month:02d}-01"
             # Source facts override older manual placeholders; no invented dates.
             p.context.update(source_facts(self.source_paths, p.material_code, self.month))
             if p.context.get('category') == '未确认':
@@ -492,7 +523,6 @@ class ReviewSession:
             "检查官网、天猫、京东三个渠道记录是否齐全；取价失败和无机型的业务结果另列核验",
             human=False,
         )
-        eligible, channel_results = [], []
         for t in p.channels:
             paths = (t.evidence_path,) if t.evidence_path else ()
             scan = None
@@ -510,22 +540,12 @@ class ReviewSession:
                 findings[-1].reason = '同一截图被多条记录引用或商品关联不一致，请修正证据关联'
                 for item in findings[:3]:
                     item.status, item.reason = '未检查', '等待修正截图关联'
-            results = [add(f.code, f.title, f.status, f.comparison, f.reason, paths,
+            [add(f.code, f.title, f.status, f.comparison, f.reason, paths,
                            human=f.status == '待复核', suffix=t.task_id, channel=t.channel) for f in findings]
-            channel_results.extend(results)
-            if can_confirm(results) and money(t.price) is not None and t.outcome == 'price_found':
-                eligible.append(t)
         for missing_channel in sorted({'jd', 'tmall', 'official'} - {t.channel for t in p.channels}):
             for finding in inspect_channel(TaskRow('missing', channel=missing_channel), p.title, p.specification, None, None):
                 add(finding.code, finding.title, '未检查', '等待渠道记录', '请先关联本批次渠道采集记录',
                     suffix='missing-' + missing_channel, channel=missing_channel)
-        add(
-            "D04",
-            "数据与证据版本",
-            "待复核",
-            f"{self.month.year}年{self.month.month}月；工作簿SHA256 {digest(self.quote_path)}",
-            "取价时间和证据有效期限口径尚需确认",
-        )
         k, purchase, m = (money(p.values.get(c)) for c in ("K", "L", "M"))
 
         def comparison(code, title, left, right, text):
@@ -586,16 +606,19 @@ class ReviewSession:
         comparison('E08', '一级库价格上限', k, o,
                    f"当月 {k if k is not None else '待填写'}；一级库上限 {o if o is not None else '待补充'}")
         checks[-1].reason += f"；建议零售价：{warehouse_raw or '缺失'}；采用区间上端；{p.context.get('warehouse_source', '报价表O列')}"
-        external_limit = min((money(t.price) for t in eligible), default=None)
-        channels_complete = {t.channel for t in p.channels} == {'jd', 'tmall', 'official'} and can_confirm(channel_results)
-        if external_limit is not None and k is not None and k > external_limit:
-            add('E09', '三网有效最低价上限', '未通过', f'当月 {k}；已核验最低价 {external_limit}', '当月报价高于已核验渠道有效价')
-        elif channels_complete and external_limit is not None:
-            comparison('E09', '三网有效最低价上限', k, external_limit, f'当月 {k if k is not None else "待填写"}；三网最低价 {external_limit}')
-        elif channels_complete:
-            add('E09', '三网有效最低价上限', '不适用', '三个渠道均无匹配机型', '已核验三个渠道均无匹配机型，本次无可用外部报价')
+        offers = collected_offers(p)
+        external_limit = min((money(t.price) for t in offers), default=None)
+        if external_limit is not None:
+            cheapest = '、'.join({'jd': '京东', 'tmall': '天猫', 'official': '官网'}[t.channel]
+                                for t in offers if money(t.price) == external_limit)
+            comparison('E09', '三网已取最低价上限', k, external_limit,
+                       f'当月 {k if k is not None else "待填写"} ≤ {cheapest} {external_limit}')
+            checks[-1].reason += (f'；依据本批次{len(offers)}条已取价格自动试算，不等待最终截图稽核。'
+                                 '截图、店铺及优惠口径由稽核工作台独立复核；采集或稽核纠正价格后须重新试算。')
+        elif {t.channel for t in p.channels if t.state == 'succeeded' and t.outcome == 'no_model'} == {'jd', 'tmall', 'official'}:
+            add('E09', '三网已取最低价上限', '不适用', '三个渠道均无匹配机型', '本批次三个渠道均返回无机型；最终仍需核验截图依据')
         else:
-            add('E09', '三网有效最低价上限', '未检查', '等待渠道核验完成', '请在稽核工作台处理对应渠道问题，完成后自动比较；不影响分销及一级库上限判断')
+            add('E09', '三网已取最低价上限', '待补充', '暂无已取价格', '请完成取价或关联本批次取价记录；没有有效金额不能自动通过')
         stock = p.context.get("stock")
         add(
             "E05",
@@ -654,35 +677,28 @@ class ReviewSession:
                 entry.isoformat(),
                 "已确认非优福包，继续其他校验" if over else "尚未超过14个月",
             )
-        first = _date(p.context.get("first_quote_date"))
-        if not first or not date(1900, 1, 1) <= first <= month_end:
-            add(
-                "E07",
-                "周期调价与例外依据",
-                "待补充",
-                reason="请补充首次报价日期；不能以入库日期替代",
-            )
-        elif (
-            _anniversary(first, 6)
-            > date(today.year, today.month, monthrange(today.year, today.month)[1])
-            and note
-        ):
-            add(
-                "E07",
-                "周期调价与例外依据",
-                "不适用",
-                first.isoformat(),
-                "人工依据记录首次报价未满6个月",
-            )
+        elapsed, reduction, periodic_limit = periodic_adjustment(p)
+        if elapsed is None:
+            add('E07', '周期调价与例外依据', '待补充', reason='请选择有效首次报价日期；以本次报价月份判断，不能用入库日期替代')
+        elif not reduction:
+            add('E07', '周期调价与例外依据', '不适用', f'首次报价 {p.context["first_quote_date"]}；第{elapsed + 1}个月',
+                '尚未进入第7个月，暂不触发周期降价；仍需满足其他价格上限')
+        elif periodic_limit is None:
+            add('E07', '周期调价与例外依据', '待补充', f'应较首次报价下调{reduction * 100:.0f}%',
+                '已到调价周期，请在“补充资格与日期依据”填写首次报价金额，程序将自动比较；不能用最近一期报价代替首次报价')
         else:
-            add(
-                "E07",
-                "周期调价与例外依据",
-                "待复核",
-                first.isoformat(),
-                "调价基准、超过12个月算法及例外确认流程未明确；AO及附件不自动放行",
-                tuple(p.attachments),
-            )
+            comparison('E07', '周期调价与例外依据', k, periodic_limit,
+                       f'当月 {k if k is not None else "待填写"} ≤ 首报{p.context["first_quote_price"]}×{(1-reduction)*100:.0f}% = {periodic_limit}')
+            checks[-1].reason += (f'；首次报价 {p.context["first_quote_date"]}；按报价月份已跨{elapsed}个月，'
+                                 f'应较首次报价下调{reduction*100:.0f}%；不重复累计下调。')
+            if k is not None and k > periodic_limit:
+                checks[-1].reason += '如确实无法调价，请在AO备注填写理由并关联厂家依据；附件存在不代表例外已获确认。'
+                if p.values.get('AO', '').strip() and any(a.is_file() and a.stat().st_size for a in p.attachments):
+                    checks.pop()
+                    add('E07', '周期调价与例外依据', '待复核',
+                        f'当月 {k} > 调价上限 {periodic_limit}；已提交例外依据',
+                        '自动比较未满足降价要求，仅例外理由的合理性需要人工复核；可在稽核工作台确认例外，或调整报价后自动通过',
+                        tuple(p.attachments), human=True)
         current_version = digest(self.quote_path)
         rows = {}
         error = self._inspection_error
@@ -732,33 +748,25 @@ class ReviewSession:
             if same and filled
             else "补齐五项有效金额并保存；尚未写回内容不视为已确认",
         )
-        add(
-            "F03",
-            "公式结构与计算结果",
-            "待复核",
-            reason="局部XML写回保留原公式与结构；未运行Excel计算，不能宣称结果已核验",
-        )
-        excluded = over and youfu == "是"
-        add(
-            "F04",
-            "不报价与最终输出范围",
-            "待复核",
-            "不报价" if excluded else "草稿",
-            "优福包不报价的工作簿表达尚未明确"
-            if excluded
-            else "本地草稿；最终范围与状态表达待核验",
-        )
-        add(
-            "F05",
-            "工作簿与依据最新版本",
-            "通过"
-            if current_version == self._version and current_version != "missing"
-            else "未检查",
-            current_version,
-            "版本与当前会话一致"
-            if current_version == self._version
-            else "输出版本已变更，请重新打开并核验",
-        )
+        mismatches = [f'{col}{p.output_row}' for col, formula in formula_cells(p.output_row).items()
+                      if row.get(col) != formula]
+        add('F03', '报价表计算公式是否完整', '未检查' if error else '未通过' if mismatches else '通过',
+            '公式缺失或被修改：' + '、'.join(mismatches) if mismatches else 'X、Y、Z、AA四列公式与程序模板一致',
+            error or '自动核对上期/历史降幅、采购加价率及结算金额四列公式和引用行。此项检查公式完整性；Excel缓存计算结果未在此宣称已重算。公式异常请重新生成报价表。',
+            (self.quote_path,) if self.quote_path else ())
+        excluded = over and youfu == '是'
+        still_quoted = str(row.get('K') or '').strip() != ''
+        exclusion_reason = ('已列入不报价，须清空当月报价并核对最终报送范围；不能保留金额直接报送' if still_quoted else '不报价商品当月报价为空，未混入有价格的报价范围') if excluded else '仅检查已确认超14个月优福包的不报价商品；草稿状态本身不需要人工复核'
+        add('F04', '不报价商品是否仍填写报价',
+            '未检查' if error else '未通过' if excluded and still_quoted else '通过' if excluded and located else '不适用' if not excluded else '未通过',
+            f'已确认优福包；表内当月报价：{row.get("K", "空白")}' if excluded else '本商品未被列入不报价',
+            error or exclusion_reason,
+            (self.quote_path,) if self.quote_path else ())
+        version_ok = current_version == self._version and current_version != 'missing'
+        add('F05', '当前报价文件是否被外部修改', '通过' if version_ok else '未检查',
+            self.quote_path.name if self.quote_path else '暂无报价文件',
+            '文件与当前会话一致，程序已自动校验；内部文件指纹保留在稽核报告中，无需人工核对' if version_ok else '文件已变化或缺失，请重新打开本批次后自动核验',
+            (self.quote_path,) if self.quote_path else ())
         return checks
 
     def all_checks(self):
@@ -802,11 +810,14 @@ class ReviewSession:
         return self.quote_path
 
     def confirm_product(self, p):
-        if self.running or not can_confirm(self.evaluate(p)):
-            raise ValueError("仍有未通过、待处理或未检查项目，不能确认本品报价")
+        if self.running or not can_confirm_decision(self.evaluate(p)):
+            raise ValueError("报价规则仍有未解决事项，或本品已列入不报价，不能确认本品报价")
         path = self.save(p)
-        if not can_confirm(self.evaluate(p)):
-            raise ValueError("保存后依据版本需要重新核验，未标记确认")
+        saved_checks = self.evaluate(p)
+        if not can_confirm_decision(saved_checks) or not can_confirm(
+            [c for c in saved_checks if c.code in ('F01', 'F02', 'F05')]
+        ):
+            raise ValueError("保存后报价规则或写回数据未通过核验，未标记确认")
         self._confirmed[p.id] = self._fingerprint(p)
         self._persist()
         return path

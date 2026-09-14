@@ -615,14 +615,17 @@ def test_decision_rule_opens_explanation_and_source_fields_are_locked(workbench)
     view.root.update()
     box = form.dialog.winfo_children()[0]
     fields = [child for child in box.winfo_children() if isinstance(child, (SoftSelect, SoftEntry, DateSelect))]
-    assert len(fields) == 4
+    assert len(fields) == 5
     assert all((field.entry if isinstance(field, SoftEntry) else field).cget('state') == 'disabled' for field in fields[:3])
     assert isinstance(fields[3], DateSelect)
     assert all(control.cget('state') == 'readonly' for control in fields[3].controls)
+    assert isinstance(fields[4], SoftEntry)
+    fields[4].entry.insert(0, "4459")
     for control, choice in zip(fields[3].controls, ('2026', '8', '1')):
         control.choose(choice)
     next(child for child in box.winfo_children() if getattr(child, 'options', {}).get('text') == '应用并返回').invoke()
     assert product.context['first_quote_date'] == '2026-08-01'
+    assert product.context['first_quote_price'] == '4459'
     form.vars['L'].set('4200')
     form.vars['K'].set('4400')
     view.root.update()

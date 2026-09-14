@@ -236,7 +236,7 @@ def test_pending_first_quote_and_under_six_months(session):
     p.context["first_quote_date"] = "2026-08-01"
     assert check(session, "E07").status == "不适用"
     p.context["first_quote_date"] = "2025-01-01"
-    assert check(session, "E07").status == "待复核"
+    assert check(session, "E07").status == "待补充"
 
 
 def test_corrupt_png_does_not_pass_integrity(session, tmp_path):
