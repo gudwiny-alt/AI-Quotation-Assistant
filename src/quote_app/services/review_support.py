@@ -271,6 +271,17 @@ class ReviewSession:
             )
         self._inspection_version = self._version
         self._restore()
+        if self.quote_path and not self.load_error:
+            from .review_delivery import recover_basis_images
+            for product in self.products:
+                if not product.attachments or any(not a.is_file() for a in product.attachments):
+                    try:
+                        recovered = recover_basis_images(self.quote_path, product.output_row)
+                    except (OSError, ValueError, KeyError) as error:
+                        self.load_error = f"依据图片读取失败：{error}"
+                        break
+                    if recovered:
+                        product.attachments = recovered
         for p in self.products:
             p.context["quote_month"] = f"{month.year:04d}-{month.month:02d}-01"
             # Source facts override older manual placeholders; no invented dates.
@@ -345,6 +356,7 @@ class ReviewSession:
             self._history = data.get("history", [])
             self.batch_reviewer = data.get("batch_reviewer", "")
             self.product_reviewers = data.get("product_reviewers", {})
+            self._confirmed = data.get("confirmed", {})
             if data.get("workbook_version") == self._version:
                 self._replacements = data.get("replacements", {})
                 self._reviews = data.get("reviews", {})
@@ -374,6 +386,9 @@ class ReviewSession:
                             if key != "previous_price"
                         }
                     )
+                    # Migrate only text known to have been entered through the old UI.
+                    if data.get('notes_column') != 'AP' and not p.values.get('AP') and saved.get('values', {}).get('AO'):
+                        p.values['AP'] = saved['values']['AO']
                     p.attachments = [Path(v) for v in saved.get("attachments", [])]
                     if not p.channels:
                         for record in saved.get("channels", []):
@@ -436,6 +451,7 @@ class ReviewSession:
             "reviews": self._reviews,
             "history": self._history,
             "confirmed": self._confirmed,
+            "notes_column": "AP",
         }
         atomic_json(self.store_path, json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -704,8 +720,8 @@ class ReviewSession:
             checks[-1].reason += (f'；首次报价 {p.context["first_quote_date"]}；按报价月份已跨{elapsed}个月，'
                                  f'应较首次报价下调{reduction*100:.0f}%；不重复累计下调。')
             if k is not None and k > periodic_limit:
-                checks[-1].reason += '如确实无法调价，请在AO备注填写理由并关联厂家依据；附件存在不代表例外已获确认。'
-                if p.values.get('AO', '').strip() and any(a.is_file() and a.stat().st_size for a in p.attachments):
+                checks[-1].reason += '如确实无法调价，请在AP说明填写理由并关联厂家依据；附件存在不代表例外已获确认。'
+                if p.values.get('AP', '').strip() and any(a.is_file() and a.stat().st_size for a in p.attachments):
                     checks.pop()
                     add('E07', '周期调价与例外依据', '待复核',
                         f'当月 {k} > 调价上限 {periodic_limit}；已提交例外依据',
@@ -739,7 +755,7 @@ class ReviewSession:
         same = located and all(
             (
                 str(row.get(c, "") or "") == p.values.get(c, "")
-                if c == "AO"
+                if c == "AP"
                 else (
                     (not str(row.get(c, "") or "") and not p.values.get(c, ""))
                     or (
@@ -796,8 +812,10 @@ class ReviewSession:
             except ValueError:
                 return False
         row = self._rows.get(p.output_row, {})
-        return all(money(p.values.get(c)) is not None and money(p.values.get(c)) == money(row.get(c))
-                   for c in COLUMNS[:-1]) and str(row.get('AO') or '') == p.values.get('AO', '')
+        from .review_delivery import basis_images
+        image_ok = not p.attachments or [hashlib.sha256(b).hexdigest() for b in basis_images(self.quote_path, p.output_row)] == [digest(a) for a in p.attachments]
+        return image_ok and all(money(p.values.get(c)) is not None and money(p.values.get(c)) == money(row.get(c))
+                   for c in COLUMNS[:-1]) and str(row.get('AP') or '') == p.values.get('AP', '')
 
     def _rebase_owned_write(self, fingerprints, *, exclude=()):
         """Only an app-owned, verified mutation may carry existing approvals forward.
@@ -807,7 +825,7 @@ class ReviewSession:
         """
         for p in self.products:
             if p.id in exclude:
-                self._confirmed.pop(p.id, None)
+                # Retain old fingerprint to display "修改后待重新确认".
                 continue
             old, new = fingerprints[p.id], self._fingerprint(p)
             if self._confirmed.get(p.id) == old:
@@ -843,7 +861,18 @@ class ReviewSession:
             replacement = TaskRow(**data)
             p.channels = [t for t in p.channels if t.channel != replacement.channel] + [replacement]
 
-    def replace_evidence(self, p, channel, source_path, reason):
+    def repair_channel(self, p, channel, source_path, price, url, reason):
+        from urllib.parse import urlsplit
+        price_value = money(price)
+        url = url.strip()
+        parsed = urlsplit(url)
+        if price_value is None:
+            raise ValueError('请填写大于0的有效渠道价格')
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or any(c.isspace() for c in url):
+            raise ValueError('请粘贴完整的HTTP/HTTPS商品来源链接')
+        return self.replace_evidence(p, channel, source_path, reason, price=str(price_value), url=url)
+
+    def replace_evidence(self, p, channel, source_path, reason, *, price=None, url=None):
         from dataclasses import replace
         from uuid import uuid4
         from .review_evidence import image_bytes, write_evidence
@@ -860,9 +889,9 @@ class ReviewSession:
         old = next((t for t in p.channels if t.channel == channel), None)
         from .review_sources import CHANNEL_COLUMNS
         if old is None:
-            price = self._rows.get(p.output_row, {}).get(CHANNEL_COLUMNS[channel][0])
+            old_price = self._rows.get(p.output_row, {}).get(CHANNEL_COLUMNS[channel][0])
             old = TaskRow(f'workbook:{p.output_row}:{channel}', p.title, channel,
-                          price=str(price) if money(price) else '', outcome='price_found' if money(price) else '',
+                          price=str(old_price) if money(old_price) else '', outcome='price_found' if money(old_price) else '',
                           state='workbook', source_row_number=self._sources[p.id].source_row_number,
                           material_code=p.material_code, specification=p.specification)
         fingerprints = {item.id: self._fingerprint(item) for item in self.products}
@@ -871,26 +900,37 @@ class ReviewSession:
         previous_reviews = {key: dict(value) for key, value in self._reviews.items()}
         previous_replacements = {key: dict(value) for key, value in self._replacements.items()}
         previous_channels = list(p.channels)
+        previous_model_rows = list(self.model.rows)
         folder = self.quote_path.parent / '截图证据' / '人工补充'
         folder.mkdir(parents=True, exist_ok=True)
         destination = folder / (uuid4().hex + '.' + extension)
         destination.write_bytes(payload)
         backup = None
         try:
-            backup = write_evidence(self.quote_path, previous_version, self.month, p,
-                                    self._identities[p.id], channel, payload, extension)
+            from .review_delivery import staged_workbook, commit_staged, write_channel_values
+            with staged_workbook(self.quote_path, previous_version) as staged:
+                write_evidence(staged, previous_version, self.month, p,
+                               self._identities[p.id], channel, payload, extension, backup=False)
+                if price is not None:
+                    write_channel_values(staged, self.month, p, self._identities[p.id], channel, price, url,
+                                         {CHANNEL_COLUMNS[t.channel][0]: t.url for t in p.channels if t.channel in CHANNEL_COLUMNS})
+                backup = commit_staged(self.quote_path, previous_version, staged)
             self._version = digest(self.quote_path, fresh=True)
             updated = replace(old, evidence_path=destination, evidence_state='complete')
+            if price is not None:
+                updated = replace(updated, price=price, url=url, state='manual_corrected', outcome='price_found', error='')
             self._replacements.setdefault(p.id, {})[channel] = {
                 **asdict(updated), 'evidence_path': str(destination)}
             self._apply_replacements(p)
+            if price is not None:
+                self.model.rows = [updated if t.task_id == old.task_id else t for t in self.model.rows]
             self._rebase_owned_write(fingerprints, exclude=(p.id,))
-            self._history.append({'action': 'replace_evidence', 'product_id': p.id, 'channel': channel,
+            self._history.append({'action': 'repair_channel' if price is not None else 'replace_evidence', 'product_id': p.id, 'channel': channel,
                 'reason': reason.strip(), 'operator': self.reviewer_for(p) or '产品经理补充', 'time': _now(),
                 'old_evidence': str(old.evidence_path or ''), 'old_digest': digest(old.evidence_path),
                 'new_evidence': str(destination), 'new_digest': digest(destination),
                 'before_version': previous_version, 'workbook_version': self._version,
-                'price_unchanged': old.price})
+                'old_price': old.price, 'new_price': updated.price, 'old_url': old.url, 'new_url': updated.url, 'price_unchanged': old.price if price is None else None})
             try:
                 self._persist()
             except OSError:
@@ -902,6 +942,7 @@ class ReviewSession:
             self._version = previous_version
             self._confirmed, self._reviews = previous_confirmed, previous_reviews
             self._replacements, p.channels = previous_replacements, previous_channels
+            self.model.rows = previous_model_rows
             destination.unlink(missing_ok=True)
             raise
         return destination
@@ -919,7 +960,11 @@ class ReviewSession:
         before = self._version
         fingerprints = {item.id: self._fingerprint(item) for item in self.products}
         prior_reviews = {key: dict(value) for key, value in self._reviews.items()}
-        backup = write_cells(self.quote_path, before, self.month, p, self._identities[p.id])
+        from .review_delivery import staged_workbook, commit_staged, save_basis_images
+        with staged_workbook(self.quote_path, before) as staged:
+            write_cells(staged, before, self.month, p, self._identities[p.id], backup=False)
+            save_basis_images(staged, digest(staged, fresh=True), self.month, p, self._identities[p.id])
+            backup = commit_staged(self.quote_path, before, staged)
         prior_confirmed = dict(self._confirmed)
         self._version = digest(self.quote_path, fresh=True)
         self._rebase_owned_write(fingerprints)
@@ -999,6 +1044,12 @@ class ReviewSession:
                 self._reviews[c.id] = previous
             raise
 
+    def confirmation_status(self, p):
+        prior = self._confirmed.get(p.id)
+        if prior is None:
+            return '未确认'
+        return '已确认' if prior == self._fingerprint(p) else '修改后待重新确认'
+
     def unconfirmed_products(self):
         return [p for p in self.products if self._confirmed.get(p.id) != self._fingerprint(p)]
 
@@ -1036,7 +1087,7 @@ class ReviewSession:
             )
         for p in self.products:
             pieces.append(
-                f"<h2>{esc(p.title)} / {esc(p.specification)} / {esc(p.material_code)}</h2><p>稳定商品标识 {p.id} · 5G手机第{p.output_row}行</p><table><tr><th>检查</th><th>状态</th><th>比较</th><th>依据</th></tr>"
+                f"<h2>{esc(p.title)} / {esc(p.specification)} / {esc(p.material_code)}</h2><p>产品经理确认：{esc(self.confirmation_status(p))}</p><p>稳定商品标识 {p.id} · 5G手机第{p.output_row}行</p><table><tr><th>检查</th><th>状态</th><th>比较</th><th>依据</th></tr>"
             )
             for c in checks:
                 if c.product_id == p.id:

@@ -55,6 +55,10 @@ def test_real_screenshot_import_preview_and_save(workbench, session, tmp_path, m
     root.update()
     assert submit.cget("state") == "normal"
     assert dialog.winfo_height() < root.winfo_screenheight() - 50
+    from quote_app.desktop_controls import SoftEntry
+    fields = [w for w in walk(dialog) if isinstance(w, SoftEntry)]
+    fields[0].variable.set('1999')
+    fields[1].variable.set('https://detail.tmall.com/item.htm?id=123')
     submit.invoke()
     root.update()
     assert saved == [True]

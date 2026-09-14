@@ -45,7 +45,9 @@ def channel_presentation(records) -> ChannelPresentation:
 
     record = records[-1]
     price = money_preview(record.price)
-    if record.state == "technical_failure":
+    if record.state == "manual_corrected":
+        status = "人工补充"
+    elif record.state == "technical_failure":
         status = "已补图" if getattr(record, "evidence_state", "") == "complete" and getattr(record, "evidence_path", None) else "截图待补" if record.outcome == "price_found" and record.price else "采集失败"
     elif record.state == "waiting_for_login":
         status = "等待验证"
@@ -175,7 +177,7 @@ class DecisionView:
         )
         self._wrap(
             top,
-            "填写结果写回对应商品的 K / L / M / P / Q / AO 列；其他自动生成内容保持原样。",
+            "填写结果写回对应商品的 K / L / M / P / Q / AP（文字）及 AO（依据图片） 列；其他自动生成内容保持原样。",
             color=self.MUTED,
             size=11,
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 14))
@@ -219,7 +221,7 @@ class DecisionView:
                 bold=True,
                 size=15,
             ).grid(row=0, column=2, padx=16)
-            self.label(panel, "当月报价", color=self.MUTED, size=10).grid(row=1, column=2)
+            self.label(panel, self.session.confirmation_status(product), color=self.GREEN if self.session.confirmation_status(product) == "已确认" else self.ORANGE, size=11).grid(row=1, column=2)
             self.button(
                 panel, "填写与试算  →", lambda p=product: self.select(p.id), primary=True
             ).grid(row=0, column=3, rowspan=2)
@@ -254,7 +256,7 @@ class DecisionView:
     def _form(self):
         self.vars = {
             key: tk.StringVar(self.parent, value=self.product.values.get(key, ""))
-            for key in ("K", "L", "M", "P", "Q", "AO")
+            for key in ("K", "L", "M", "P", "Q", "AP")
         }
         self.entries = []
         stage = self.card(self.content, padx=18, pady=9)
@@ -287,7 +289,7 @@ class DecisionView:
         self._draw_steps = draw_steps
 
         strip = self.card(self.content, padx=14, pady=8)
-        strip.grid(row=1, column=0, sticky="ew", pady=10)
+        strip.grid(row=1, column=0, sticky="ew", pady=6)
         strip.columnconfigure(1, weight=1)
         self.label(strip, image=self.wb.artwork.phone(64) or "").grid(
             row=0, column=0, rowspan=2, padx=(0, 14))
@@ -296,6 +298,8 @@ class DecisionView:
         product_heading.columnconfigure(0, weight=1)
         self._wrap(product_heading, self.product.title + "  ·  " + self.product.specification,
                    size=19, bold=True).grid(row=0, column=0, sticky="ew")
+        self.confirmation_label = self.label(product_heading, size=12, color=self.ORANGE)
+        self.confirmation_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
         nav = tk.Frame(strip, bg=self.WHITE)
         nav.grid(row=0, column=2, rowspan=2, padx=(12, 0))
         i = self.session.products.index(self.product)
@@ -373,17 +377,17 @@ class DecisionView:
         self.profit_label.grid(row=3, column=0, sticky="ew", pady=(5, 0))
         self.ceiling_label = self._wrap(left, color=self.BLUE, size=19, bold=True, bg="#EAF5FF")
         self.ceiling_label.grid(row=3, column=0, sticky="ew", ipady=9, pady=(0, 6))
-        self.label(left, "报价说明（写入 AO 备注）", size=15).grid(row=4, column=0, sticky="w", pady=(0, 5))
+        self.label(left, "报价说明（写入 AP：超6个月价格说明）", size=15).grid(row=4, column=0, sticky="w", pady=(0, 5))
         self.remarks = tk.Text(left, height=2, width=1, relief="flat", highlightthickness=1,
             highlightbackground=self.LINE, highlightcolor=self.BLUE, borderwidth=0,
             bg=self.WHITE, fg=self.INK, font=(self.FONT, -14), wrap="word", padx=9, pady=6)
         self.remarks.grid(row=5, column=0, sticky="ew")
-        self.remarks.insert("1.0", self.vars["AO"].get())
+        self.remarks.insert("1.0", self.vars["AP"].get())
         self.remarks.edit_modified(False)
         self.remarks.bind("<<Modified>>", self._remarks_changed)
         attach = tk.Frame(left, bg=self.WHITE)
         attach.grid(row=6, column=0, sticky="ew", pady=(6, 0))
-        self.button(attach, "添加依据附件", self._attachments, padding=(8, 4),
+        self.button(attach, "添加依据图片（AO）", self._attachments, padding=(8, 4),
                     image=self.wb.artwork.get("ui-icons/file-text-blue", 17) or "").pack(side="left")
         self.attachment_label = self.label(attach, color=self.MUTED, size=12)
         self.attachment_label.pack(side="left", padx=8)
@@ -397,7 +401,7 @@ class DecisionView:
         self.label(right_header, "智能报价提示", size=21, bold=True).grid(row=0, column=0, sticky="w")
         self.rule_summary = self.label(right_header, color=self.ORANGE, size=14, bg="#FFF4EC", padx=9, pady=5)
         self.rule_summary.grid(row=0, column=1, sticky="e")
-        area = tk.Frame(right, bg=self.WHITE, height=282)
+        area = tk.Frame(right, bg=self.WHITE, height=266)
         area.grid(row=1, column=0, sticky="ew")
         area.grid_propagate(False)
         area.columnconfigure(0, weight=1)
@@ -468,14 +472,16 @@ class DecisionView:
             else:
                 self.preview_values[key] = value
                 value.bind("<Configure>", lambda e, w=value: self._fit_preview(w))
-        footer = tk.Frame(self.content, bg=self.BG)
-        footer.grid(row=4, column=0, sticky="ew", pady=(10, 3))
+        self.notes_preview = self._wrap(preview, size=13, color=self.MUTED)
+        self.notes_preview.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(8, 2))
+        footer = tk.Frame(self.parent, bg=self.BG)
+        footer.grid(row=1, column=0, sticky="ew", pady=(10, 3))
         footer.columnconfigure(0, weight=1)
         self.feedback = self._wrap(footer, size=14, color=self.ORANGE, bg="#FFF4EC")
         self.feedback.grid(row=0, column=0, sticky="ew", padx=(0, 14), ipady=9)
         self.save_button = self.button(footer, "保存并写回报价表", self._save, primary=True, padding=(28, 14))
         self.save_button.grid(row=0, column=1, padx=(0, 10))
-        self.confirm_button = self.button(footer, "确认本品报价", self._confirm, padding=(23, 14))
+        self.confirm_button = self.button(footer, "确认报价并提交稽核", self._confirm, padding=(23, 14))
         self.confirm_button.grid(row=0, column=2)
         for var in self.vars.values():
             self.traces.append((var, var.trace_add("write", self._changed)))
@@ -495,7 +501,7 @@ class DecisionView:
     def _remarks_changed(self, _event=None):
         if self.dead or not self.remarks.edit_modified():
             return
-        self.vars["AO"].set(self.remarks.get("1.0", "end-1c"))
+        self.vars["AP"].set(self.remarks.get("1.0", "end-1c"))
         self.remarks.edit_modified(False)
 
     def _changed(self, *_args):
@@ -571,8 +577,12 @@ class DecisionView:
             self.dates.grid()
             self.rule_advice.grid()
             self.rule_advice.configure(text=f"!  建议将当月报价调整至 {money_preview(str(ceiling))} 或以下，再次确认全部规则。"
-                if difference else "报价规则已通过，最终截图与报表另行稽核。" if can_confirm_decision(checks) else "请完成报价规则中的待处理事项，再确认本品报价。")
-        self.attachment_label.configure(text=f"已关联 {len(self.product.attachments)} 个附件")
+                if difference else "报价规则已通过，最终截图与报表另行稽核。" if can_confirm_decision(checks) else "请完成报价规则中的待处理事项，再确认报价并提交稽核。")
+        self.attachment_label.configure(text=f"AO 依据图片：{len(self.product.attachments)} 张")
+        state = self.session.confirmation_status(self.product)
+        self.confirmation_label.configure(text='产品经理确认：' + state, fg=self.GREEN if state == '已确认' else self.ORANGE)
+        note = self.vars['AP'].get().replace('\n', ' ')
+        self.notes_preview.configure(text='AP 说明：' + ((note[:35] + '…') if len(note) > 35 else note or '未填写') + '  ·  AO 依据图片：' + str(len(self.product.attachments)) + ' 张')
         for key, control in self.preview_values.items():
             control.configure(text=money_preview(self.vars[key].get()))
             self._fit_preview(control)
@@ -585,8 +595,8 @@ class DecisionView:
             entry.configure(state="normal" if editable else "disabled")
         self.remarks.configure(state="normal" if editable else "disabled")
         self.feedback.configure(
-            text=("未通过规则：可保存草稿，不可确认报送" if failed else
-                  "仍有待核验事项，暂不可确认报价" if not can_confirm_decision(checks) else "报价规则已通过，可确认本品报价；最后到稽核工作台复核截图与报表")
+            text=("已提交稽核，请到稽核工作台复核。" if state == "已确认" else "未通过规则：可保存草稿，不可提交稽核" if failed else
+                  "仍有待核验事项，暂不可确认报价" if not can_confirm_decision(checks) else "报价规则已通过，可提交稽核。")
             if editable
             else "本次报价表尚未就绪，请等待任务完成。"
         )
@@ -725,9 +735,15 @@ class DecisionView:
         )
 
     def _attachments(self):
-        paths = filedialog.askopenfilenames(parent=self.wb.root, title="关联报价依据附件")
+        paths = filedialog.askopenfilenames(parent=self.wb.root, title="添加写入AO的依据图片", filetypes=[("依据图片", "*.png *.jpg *.jpeg")])
         for path in paths:
             candidate = Path(path)
+            try:
+                from .services.review_evidence import image_bytes
+                image_bytes(candidate)
+            except ValueError as error:
+                messagebox.showerror('依据图片不可用', str(error), parent=self.wb.root)
+                continue
             if candidate not in self.product.attachments:
                 self.product.attachments.append(candidate)
         self._update_rules()
@@ -743,7 +759,7 @@ class DecisionView:
             menu.add_command(label=path.name, command=lambda p=path: self.wb._open_path(p))
         if paths:
             menu.add_separator()
-        menu.add_command(label="补充／替换截图…", command=self._replace_evidence,
+        menu.add_command(label="补充修正渠道取价…", command=self._replace_evidence,
                          state="disabled" if self.session.running else "normal")
         menu.tk_popup(self.parent.winfo_pointerx(), self.parent.winfo_pointery())
 
@@ -752,6 +768,7 @@ class DecisionView:
         return open_evidence_editor(self.parent, self.session, self.product, self._build)
 
     def _save(self):
+        self._remarks_changed()
         try:
             path = self.session.save(self.product)
         except (ValueError, OSError) as error:
@@ -765,10 +782,11 @@ class DecisionView:
         self.wb.append_log(f"报价决策：{self.product.title} 手工填写部分已保存为草稿。")
 
     def _confirm(self):
+        self._remarks_changed()
         try:
             self.session.confirm_product(self.product)
         except (ValueError, OSError) as error:
-            messagebox.showerror("暂不能确认本品报价", str(error), parent=self.wb.root)
+            messagebox.showerror("暂不能确认报价并提交稽核", str(error), parent=self.wb.root)
             return
         self._update_rules()
         self.feedback.configure(

@@ -52,3 +52,17 @@ def test_popup_committed_to_non_detail_is_still_rejected(destination):
         _adapter()._wait_for_portal_detail(page, before_url=SEARCH, controlled_pages=(page,))
     assert not page.goto_calls
     assert page.popup_closed
+
+
+def test_current_text_card_waits_for_popup_before_detail_validation(monkeypatch):
+    from tests.contract.test_official_huawei_live import _task
+    page = _OpeningPortalPage()
+    page.context.pages = [page]
+    adapter = _adapter()
+    locator = SimpleNamespace(click=lambda: page.context.pages.append(page.popup))
+    target = SimpleNamespace(source='current_text', prevalidated_url=None, locator=locator)
+    monkeypatch.setattr(adapter, '_wait_for_exact_result', lambda *args: target)
+    sentinel = object()
+    monkeypatch.setattr(adapter, '_observe_detail', lambda *args, **kwargs: sentinel)
+    assert adapter._observe_validated_mode(_task(), page, defer_price=True) is sentinel
+    assert page.url == DETAIL and page.popup_closed

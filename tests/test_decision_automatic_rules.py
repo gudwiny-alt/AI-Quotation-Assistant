@@ -96,7 +96,7 @@ def test_periodic_exception_requires_real_reason_and_attachment(session, tmp_pat
     p.context.update(first_quote_date='2026-01-05', first_quote_price='2000')
     p.values['K'] = '2000'
     assert check(session, 'E07').status == '未通过'
-    p.values['AO'] = '厂家申请本月不降价'
+    p.values['AP'] = '厂家申请本月不降价'
     assert check(session, 'E07').status == '未通过'
     attachment = tmp_path / '厂家说明.txt'
     attachment.write_text('厂家依据')

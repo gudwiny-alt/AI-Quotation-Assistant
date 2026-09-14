@@ -483,6 +483,10 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
             )
             return self._observe_detail(task, browser, defer_price=defer_price)
         target.locator.click()
+        if target.source == "current_text":
+            # The hydrated title can be visible before the portal card selector.
+            # Its click also opens a new tab; wait for the approved URL to commit.
+            self._wait_for_portal_detail(browser, before_url=before_url, controlled_pages=controlled_pages)
         browser.wait_for_load_state("domcontentloaded")
         self.raise_if_manual_action(browser)
         if target.prevalidated_url is not None:

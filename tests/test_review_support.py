@@ -84,7 +84,7 @@ def test_writeback_preserves_unrelated_zip_parts_and_formulas(session):
     path = session.quote_path
     with ZipFile(path) as z:
         before = {n: z.read(n) for n in z.namelist()}
-    session.products[0].values["AO"] = "=not a formula <说明>"
+    session.products[0].values["AP"] = "=not a formula <说明>"
     assert session.save(session.products[0]) == path
     with ZipFile(path) as z:
         after = {n: z.read(n) for n in z.namelist()}
@@ -94,7 +94,7 @@ def test_writeback_preserves_unrelated_zip_parts_and_formulas(session):
     s = w["5G手机"]
     assert s["K2"].value == 2090
     assert s["Z2"].value == "=K2/L2-1"
-    assert s["AO2"].value == "=not a formula <说明>" and s["AO2"].data_type == "s"
+    assert s["AP2"].value == "=not a formula <说明>" and s["AP2"].data_type == "s"
     assert list((path.parent / "历史备份").glob("*.bak"))
     restored = ReviewSession(session.model, MONTH)
     assert restored.products[0].context["stock"] == "在库"
@@ -322,9 +322,9 @@ def test_workbook_gaps_keep_date_price_and_values_on_right_product(session):
     assert other.context["entry_date"] == "2024-01-01"
     assert other.context["warehouse_price"] == "4567"
     assert other.values["K"] == "3456"
-    other.values["AO"] = "正确第4行"
+    other.values["AP"] = "正确第4行"
     reopened.save(other)
-    assert load_workbook(session.quote_path)["5G手机"]["AO4"].value == "正确第4行"
+    assert load_workbook(session.quote_path)["5G手机"]["AP4"].value == "正确第4行"
 
 
 def test_known_previous_price_constrains_display_without_passing_history(session):

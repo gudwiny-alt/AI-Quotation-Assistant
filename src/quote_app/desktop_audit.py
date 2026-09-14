@@ -515,7 +515,7 @@ class AuditView:
         self.review_button = self.button(actions, text="人工复核", command=self._review, primary=True, padding=(8, 5))
         self.review_button.pack(side="right", padx=(7, 0))
         self.button(actions, text="查看完整依据", command=self._show_detail_dialog, padding=(8, 5)).pack(side="right")
-        self.replace_button = self.button(actions, text="补充／替换截图", command=self._replace_evidence, padding=(8, 5))
+        self.replace_button = self.button(actions, text="补充修正渠道取价", command=self._replace_evidence, padding=(8, 5))
         self.replace_button.pack(side="left")
 
     def _rewrap_detail(self, event):
@@ -971,7 +971,7 @@ class AuditView:
             self.final_state.configure(text="当前批次无未解决事项，可由服务执行最终版本校验", fg="#0B9975")
         unconfirmed = (self.session.unconfirmed_products() if hasattr(self.session, 'unconfirmed_products') else [])
         if not self.snapshot.summary['需处理'] and not self.snapshot.summary['未检查'] and unconfirmed:
-            self.final_state.configure(text=f"稽核项已完成 · 还有 {len(unconfirmed)} 款报价待确认，请到报价决策中确认本品报价", fg="#D88119")
+            self.final_state.configure(text=f"稽核项已完成 · 还有 {len(unconfirmed)} 款报价待确认，请到报价决策中确认报价并提交稽核", fg="#D88119")
         can_final = (
             not unconfirmed
             and

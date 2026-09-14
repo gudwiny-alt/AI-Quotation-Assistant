@@ -16,14 +16,14 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from openpyxl import load_workbook
 
-COLUMNS = ("K", "L", "M", "P", "Q", "AO")
+COLUMNS = ("K", "L", "M", "P", "Q", "AP")
 HEADERS = {
     "C": "集团一级库物料编码",
     "L": "终端公司采购价",
     "M": "终端公司全国采购系统均价",
     "P": "渠道买断价",
     "Q": "分销零售价",
-    "AO": "备注",
+    "AP": "超6个月价格说明",
 }
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
@@ -112,7 +112,7 @@ def make_backup(path, expected):
     return backup
 
 
-def write_cells(path: Path, expected: str, month, product, original_identity):
+def write_cells(path: Path, expected: str, month, product, original_identity, *, backup=True):
     if digest(path, fresh=True) != expected:
         raise ValueError("报价工作簿版本已变化，请重新打开本批次后核验")
     rows = inspect(path, month)
@@ -129,7 +129,7 @@ def write_cells(path: Path, expected: str, month, product, original_identity):
     unchanged = all(
         (money(row.get(col)) == money(numeric[col]) if numeric[col] else row.get(col) in (None, ""))
         for col in COLUMNS[:-1]
-    ) and str(row.get("AO") or "") == product.values.get("AO", "")
+    ) and str(row.get("AP") or "") == product.values.get("AP", "")
     if unchanged:
         if digest(path, fresh=True) != expected:
             raise ValueError("报价工作簿版本已变化，请重新打开本批次")
@@ -160,9 +160,9 @@ def write_cells(path: Path, expected: str, month, product, original_identity):
             cell = ET.Element("c", {"r": address})
             if style:
                 cell.set("s", style.group(0)[3:-1])
-            value = product.values.get(col, "") if col == "AO" else numeric[col]
+            value = product.values.get(col, "") if col == "AP" else numeric[col]
             if value is not None and value != "":
-                if col == "AO":
+                if col == "AP":
                     cell.set("t", "inlineStr")
                     inline = ET.SubElement(cell, "is")
                     text = ET.SubElement(inline, "t")
@@ -206,14 +206,14 @@ def write_cells(path: Path, expected: str, month, product, original_identity):
             for col in COLUMNS:
                 expected_value = product.values.get(col, "")
                 actual = verified.get(col, "")
-                if col == "AO":
+                if col == "AP":
                     if str(actual or "") != expected_value:
                         raise ValueError("备注写回校验未通过")
                 elif expected_value.strip() and money(actual) != money(expected_value):
                     raise ValueError(f"{col}写回值精度无法保持")
             if digest(path, fresh=True) != expected:
                 raise ValueError("报价工作簿版本在保存期间变化，已取消写回")
-            backup = make_backup(path, expected)
+            backup = make_backup(path, expected) if backup else None
             os.replace(name, path)
             return backup
         finally:

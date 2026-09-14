@@ -488,7 +488,7 @@ def test_native_decision_save_writes_five_prices_and_remarks_only(workbench, tmp
         "M": "2050",
         "P": "2099",
         "Q": "2499",
-        "AO": "产品经理补充说明",
+        "AP": "产品经理补充说明",
     }.items():
         form.vars[column].set(value)
     assert path.read_bytes() == original, "Typing or navigation must not write business output"
@@ -497,7 +497,7 @@ def test_native_decision_save_writes_five_prices_and_remarks_only(workbench, tmp
     assert not errors
     after = load_workbook(path)
     saved = after["5G手机"]
-    assert [saved[f"{c}2"].value for c in ("K", "L", "M", "P", "Q", "AO")] == [
+    assert [saved[f"{c}2"].value for c in ("K", "L", "M", "P", "Q", "AP")] == [
         2100,
         2000,
         2050,
@@ -598,6 +598,10 @@ def test_reference_size_decision_exposes_preview_and_save_without_page_scroll(wo
     bottom = form.confirm_button.winfo_rooty() + form.confirm_button.winfo_height()
     assert bottom <= view.root.winfo_rooty() + view.root.winfo_height(), "保存/确认栏仍在首屏之外"
     assert all(widget.winfo_ismapped() for widget in form.preview_values.values())
+    position = form.confirm_button.winfo_rooty()
+    form.content._workbench_scroll_canvas.yview_moveto(1)
+    view.root.update()
+    assert form.confirm_button.winfo_rooty() == position, "报价确认按钮应固定在可见操作栏"
 
 
 def test_decision_rule_opens_explanation_and_source_fields_are_locked(workbench):

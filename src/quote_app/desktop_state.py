@@ -25,6 +25,7 @@ STATE_LABELS = {
     "waiting_for_login": "等待登录",
     "paused": "已暂停",
     "succeeded": "渠道完成",
+    "manual_corrected": "人工补充",
     "technical_failure": "技术失败",
     "created": "已创建",
     "completed": "已完成",

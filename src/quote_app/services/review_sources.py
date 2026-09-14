@@ -39,8 +39,14 @@ def warehouse_limit(value):
 def workbook_channels(path, rows):
     """Anchor each embedded image to its exact output row and AL/AM/AN column."""
     evidence = {}
+    urls = {}
     book = load_workbook(path, data_only=False)
     try:
+        for number in rows:
+            for channel, (col, _) in CHANNEL_COLUMNS.items():
+                link = book['5G手机'][f'{col}{number}'].hyperlink
+                if link and link.target:
+                    urls[(number, channel)] = link.target
         for picture in book["5G手机"]._images:
             anchor = getattr(picture.anchor, "_from", None)
             if anchor is None or anchor.col not in (37, 38, 39):
@@ -78,6 +84,7 @@ def workbook_channels(path, rows):
                     price=str(price) if price is not None else "",
                     outcome="price_found" if price is not None else "",
                     state="workbook",
+                    url=urls.get((number, channel), ""),
                     evidence_state="complete" if len(images) == 1 else "missing",
                     evidence_path=images[0] if len(images) == 1 else None,
                     error="WORKBOOK_EVIDENCE_AMBIGUOUS" if len(images) > 1 else "",

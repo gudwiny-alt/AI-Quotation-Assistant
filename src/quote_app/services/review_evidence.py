@@ -46,8 +46,8 @@ def _target(part, target):
     )
 
 
-def write_evidence(path, expected, month, product, identity, channel, payload, extension):
-    if channel not in CHANNEL_COLUMNS:
+def write_evidence(path, expected, month, product, identity, channel, payload, extension, *, basis_slot=None, basis_count=1, backup=True):
+    if basis_slot is None and channel not in CHANNEL_COLUMNS:
         raise ValueError("请选择官网、天猫或京东渠道")
     if digest(path, fresh=True) != expected:
         raise ValueError("报价文件已被外部修改，请重新打开本批次")
@@ -124,7 +124,8 @@ def write_evidence(path, expected, month, product, identity, channel, payload, e
             if drawing_rel_part in parts
             else ET.Element(f"{{{REL}}}Relationships")
         )
-        image_col = CHANNEL_COLUMNS[channel][1]
+        image_col = 40 if basis_slot is not None else CHANNEL_COLUMNS[channel][1]
+        picture_name = f"报价依据-{product.output_row}-{basis_slot}" if basis_slot is not None else f"补充截图-{channel}-{product.output_row}"
         anchors = []
         for anchor in drawing:
             start = anchor.find(f"{{{D}}}from")
@@ -132,6 +133,7 @@ def write_evidence(path, expected, month, product, identity, channel, payload, e
                 start is not None
                 and start.findtext(f"{{{D}}}col") == str(image_col)
                 and start.findtext(f"{{{D}}}row") == str(product.output_row - 1)
+                and (basis_slot is None or any(n.get("name") == picture_name for n in anchor.iter(f"{{{D}}}cNvPr")))
             ):
                 if anchor.find(f"{{{D}}}pic") is None:
                     raise ValueError("目标位置有非图片对象，不能自动覆盖")
@@ -159,7 +161,7 @@ def write_evidence(path, expected, month, product, identity, channel, payload, e
                 nv,
                 f"{{{D}}}cNvPr",
                 id=str(max(ids, default=0) + 1),
-                name=f"补充截图-{channel}-{product.output_row}",
+                name=picture_name,
             )
             ET.SubElement(nv, f"{{{D}}}cNvPicPr")
             fill = ET.SubElement(pic, f"{{{D}}}blipFill")
@@ -168,6 +170,16 @@ def write_evidence(path, expected, month, product, identity, channel, payload, e
             shape = ET.SubElement(pic, f"{{{D}}}spPr")
             ET.SubElement(ET.SubElement(shape, f"{{{A}}}prstGeom", prst="rect"), f"{{{A}}}avLst")
             ET.SubElement(anchor, f"{{{D}}}clientData")
+        if basis_slot is not None:
+            # Each original image has its own drawing, no resampling or composition.
+            columns = root.find(f"{{{NS}}}cols")
+            width = next((float(c.get('width', '30')) for c in (columns if columns is not None else ()) if int(c.get('min')) <= 41 <= int(c.get('max'))), 30)
+            emu_width = int((width * 7 + 5) * 9525)
+            for mark, fraction in [('from', basis_slot / basis_count), ('to', (basis_slot + 1) / basis_count)]:
+                marker = anchor.find(f"{{{D}}}{mark}")
+                marker.find(f"{{{D}}}col").text = str(40 if fraction < 1 else 41)
+                marker.find(f"{{{D}}}colOff").text = str(int(emu_width * fraction) if fraction < 1 else 0)
+                marker.find(f"{{{D}}}row").text = str(product.output_row - 1 if mark == 'from' else product.output_row)
         media = f"xl/media/review-{uuid4().hex}.{extension}"
         rid = "rIdReview" + uuid4().hex
         blip.set(f"{{{R}}}embed", rid)
@@ -207,21 +219,21 @@ def write_evidence(path, expected, month, product, identity, channel, payload, e
             from .review_sources import workbook_channels
             import hashlib
 
-            records = workbook_channels(Path(name), rows)
-            actual = next(
-                (
-                    t
-                    for t in records
-                    if t.source_row_number == product.output_row and t.channel == channel
-                ),
-                None,
-            )
-            if (
-                actual is None
-                or digest(actual.evidence_path) != hashlib.sha256(payload).hexdigest()
-            ):
-                raise ValueError("换图校验失败：图片未准确关联到商品与渠道")
-            backup = make_backup(path, expected)
+            if basis_slot is None:
+                records = workbook_channels(Path(name), rows)
+                actual = next((t for t in records if t.source_row_number == product.output_row and t.channel == channel), None)
+                if actual is None or digest(actual.evidence_path) != hashlib.sha256(payload).hexdigest():
+                    raise ValueError("换图校验失败：图片未准确关联到商品与渠道")
+            else:
+                from openpyxl import load_workbook
+                book = load_workbook(name)
+                try:
+                    matches = [im for im in book['5G手机']._images if im.anchor._from.col == 40 and im.anchor._from.row == product.output_row - 1]
+                    if not any(hashlib.sha256(im._data()).hexdigest() == hashlib.sha256(payload).hexdigest() for im in matches):
+                        raise ValueError('依据图片未正确写入AO')
+                finally:
+                    book.close()
+            backup = make_backup(path, expected) if backup else None
             os.replace(name, path)
             return backup
         finally:
