@@ -271,6 +271,11 @@ class AuditView:
         self._build_categories()
         self._build_workspace()
         self._build_footer()
+        identity = tk.Frame(self.root, bg=BG)
+        identity.grid(row=4, column=0, sticky="ew", pady=(6,0))
+        self.reviewer_label = self.label(identity, "", size=13, color=MUTED, bg=BG)
+        self.reviewer_label.pack(side="left")
+        self.button(identity, text="设置本批次稽核人", command=self._set_batch_reviewer, padding=(8,4)).pack(side="right")
         self.refresh()
         from quote_app.services.screenshot_review import revision
         self._scan_revision = revision()
@@ -296,7 +301,7 @@ class AuditView:
         columns = self._category_columns
         baseline = 84 if columns == 6 else 176
         extra = max(0, self.category_cards.winfo_reqheight() - baseline)
-        minimum = (862 if columns == 6 else 956) + extra
+        minimum = (912 if columns == 6 else 1006) + extra
         self.page_canvas.itemconfigure(self.page_window,
                                        height=max(self.page_canvas.winfo_height(), minimum))
 
@@ -510,6 +515,8 @@ class AuditView:
         self.review_button = self.button(actions, text="人工复核", command=self._review, primary=True, padding=(8, 5))
         self.review_button.pack(side="right", padx=(7, 0))
         self.button(actions, text="查看完整依据", command=self._show_detail_dialog, padding=(8, 5)).pack(side="right")
+        self.replace_button = self.button(actions, text="补充／替换截图", command=self._replace_evidence, padding=(8, 5))
+        self.replace_button.pack(side="left")
 
     def _rewrap_detail(self, event):
         width = max(1, event.width - 4)
@@ -732,7 +739,7 @@ class AuditView:
             preview.bind("<Button-1>", lambda _event, path=preview_path: self.workbench._open_path(path))
             self.label(self.evidence_frame, "点击查看原始截图 ↗", size=12, color=self.colors["blue"], bg="#F8FAFE").pack(anchor="w")
         else:
-            self.label(self.evidence_frame, "工作簿依据（点击查看）" if evidence and all(Path(a).suffix.lower() == ".xlsx" for a in evidence) else "暂无可预览的本地截图" if evidence else "本项依据见左侧自动检查说明", size=13,
+            self.label(self.evidence_frame, "工作簿依据（点击查看）" if evidence and all(Path(a).suffix.lower() == ".xlsx" for a in evidence) else "暂无可预览的本地截图" if evidence else "依据见左侧说明", size=13,
                        color=self.colors["muted"], bg="#F8FAFE").pack(anchor="w", pady=(14, 0))
             if evidence:
                 self.button(self.evidence_frame, text="查看附件", command=lambda: self.workbench._open_path(Path(evidence[0])), padding=(8, 5)).pack(anchor="w", pady=5)
@@ -746,7 +753,8 @@ class AuditView:
             return
         self.review_conclusion.set("通过")
         self.review_reason.set("")
-        self.review_operator.set("")
+        product = self._selected_product()
+        self.review_operator.set(self.session.reviewer_for(product) if hasattr(self.session, 'reviewer_for') else "")
         dialog = tk.Toplevel(self.parent)
         dialog.title("人工复核")
         dialog.transient(self.parent.winfo_toplevel())
@@ -768,7 +776,7 @@ class AuditView:
         )
         reason_entry.grid(row=2, column=0, sticky="ew", pady=(7, 0))
         operator_entry = self.SoftEntry(
-            shell, textvariable=self.review_operator, placeholder="操作人（必填）", width=300
+            shell, textvariable=self.review_operator, placeholder="稽核人（首次填写后自动沿用）", width=300
         )
         operator_entry.grid(row=3, column=0, sticky="ew", pady=(7, 0))
         actions = tk.Frame(shell, bg=self.colors["white"])
@@ -794,12 +802,36 @@ class AuditView:
             messagebox.showwarning("信息不完整", "复核理由和操作人均为必填。", parent=dialog)
             return
         try:
+            if hasattr(self.session, 'set_reviewer'):
+                if not self.session.batch_reviewer:
+                    self.session.set_reviewer(operator)
+                elif operator != self.session.reviewer_for(self._selected_product()):
+                    self.session.set_reviewer(operator, self._selected_product())
             self.session.review(item.id, self.review_conclusion.get(), reason, operator)
         except (ValueError, OSError) as error:
             messagebox.showerror("复核失败", str(error), parent=dialog)
             return
         dialog.destroy()
         self.refresh()
+
+    def _set_batch_reviewer(self):
+        from tkinter import simpledialog
+        value = simpledialog.askstring("本批次稽核人", "填写一次，本批次人工复核自动沿用。单品复核时可改为该产品的稽核人。", initialvalue=getattr(self.session,'batch_reviewer',''), parent=self.parent.winfo_toplevel())
+        if value is None:
+            return
+        try:
+            self.session.set_reviewer(value)
+            self.refresh()
+        except (ValueError,OSError) as error:
+            messagebox.showerror("稽核人未保存",str(error),parent=self.parent.winfo_toplevel())
+
+    def _replace_evidence(self):
+        product = self._selected_product()
+        if product is None:
+            return
+        from quote_app.desktop_evidence import open_evidence_editor
+        channel = getattr(getattr(self, 'current_check', None), 'channel', '') or 'official'
+        return open_evidence_editor(self.parent, self.session, product, self.refresh, channel=channel)
 
     def _correct(self):
         product = self._selected_product()
@@ -825,6 +857,8 @@ class AuditView:
         return "\n".join(lines)
 
     def refresh(self):
+        if hasattr(self, 'reviewer_label'):
+            self.reviewer_label.configure(text="本批次稽核人：" + (getattr(self.session,'batch_reviewer','') or '未设置（首次人工复核时填写）'))
         read_error = None
         try:
             checks = list(self.session.all_checks())
@@ -935,7 +969,12 @@ class AuditView:
             self.final_state.configure(text=f"{self.snapshot.summary['需处理']} 项需处理 · {self.snapshot.summary['未检查']} 项未检查，暂不可确认报送", fg="#E1251B")
         else:
             self.final_state.configure(text="当前批次无未解决事项，可由服务执行最终版本校验", fg="#0B9975")
+        unconfirmed = (self.session.unconfirmed_products() if hasattr(self.session, 'unconfirmed_products') else [])
+        if not self.snapshot.summary['需处理'] and not self.snapshot.summary['未检查'] and unconfirmed:
+            self.final_state.configure(text=f"稽核项已完成 · 还有 {len(unconfirmed)} 款报价待确认，请到报价决策中确认本品报价", fg="#D88119")
         can_final = (
+            not unconfirmed
+            and
             read_error is None
             and self.snapshot.batch_state == "ready"
             and not self.snapshot.summary["需处理"]
@@ -944,6 +983,7 @@ class AuditView:
         )
         self.final_button.configure(state="normal" if can_final else "disabled")
         self._fill_checks()
+        self.replace_button.configure(state='normal' if self._selected_product() is not None and not getattr(self.session,'running',False) else 'disabled')
 
     def destroy(self):
         if getattr(self, '_scan_timer', None):

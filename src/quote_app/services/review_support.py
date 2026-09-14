@@ -192,6 +192,9 @@ class ReviewSession:
         self._reviews = {}
         self._history = []
         self._confirmed = {}
+        self.batch_reviewer = ""
+        self.product_reviewers = {}
+        self._replacements = {}
         self.load_error = ""
         self._inspection_error = ""
         self.source_paths = dict(source_paths or {})
@@ -324,6 +327,8 @@ class ReviewSession:
                     product.channels.append(channel)
                 elif channel.state != 'workbook' or not old.evidence_path or not old.evidence_path.is_file():
                     product.channels[product.channels.index(old)] = channel
+        for product in result.products:
+            result._apply_replacements(product)
         return result
 
     @property
@@ -338,7 +343,10 @@ class ReviewSession:
             if data.get("batch_id") != self.batch_id:
                 raise ValueError("复核记录批次不匹配")
             self._history = data.get("history", [])
+            self.batch_reviewer = data.get("batch_reviewer", "")
+            self.product_reviewers = data.get("product_reviewers", {})
             if data.get("workbook_version") == self._version:
+                self._replacements = data.get("replacements", {})
                 self._reviews = data.get("reviews", {})
                 self._confirmed = data.get("confirmed", {})
                 for p in self.products:
@@ -422,6 +430,9 @@ class ReviewSession:
                 }
                 for p in self.products
             },
+            "batch_reviewer": self.batch_reviewer,
+            "product_reviewers": self.product_reviewers,
+            "replacements": self._replacements,
             "reviews": self._reviews,
             "history": self._history,
             "confirmed": self._confirmed,
@@ -455,6 +466,7 @@ class ReviewSession:
                    and t.material_code == p.material_code]
         if current:
             p.channels = current
+        self._apply_replacements(p)
         checks = []
         fingerprint = self._fingerprint(p)
 
@@ -772,6 +784,128 @@ class ReviewSession:
     def all_checks(self):
         return [c for p in self.products for c in self.evaluate(p)]
 
+    def is_written(self, p):
+        """Current five amounts and remarks match the actual workbook, not a click flag."""
+        current = digest(self.quote_path)
+        if current != self._version:
+            return False
+        if current != self._inspection_version:
+            try:
+                self._rows = inspect(self.quote_path, self.month)
+                self._inspection_version = current
+            except ValueError:
+                return False
+        row = self._rows.get(p.output_row, {})
+        return all(money(p.values.get(c)) is not None and money(p.values.get(c)) == money(row.get(c))
+                   for c in COLUMNS[:-1]) and str(row.get('AO') or '') == p.values.get('AO', '')
+
+    def _rebase_owned_write(self, fingerprints, *, exclude=()):
+        """Only an app-owned, verified mutation may carry existing approvals forward.
+
+        An external edit never comes through here and still invalidates every old fingerprint.
+        Already stale approvals (changed values/context/evidence) are never revived.
+        """
+        for p in self.products:
+            if p.id in exclude:
+                self._confirmed.pop(p.id, None)
+                continue
+            old, new = fingerprints[p.id], self._fingerprint(p)
+            if self._confirmed.get(p.id) == old:
+                self._confirmed[p.id] = new
+            for key, record in list(self._reviews.items()):
+                if record.get('product_id') == p.id and record.get('version') == old:
+                    self._reviews[key] = {**record, 'version': new}
+
+    def reviewer_for(self, p):
+        return self.product_reviewers.get(p.id, self.batch_reviewer)
+
+    def set_reviewer(self, name, p=None):
+        name = name.strip()
+        if not name:
+            raise ValueError('请填写稽核人姓名')
+        if p is not None and not any(item is p for item in self.products):
+            raise ValueError('商品不属于当前批次')
+        previous = self.batch_reviewer, dict(self.product_reviewers)
+        if p is None:
+            self.batch_reviewer = name
+        else:
+            self.product_reviewers[p.id] = name
+        try:
+            self._persist()
+        except OSError:
+            self.batch_reviewer, self.product_reviewers = previous
+            raise
+
+    def _apply_replacements(self, p):
+        for record in self._replacements.get(p.id, {}).values():
+            data = dict(record)
+            data['evidence_path'] = Path(data['evidence_path'])
+            replacement = TaskRow(**data)
+            p.channels = [t for t in p.channels if t.channel != replacement.channel] + [replacement]
+
+    def replace_evidence(self, p, channel, source_path, reason):
+        from dataclasses import replace
+        from uuid import uuid4
+        from .review_evidence import image_bytes, write_evidence
+        if self.running or self.quote_path is None:
+            raise ValueError('请等待任务结束后补充截图')
+        if not any(item is p for item in self.products) or channel not in ('official', 'tmall', 'jd'):
+            raise ValueError('请选择本批次商品与渠道')
+        if not reason.strip():
+            raise ValueError('请填写补充或替换截图的原因')
+        if digest(self.quote_path, fresh=True) != self._version:
+            raise ValueError('报价文件已被外部修改，请重新打开本批次')
+        payload, extension = image_bytes(source_path)
+        self.evaluate(p)
+        old = next((t for t in p.channels if t.channel == channel), None)
+        from .review_sources import CHANNEL_COLUMNS
+        if old is None:
+            price = self._rows.get(p.output_row, {}).get(CHANNEL_COLUMNS[channel][0])
+            old = TaskRow(f'workbook:{p.output_row}:{channel}', p.title, channel,
+                          price=str(price) if money(price) else '', outcome='price_found' if money(price) else '',
+                          state='workbook', source_row_number=self._sources[p.id].source_row_number,
+                          material_code=p.material_code, specification=p.specification)
+        fingerprints = {item.id: self._fingerprint(item) for item in self.products}
+        previous_version = self._version
+        previous_confirmed = dict(self._confirmed)
+        previous_reviews = {key: dict(value) for key, value in self._reviews.items()}
+        previous_replacements = {key: dict(value) for key, value in self._replacements.items()}
+        previous_channels = list(p.channels)
+        folder = self.quote_path.parent / '截图证据' / '人工补充'
+        folder.mkdir(parents=True, exist_ok=True)
+        destination = folder / (uuid4().hex + '.' + extension)
+        destination.write_bytes(payload)
+        backup = None
+        try:
+            backup = write_evidence(self.quote_path, previous_version, self.month, p,
+                                    self._identities[p.id], channel, payload, extension)
+            self._version = digest(self.quote_path, fresh=True)
+            updated = replace(old, evidence_path=destination, evidence_state='complete')
+            self._replacements.setdefault(p.id, {})[channel] = {
+                **asdict(updated), 'evidence_path': str(destination)}
+            self._apply_replacements(p)
+            self._rebase_owned_write(fingerprints, exclude=(p.id,))
+            self._history.append({'action': 'replace_evidence', 'product_id': p.id, 'channel': channel,
+                'reason': reason.strip(), 'operator': self.reviewer_for(p) or '产品经理补充', 'time': _now(),
+                'old_evidence': str(old.evidence_path or ''), 'old_digest': digest(old.evidence_path),
+                'new_evidence': str(destination), 'new_digest': digest(destination),
+                'before_version': previous_version, 'workbook_version': self._version,
+                'price_unchanged': old.price})
+            try:
+                self._persist()
+            except OSError:
+                self._history.pop()
+                raise
+        except Exception:
+            if backup is not None:
+                rollback(self.quote_path, backup, self._version)
+            self._version = previous_version
+            self._confirmed, self._reviews = previous_confirmed, previous_reviews
+            self._replacements, p.channels = previous_replacements, previous_channels
+            destination.unlink(missing_ok=True)
+            raise
+        return destination
+
     def save(self, p):
         if self.running:
             raise ValueError("任务执行中，暂不能写回报价工作簿")
@@ -783,10 +917,12 @@ class ReviewSession:
             if not a.is_file() or a.stat().st_size == 0:
                 raise ValueError(f"依据附件不存在或为空：{a.name}")
         before = self._version
+        fingerprints = {item.id: self._fingerprint(item) for item in self.products}
+        prior_reviews = {key: dict(value) for key, value in self._reviews.items()}
         backup = write_cells(self.quote_path, before, self.month, p, self._identities[p.id])
         prior_confirmed = dict(self._confirmed)
         self._version = digest(self.quote_path, fresh=True)
-        self._confirmed.clear()
+        self._rebase_owned_write(fingerprints)
         self._history.append(
             {
                 "action": "save_draft",
@@ -805,6 +941,7 @@ class ReviewSession:
             rollback(self.quote_path, backup, self._version)
             self._version = before
             self._confirmed = prior_confirmed
+            self._reviews = prior_reviews
             self._history.pop()
             raise
         return self.quote_path
@@ -818,8 +955,13 @@ class ReviewSession:
             [c for c in saved_checks if c.code in ('F01', 'F02', 'F05')]
         ):
             raise ValueError("保存后报价规则或写回数据未通过核验，未标记确认")
+        previous = dict(self._confirmed)
         self._confirmed[p.id] = self._fingerprint(p)
-        self._persist()
+        try:
+            self._persist()
+        except OSError:
+            self._confirmed = previous
+            raise
         return path
 
     def review(self, check_id, conclusion, reason, operator):
@@ -843,16 +985,22 @@ class ReviewSession:
         previous = self._reviews.get(c.id)
         self._reviews[c.id] = record
         self._history.append(record)
-        self._confirmed.clear()
+        prior_confirmed = dict(self._confirmed)
+        # Reviewing evidence does not change the separately confirmed quotation.
+        # Final export always evaluates the latest review conclusions.
         try:
             self._persist()
         except OSError:
+            self._confirmed = prior_confirmed
             self._history.pop()
             if previous is None:
                 self._reviews.pop(c.id, None)
             else:
                 self._reviews[c.id] = previous
             raise
+
+    def unconfirmed_products(self):
+        return [p for p in self.products if self._confirmed.get(p.id) != self._fingerprint(p)]
 
     def export_report(self, final=False):
         if final:
@@ -866,7 +1014,7 @@ class ReviewSession:
         if final and (
             self.running
             or not can_confirm(checks)
-            or any(self._confirmed.get(p.id) != self._fingerprint(p) for p in self.products)
+            or self.unconfirmed_products()
         ):
             raise ValueError("全批次最新报价与证据尚未完成确认，只能导出草稿")
         if self.quote_path is None:

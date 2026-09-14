@@ -46,7 +46,7 @@ def channel_presentation(records) -> ChannelPresentation:
     record = records[-1]
     price = money_preview(record.price)
     if record.state == "technical_failure":
-        status = "截图待补" if record.outcome == "price_found" and record.price else "采集失败"
+        status = "已补图" if getattr(record, "evidence_state", "") == "complete" and getattr(record, "evidence_path", None) else "截图待补" if record.outcome == "price_found" and record.price else "采集失败"
     elif record.state == "waiting_for_login":
         status = "等待验证"
     elif record.state == "running":
@@ -263,16 +263,20 @@ class DecisionView:
         steps = tk.Canvas(stage, height=30, bg=self.WHITE, highlightthickness=0)
         steps.grid(row=0, column=0, sticky="ew")
         check_icon = self.wb.artwork.get("ui-icons/circle-check-white", 25)
-        def draw_steps(event):
+        self.steps_canvas = steps
+        def draw_steps(event=None):
+            width = event.width if event else steps.winfo_width()
+            written = self.session.is_written(self.product)
+            self.writeback_complete = written
             steps.delete("all")
-            for index, title in enumerate(("自动取价已完成", "补充价格与试算", "写回报价表")):
-                x = event.width * (index + .32) / 3
-                active = index < 2
+            for index, title in enumerate(("自动取价已完成", "补充价格与试算", "已写回报价表" if written else "写回报价表")):
+                x = width * (index + .32) / 3
+                active = index < 2 or written
                 if index < 2:
-                    steps.create_line(x + 153, 15, event.width * (index + 1.32) / 3 - 26,
-                                      15, fill=self.BLUE if index == 0 else "#B9CAE3")
+                    steps.create_line(x + 153, 15, width * (index + 1.32) / 3 - 26,
+                                      15, fill=self.BLUE if index == 0 or written else "#B9CAE3")
                 steps.create_oval(x - 15, 0, x + 15, 30, fill=self.BLUE if active else "#E7EDF6", outline="")
-                if index == 0 and check_icon:
+                if (index == 0 or index == 2 and written) and check_icon:
                     steps.create_image(x, 15, image=check_icon)
                 else:
                     steps.create_text(x, 15, text=str(index + 1), fill=self.WHITE if active else self.MUTED,
@@ -280,6 +284,7 @@ class DecisionView:
                 steps.create_text(x + 27, 15, text=title, anchor="w", fill=self.BLUE if active else self.MUTED,
                                   font=(self.FONT, -17, "bold" if index == 1 else "normal"))
         steps.bind("<Configure>", draw_steps)
+        self._draw_steps = draw_steps
 
         strip = self.card(self.content, padx=14, pady=8)
         strip.grid(row=1, column=0, sticky="ew", pady=10)
@@ -446,8 +451,8 @@ class DecisionView:
         preview.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         preview.columnconfigure(1, weight=1)
         self.label(preview, "本次报价表待写入内容", size=18, bold=True).grid(row=0, column=0, sticky="w")
-        self._wrap(preview, f"  {self.session.quote_path.name if self.session.quote_path else '尚未生成工作簿'}  ·  第 {self.product.output_row} 行  ·  待写回",
-                   size=13, color=self.BLUE).grid(row=0, column=1, sticky="ew", padx=(16, 0))
+        self.writeback_label = self._wrap(preview, size=13, color=self.BLUE)
+        self.writeback_label.grid(row=0, column=1, sticky="ew", padx=(16, 0))
         cells = tk.Frame(preview, bg=self.WHITE)
         cells.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         self.preview_values = {}
@@ -506,6 +511,10 @@ class DecisionView:
         self.profit_label.configure(text=(f"毛利率 {trial['margin']:.2f}%　价差 {money_preview(str(trial['difference']))}　加价率 {trial['markup']:.6f}%"
             if trial else "填写采购价与结算价后，自动试算毛利率和加价率"))
         checks = self.session.evaluate(self.product)
+        written = self.session.is_written(self.product)
+        count = sum(self.session.is_written(p) for p in self.session.products)
+        self._draw_steps()
+        self.writeback_label.configure(text=f"{self.session.quote_path.name if self.session.quote_path else '尚未生成工作簿'} · 第 {self.product.output_row} 行 · {'已写回' if written else '待写回'} · 本批次 {count}/{len(self.session.products)} 已写回")
         rules = [c for c in checks if c.category == "报价规则与资格"]
         failed = any(c.status == "未通过" for c in rules)
         pending = any(c.status in {"待复核", "待补充", "未检查"} for c in rules)
@@ -729,17 +738,18 @@ class DecisionView:
         paths = list(
             dict.fromkeys(r.evidence_path for r in self.product.channels if r.evidence_path)
         )
-        if not paths:
-            messagebox.showinfo(
-                "取价证据",
-                "当前商品没有已关联的截图记录。可前往价格情报查看本次渠道执行情况。",
-                parent=self.wb.root,
-            )
-            return
         menu = tk.Menu(self.parent, tearoff=False)
         for path in paths:
             menu.add_command(label=path.name, command=lambda p=path: self.wb._open_path(p))
+        if paths:
+            menu.add_separator()
+        menu.add_command(label="补充／替换截图…", command=self._replace_evidence,
+                         state="disabled" if self.session.running else "normal")
         menu.tk_popup(self.parent.winfo_pointerx(), self.parent.winfo_pointery())
+
+    def _replace_evidence(self):
+        from quote_app.desktop_evidence import open_evidence_editor
+        return open_evidence_editor(self.parent, self.session, self.product, self._build)
 
     def _save(self):
         try:

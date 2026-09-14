@@ -508,8 +508,15 @@ def test_native_decision_save_writes_five_prices_and_remarks_only(workbench, tmp
     assert saved["N2"].value == "原有手工货源"
     assert saved["Z2"].value == "=K2/L2-1"
     after.close()
-    assert list(tmp_path.glob("quote.xlsx.*.bak"))
+    assert list((tmp_path / "历史备份").glob("quote.xlsx.*.bak"))
     assert form.confirm_button["state"] == "disabled"
+    assert form.writeback_complete
+    assert '1/1 已写回' in form.writeback_label.cget('text')
+    form.vars['K'].set('2101')
+    assert not form.writeback_complete
+    assert '待写回' in form.writeback_label.cget('text')
+    form.vars['K'].set('2100')
+    assert form.writeback_complete
 
 
 @pytest.mark.parametrize("size", ["1000x720", "1280x850", "1280x1020"])

@@ -95,7 +95,7 @@ def test_writeback_preserves_unrelated_zip_parts_and_formulas(session):
     assert s["K2"].value == 2090
     assert s["Z2"].value == "=K2/L2-1"
     assert s["AO2"].value == "=not a formula <说明>" and s["AO2"].data_type == "s"
-    assert list(path.parent.glob("*.bak"))
+    assert list((path.parent / "历史备份").glob("*.bak"))
     restored = ReviewSession(session.model, MONTH)
     assert restored.products[0].context["stock"] == "在库"
     assert restored.products[0].values["K"] == "2090"

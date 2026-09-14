@@ -97,6 +97,21 @@ def atomic_json(path: Path, text: str):
             os.unlink(name)
 
 
+def make_backup(path, expected):
+    if digest(path, fresh=True) != expected:
+        raise ValueError("报价工作簿版本在保存期间变化，已取消写回")
+    folder = path.parent / "历史备份"
+    folder.mkdir(exist_ok=True)
+    backup = folder / (path.name + "." + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".bak")
+    with backup.open("xb") as out:
+        out.write(path.read_bytes())
+        out.flush()
+        os.fsync(out.fileno())
+    if digest(path, fresh=True) != expected:
+        raise ValueError("报价工作簿版本在备份期间变化，已取消写回")
+    return backup
+
+
 def write_cells(path: Path, expected: str, month, product, original_identity):
     if digest(path, fresh=True) != expected:
         raise ValueError("报价工作簿版本已变化，请重新打开本批次后核验")
@@ -111,6 +126,14 @@ def write_cells(path: Path, expected: str, month, product, original_identity):
         if raw and money(raw) is None:
             raise ValueError(f"{col}请输入大于0的有效金额，或留空保存草稿")
         numeric[col] = str(money(raw)) if raw else None
+    unchanged = all(
+        (money(row.get(col)) == money(numeric[col]) if numeric[col] else row.get(col) in (None, ""))
+        for col in COLUMNS[:-1]
+    ) and str(row.get("AO") or "") == product.values.get("AO", "")
+    if unchanged:
+        if digest(path, fresh=True) != expected:
+            raise ValueError("报价工作簿版本已变化，请重新打开本批次")
+        return None
     with ZipFile(path) as z:
         # Resolve worksheet by workbook relationships; never assume sheet1.
         wb = ET.fromstring(z.read("xl/workbook.xml"))
@@ -190,15 +213,7 @@ def write_cells(path: Path, expected: str, month, product, original_identity):
                     raise ValueError(f"{col}写回值精度无法保持")
             if digest(path, fresh=True) != expected:
                 raise ValueError("报价工作簿版本在保存期间变化，已取消写回")
-            backup = path.with_name(
-                path.name + "." + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".bak"
-            )
-            with backup.open("xb") as out:
-                out.write(path.read_bytes())
-                out.flush()
-                os.fsync(out.fileno())
-            if digest(path, fresh=True) != expected:
-                raise ValueError("报价工作簿版本在备份期间变化，已取消写回")
+            backup = make_backup(path, expected)
             os.replace(name, path)
             return backup
         finally:
@@ -208,6 +223,8 @@ def write_cells(path: Path, expected: str, month, product, original_identity):
 
 def rollback(path, backup, expected):
     """Restore exact previous bytes if no third party changed the new file."""
+    if backup is None:
+        return
     if digest(path, fresh=True) != expected:
         raise OSError(f"保存复核记录失败且工作簿又被外部修改；请从备份恢复：{backup}")
     fd, name = tempfile.mkstemp(prefix=".review-rollback-", dir=path.parent)
