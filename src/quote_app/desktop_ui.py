@@ -59,6 +59,7 @@ PAGES = (
     ("intelligence", "chart-no-axes-column-increasing", "价格情报智能体", "全渠道取价与证据留存"),
     ("decision", "file-text", "报价决策智能体", "多源价格比较与报价规则处理"),
     ("audit", "shield-check", "稽核审查智能体", "证据核验与异常追溯"),
+    ("ai_summary", "file-text", "AI 智能总结", "本批次业务执行、经营决策与风险分析"),
     ("history", "history", "任务记录", "本机已保存任务 · 只读查看"),
     ("settings", "settings", "系统设置", "浏览器登录、截图权限与本机存储"),
 )
@@ -205,7 +206,7 @@ class DesktopWorkbench:
         self.root.bind("<Configure>", self._resize_review_shell, add="+")
         bind_scrolling(self.root, self._scroll_wheel)
         modifier = "Command" if sys.platform == "darwin" else "Control"
-        for index, (page, *_rest) in enumerate(PAGES, 1):
+        for index, page in enumerate(("overview", "intelligence", "decision", "audit", "history", "settings", "ai_summary"), 1):
             self.root.bind(f"<{modifier}-Key-{index}>", partial(self._navigate_key, page=page))
         for index, tab in enumerate(("tasks", "data", "reports"), 1):
             self.root.bind(
@@ -335,7 +336,7 @@ class DesktopWorkbench:
             image=self.artwork.get("ui-media/quotation-decision-logo", 48) or "",
             bg=SIDEBAR,
         ).grid(row=0, column=0, rowspan=2, padx=(0, 8))
-        self.brand_title = label(brand, "报价决策智能体", size=15, bold=True, bg=SIDEBAR)
+        self.brand_title = label(brand, "报价协同智能体", size=15, bold=True, bg=SIDEBAR)
         self.brand_title.grid(
             row=0, column=1, sticky="w"
         )
@@ -344,9 +345,9 @@ class DesktopWorkbench:
         )
         self.nav = {}
         for index, (key, icon, title, _) in enumerate(PAGES):
-            if index == 4:
+            if index == 5:
                 tk.Frame(sidebar, bg=LINE, height=1).grid(
-                    row=5, column=0, sticky="ew", padx=20, pady=(20, 14)
+                    row=6, column=0, sticky="ew", padx=20, pady=(12, 8)
                 )
             nav = SidebarButton(
                 sidebar,
@@ -355,7 +356,7 @@ class DesktopWorkbench:
                 image=self._icon(icon, "muted", 22) or "",
                 cursor="hand2",
             )
-            nav.grid(row=index + 1 + (index >= 4), column=0, sticky="ew", padx=14, pady=4)
+            nav.grid(row=index + 1 + (index >= 5), column=0, sticky="ew", padx=14, pady=4)
             self.nav[key] = nav
         local = tk.Frame(sidebar, bg=SIDEBAR)
         local.grid(row=10, column=0, sticky="ew", padx=24, pady=(10, 6))
@@ -405,7 +406,7 @@ class DesktopWorkbench:
         self.brand_title.configure(font=(FONT, -20 if wide else -18, "bold"))
 
     def _style_review_shell(self):
-        review = self.page in {"decision", "audit"}
+        review = self.page in {"decision", "audit", "ai_summary"}
         self.main.configure(padx=24 if review else 26, pady=14 if review else 18)
         self.header_frame.grid_configure(pady=(0, 4 if review else 14))
         self.heading.configure(font=(FONT, -30 if review else 24, "bold"))
@@ -641,6 +642,10 @@ class DesktopWorkbench:
             self.heading.configure(text="报价决策智能辅助")
             self.subheading.configure(text="补齐手工价格，查看智能报价提示并写回本次报价表")
             self._review_view = DecisionView(self, self.body, self._get_review_session())
+        elif page == "ai_summary":
+            from quote_app.desktop_ai import AISummaryView
+
+            self._review_view = AISummaryView(self, self.body, self._get_review_session())
         elif page == "audit":
             from quote_app.desktop_audit import AuditView
 
@@ -649,7 +654,7 @@ class DesktopWorkbench:
             self._review_view = AuditView(self, self.body, self._get_review_session())
         else:
             self._workbench()
-        if page in {"decision", "audit"}:
+        if page in {"decision", "audit", "ai_summary"}:
             # Post-generation editing gets its own full-height work surface.
             # Existing task controls remain alive for controller updates and other pages.
             self.context.grid_remove()
@@ -692,7 +697,7 @@ class DesktopWorkbench:
                 if (variable := getattr(self.app, role + '_var', None)) is not None
                 and variable.get() and Path(variable.get()).is_file()}
 
-    def open_review_workbook(self):
+    def open_review_workbook(self, *, destination="decision"):
         """Load an already generated workbook for local editing, without rerunning collection."""
         import re
         from quote_app.domain.models import QuoteMonth
@@ -730,7 +735,7 @@ class DesktopWorkbench:
             return
         self._review_session, self._review_manual = session, True
         self.review_product_id = None
-        self.show_page("decision")
+        self.show_page(destination)
 
     def _navigate_key(self, _event=None, *, page, tab=None):
         if tab is not None:
@@ -1232,7 +1237,7 @@ class DesktopWorkbench:
             label(item, name, size=10, color=MUTED, anchor="center").pack(pady=(3, 0))
         label(
             about,
-            "报价决策智能体     ·     Mac .170 逻辑基线     ·     本地运行",
+            "报价协同智能体     ·     Mac .170 逻辑基线     ·     本地运行",
             size=11,
             color=MUTED,
         ).pack(anchor="w", pady=(8, 0))
@@ -1244,6 +1249,13 @@ class DesktopWorkbench:
             size=10,
             color=MUTED,
         ).pack(anchor="w", pady=(6, 0))
+
+        ai = card(content, padx=20, pady=18)
+        ai.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        label(ai, "AI 模型服务", size=17, bold=True).pack(anchor="w")
+        label(ai, "服务地址、模型与 Key 仅在本机配置；AI 只产生建议。", size=11, color=MUTED).pack(anchor="w", pady=10)
+        from quote_app.desktop_ai import show_ai_settings
+        button(ai, "配置模型与本机 Key", lambda: show_ai_settings(self)).pack(anchor="w")
 
     def _workbench(self):
         split = tk.Frame(self.body, bg=BG)
@@ -1585,13 +1597,16 @@ class DesktopWorkbench:
                 **({"tone": icon_color} if isinstance(icon_widget, IconMedallion) else {}),
             )
         self.task_status.configure(text=self.model.summary)
-        if self.page in {"decision", "audit"} and self._review_view is not None:
+        if self.page in {"decision", "audit", "ai_summary"} and self._review_view is not None:
             if not self._review_manual and self._current_review_key() != self._review_key:
                 self.show_page(self.page)
                 return
             month = self._review_session.month
             self.period.configure(text=f"{month.year}年{month.month}月报价" +
                                   (f" · {brand}" if self.page == "audit" else ""))
+            if self.page == "ai_summary":
+                self._review_view.refresh()
+                return
             self.start_button.configure(
                 text="导出稽核报告" if self.page == "audit" else "返回商品清单",
                 command=self._review_view.export_report

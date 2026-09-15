@@ -1,0 +1,19 @@
+# AI 智能总结 implementation plan
+
+Spec: User approved deep navy AI summary design and app name 报价协同智能体. Four sections only: AI批次总结、价格情报理解、报价方案推理、稽核异常分析. AI only advises and never modifies quotes, workbook, evidence or audit results. Existing app paths and bundle identifier stay unchanged.
+
+Architecture: separate readonly snapshot, local settings + HTTP gateway, native Tk view. Plain immutable request data goes to worker; all Tk work stays main thread. User explicitly generates analysis; no background uploads. Key outside repository and package, masked input. Company endpoint/model/Key remain solely in local app settings, not source or package; use configurable OpenAI-compatible chat transport, actual compatibility pending live verification.
+
+### Task 1: Local settings and model gateway
+Own only src/quote_app/services/ai_gateway.py and tests/test_ai_gateway.py. No subagents. TDD. No commits needed until controller review.
+API contract:
+- AISettings(base_url default empty, model default empty, api_key default '', repr=False secret), ready property; load_settings(path:Path)->AISettings; save_settings(path,settings) atomic owner-only file, refuse symlink, don't alter parent modes except newly created dir. On corrupt config raise AIError safe message (no values).
+- AIError exception, generate_analysis(settings, payload:dict, system_prompt:str)->dict. payload includes snapshot_id and sources dict. POST /chat/completions (BaseURL /v1), Authorization Bearer, model, messages system/user JSON, no tools/stream. HTTPS only except localhost127.0.0.1/::1 HTTP for local runtimes/tests; URL no credentials/queryfragment. Block redirects, timeout 90sec, cap request 500KB response 1MB, safe error text never key or response bodies. Handle unauthorized/timeouts/invalidURL/badJSON/schema with actionable Chinese safe errors.
+- Return {analysis: validated JSON, model: configured model, generated_at: ISO timestamp, elapsed_seconds: float, usage: validated numeric token counts}. Snapshot_id matches; 4 ordered section IDs batch market pricing risk, canonical Chinese titles, overall_conclusion str max300, priorities<=3 fields recommendation/rationale/conditions(str max1500)/evidence_refs(array known sources keys). Sections summary str max500, paragraphs array1..6 of strings <=3000each, limitations array<=2 str, evidence_refs known; forbid unknown refs or sections, tool calls, truncated responses, non-string content. Never execute returned text. Require meaningful nonempty conclusion/summary/text. JSON code fences may reject with retry guidance.
+Test private key absent repr/error, permissions/reload, local fake HTTP body auth/read-only contract, redirect not forwarded, malformed & stale/unknown source responses. Local client must never hold business/UI object or write business data. Do not connect real endpoint.
+
+### Task 2: Snapshot and native integration
+Controller owns ai_summary.py (snapshot/prompt), desktop_ai.py and desktop_ui/app minimal integration plus tests. Snapshot uses ReviewSession existing calculations, distinguishes missing price/no_model/check status, no writes and strips local paths/reviewer names. Stable digest over selected data, explicit unit/coverage/missing context. UI isolated under AI智能总结 after audit. Navy conclusion +3 colored priority cards+4 white insight cards. Local masked settings. No demo fallback. Asynchronous queue and stale results, no Tk in workers. Sources modal and fulltext modal are readonly. Preserve prior navigation shortcuts if possible. Rename outer brand only.
+
+### Task 3: Verification and local package
+Review production diff for spec and safety, run targeted unit/native tests and existing business checks. Verify own native UI screenshots. Package new 报价协同智能体 app with same bundleid and data directory, scan package for secret config inclusion. No GitHub publication requested in this task. Document actual provider call remains unverified until user supplies key locally.

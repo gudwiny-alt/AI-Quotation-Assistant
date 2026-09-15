@@ -15,3 +15,9 @@ output*/
 输出*/
 browser-profile/
 *.log
+
+# Local model credentials must never enter source control
+ai-settings.json
+ai-settings.*.json
+.env
+.env.*
