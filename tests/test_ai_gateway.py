@@ -44,7 +44,9 @@ def _analysis(snapshot_id: str = "snapshot-7") -> dict[str, Any]:
                 "id": section_id,
                 "title": title,
                 "summary": f"{title}摘要",
-                "paragraphs": [f"{title}分析内容"],
+                "paragraphs": [
+                    f"{title}：当前渠道价格存在差异，应结合采购条件和已知规则审视整批报价空间，未提供数量与费用时不估算整体利润。"
+                ],
                 "limitations": ["数据仅覆盖当前快照"],
                 "evidence_refs": ["quote_rows"],
             }
@@ -177,18 +179,21 @@ def test_posts_openai_compatible_read_only_request_and_returns_metadata() -> Non
     assert request["path"] == "/v1/chat/completions"
     assert request["headers"]["Authorization"] == "Bearer private-key"
     body = json.loads(request["body"])
-    assert body == {
-        "model": "local-model",
-        "messages": [
-            {"role": "system", "content": "只分析"},
-            {
-                "role": "user",
-                "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            },
-        ],
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
+    assert body["model"] == "local-model"
+    assert body["messages"][:2] == [
+        {"role": "system", "content": "只分析"},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {"snapshot_id": "snapshot-7", "sources": {"S001": [{"sku": "A", "price": 99}]}},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
+    assert body["stream"] is True
+    assert "response_format" not in body
+    assert body["stream_options"] == {"include_usage": True}
     assert result["analysis"] == _analysis()
     assert result["model"] == "local-model"
     assert result["usage"] == {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33}

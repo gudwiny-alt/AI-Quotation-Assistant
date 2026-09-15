@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from threading import Thread
 import time
 import tkinter as tk
@@ -25,9 +25,21 @@ NAVY = "#173B77"
 ACCENTS = ("#D98B16", "#2463EB", "#159987")
 
 
-def _request(settings, snapshot, queue, gateway):
+def _request(settings, snapshot, queue, gateway, progress_queue, diagnostic_path):
+    def progress(event):
+        try:
+            progress_queue.get_nowait()
+        except Empty:
+            pass
+        try:
+            progress_queue.put_nowait(event)
+        except Full:
+            pass
+
     try:
-        result = gateway(settings, snapshot, SYSTEM_PROMPT)
+        result = gateway(
+            settings, snapshot, SYSTEM_PROMPT, on_progress=progress, diagnostic_path=diagnostic_path
+        )
         queue.put((result, ""))
     except AIError as error:
         queue.put((None, str(error)))
@@ -46,17 +58,33 @@ class SummaryState:
         self.error = ""
         self.pending = None
         self.queue = Queue()
+        self.progress_queue = Queue(maxsize=1)
+        self.progress = {"stage": "waiting"}
         self.started_at = None
 
-    def start(self, settings, snapshot, *, gateway=generate_analysis):
+    def start(self, settings, snapshot, *, gateway=generate_analysis, diagnostic_path=None):
         if self.busy:
             return
         self.busy = True
         self.started_at = time.monotonic()
         self.error = ""
         self.pending = copy.deepcopy(snapshot)
+        self.progress = {"stage": "waiting"}
+        try:
+            self.progress_queue.get_nowait()
+        except Empty:
+            pass
         Thread(
-            target=_request, args=(settings, self.pending, self.queue, gateway), daemon=True
+            target=_request,
+            args=(
+                settings,
+                self.pending,
+                self.queue,
+                gateway,
+                self.progress_queue,
+                diagnostic_path,
+            ),
+            daemon=True,
         ).start()
 
     @property
@@ -64,6 +92,10 @@ class SummaryState:
         return max(0, int(time.monotonic() - self.started_at)) if self.started_at is not None else 0
 
     def collect(self):
+        try:
+            self.progress = self.progress_queue.get_nowait()
+        except Empty:
+            pass
         try:
             result, error = self.queue.get_nowait()
         except Empty:
@@ -295,9 +327,19 @@ class AISummaryView:
         except AIError:
             ready = False
         notice = self.state.error or self.snapshot_error
+        if self.state.error and self.state.progress.get("request_id"):
+            notice += f" 诊断编号：{self.state.progress['request_id']}"
         if self.state.busy:
             minutes, seconds = divmod(self.state.elapsed_seconds, 60)
-            notice = f"正在等待模型分析结果 · 已用时 {minutes} 分 {seconds} 秒。复杂批次可能需要数分钟，可切换页面继续工作。"
+            phase = self.state.progress.get("stage", "waiting")
+            status = {
+                "waiting": "正在等待模型服务响应",
+                "connected": "模型已连接，等待开始分析",
+                "thinking": "模型正在分析，已收到生成进度",
+                "receiving": f"正在接收分析结果 · 已接收 {self.state.progress.get('answer_chars', 0)} 字",
+                "validating": "分析接收完成，正在校验结果",
+            }.get(phase, "正在处理分析结果")
+            notice = f"{status} · 已用时 {minutes} 分 {seconds} 秒。可切换页面继续工作。"
         elif stale:
             notice = "当前数据已变化，以下为旧快照建议，请重新生成分析。" + (
                 " " + notice if notice else ""
@@ -345,7 +387,11 @@ class AISummaryView:
         if not settings.ready:
             show_ai_settings(self.workbench)
             return
-        self.state.start(settings, self.snapshot)
+        self.state.start(
+            settings,
+            self.snapshot,
+            diagnostic_path=settings_path(self.workbench).with_name("ai-requests.jsonl"),
+        )
         self._status()
 
     @staticmethod

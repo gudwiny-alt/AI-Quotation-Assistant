@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import http.client
 import json
 import os
 import socket
@@ -17,23 +19,15 @@ from pathlib import Path
 from typing import Any
 
 
+from .ai_protocol import AIError, SECTION_TITLES, read_response, output_contract
+from .ai_diagnostics import RequestTrace
+
 DEFAULT_BASE_URL = ""
 DEFAULT_MODEL = ""
 MAX_REQUEST_BYTES = 500 * 1024
-MAX_RESPONSE_BYTES = 1024 * 1024
 # Deep reasoning services can legitimately exceed 90s before returning headers.
 RESPONSE_TIMEOUT_SECONDS = 300
-SECTION_TITLES = {
-    "batch": "AI批次总结",
-    "market": "价格情报理解",
-    "pricing": "报价方案推理",
-    "risk": "稽核异常分析",
-}
 TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
-
-
-class AIError(Exception):
-    """A safe, user-facing model gateway error."""
 
 
 @dataclass(frozen=True)
@@ -119,7 +113,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def generate_analysis(
-    settings: AISettings, payload: dict[str, Any], system_prompt: str
+    settings: AISettings,
+    payload: dict[str, Any],
+    system_prompt: str,
+    *,
+    on_progress=None,
+    diagnostic_path=None,
 ) -> dict[str, Any]:
     if not settings.ready:
         raise AIError("请先填写模型地址、模型名称和 API 密钥。")
@@ -132,9 +131,10 @@ def generate_analysis(
     if not isinstance(system_prompt, str) or not system_prompt.strip():
         raise AIError("系统提示词不能为空。")
 
+    wire_payload, source_aliases = _wire_payload(payload)
     try:
         user_content = json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            wire_payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
         )
         request_body = json.dumps(
             {
@@ -142,9 +142,12 @@ def generate_analysis(
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
+                    {"role": "user", "content": output_contract(payload["snapshot_id"])},
                 ],
-                "stream": False,
-                "response_format": {"type": "json_object"},
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "thinking": {"type": "enabled"},
+                "max_tokens": 32768,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -161,39 +164,74 @@ def generate_analysis(
         headers={"Authorization": f"Bearer {settings.api_key}", "Content-Type": "application/json"},
         method="POST",
     )
-    started = time.monotonic()
+    trace = RequestTrace(diagnostic_path, on_progress)
+    trace.emit("waiting", request_bytes=len(request_body))
     try:
         with urllib.request.build_opener(_NoRedirect()).open(
             request, timeout=RESPONSE_TIMEOUT_SECONDS
         ) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-            if len(raw) > MAX_RESPONSE_BYTES:
-                raise AIError("模型响应超过 1MB，请缩小分析范围后重试。")
+            trace.emit("connected", http_status=getattr(response, "status", 200))
+            envelope = read_response(response, trace.started, trace.emit)
+        trace.emit("validating")
+        analysis, usage = _validate_envelope(
+            envelope, payload["snapshot_id"], set(sources), source_aliases
+        )
     except urllib.error.HTTPError as exc:
+        trace.emit(
+            "failed", error_code="http_error", http_status=exc.code, failed_stage=trace.stage
+        )
         if 300 <= exc.code < 400:
             raise AIError("模型服务返回重定向，已为保护密钥阻止请求。") from None
         if exc.code in (401, 403):
             raise AIError("模型服务拒绝访问，请检查 API 密钥。") from None
+        if exc.code == 400:
+            raise AIError(
+                "模型服务不接受本次参数（HTTP 400），请查看诊断记录并核对模型能力。"
+            ) from None
         raise AIError(f"模型服务请求失败（HTTP {exc.code}），请稍后重试。") from None
     except (TimeoutError, socket.timeout):
+        phase = trace.stage
+        trace.emit("failed", error_code="timeout", failed_stage=phase)
+        detail = "尚未收到服务端响应" if phase == "waiting" else "接收过程中长时间未收到后续数据"
         raise AIError(
-            f"模型服务响应等待超时（{RESPONSE_TIMEOUT_SECONDS} 秒），请稍后重试。"
+            f"模型服务响应等待超时（单次等待上限 {RESPONSE_TIMEOUT_SECONDS} 秒）：{detail}。"
         ) from None
-    except (urllib.error.URLError, OSError):
-        raise AIError("无法连接模型服务，请检查地址和网络。") from None
-
-    try:
-        envelope = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
-        raise AIError("模型服务返回的 JSON 无法解析，请重试。") from None
-    analysis, usage = _validate_envelope(envelope, payload["snapshot_id"], set(sources))
+    except (urllib.error.URLError, OSError, http.client.HTTPException):
+        trace.emit("failed", error_code="network_error", failed_stage=trace.stage)
+        raise AIError("模型服务连接中断，请检查地址和网络；本次分析未完成。") from None
+    except AIError:
+        trace.emit("failed", error_code="validation_error", failed_stage=trace.stage)
+        raise
+    trace.emit("complete")
     return {
         "analysis": analysis,
         "model": settings.model,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "elapsed_seconds": round(time.monotonic() - trace.started, 3),
         "usage": usage,
+        "request_id": trace.request_id,
     }
+
+
+def _wire_payload(payload):
+    """Short, lossless reference IDs avoid requiring models to copy long hashes."""
+    aliases = {ref: f"S{index:03d}" for index, ref in enumerate(payload["sources"], 1)}
+    wire = copy.deepcopy(payload)
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "ref" and isinstance(child, str) and child in aliases:
+                    value[key] = aliases[child]
+                else:
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(wire)
+    wire["sources"] = {aliases[ref]: label for ref, label in wire["sources"].items()}
+    return wire, {alias: ref for ref, alias in aliases.items()}
 
 
 def _endpoint(base_url: str) -> str:
@@ -214,7 +252,7 @@ def _endpoint(base_url: str) -> str:
 
 
 def _validate_envelope(
-    envelope: Any, snapshot_id: str, known_sources: set[str]
+    envelope: Any, snapshot_id: str, known_sources: set[str], source_aliases=None
 ) -> tuple[dict[str, Any], dict[str, int]]:
     try:
         choice = envelope["choices"][0]
@@ -238,6 +276,16 @@ def _validate_envelope(
         analysis = json.loads(content)
     except json.JSONDecodeError:
         raise AIError("模型分析不是有效 JSON，请重试。") from None
+    if source_aliases and isinstance(analysis, dict):
+        for name in ("management_priorities", "sections"):
+            entries = analysis.get(name)
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, dict) and isinstance(entry.get("evidence_refs"), list):
+                        entry["evidence_refs"] = [
+                            source_aliases.get(ref, ref) if isinstance(ref, str) else ref
+                            for ref in entry["evidence_refs"]
+                        ]
     _validate_analysis(analysis, snapshot_id, known_sources)
     usage_value = envelope.get("usage", {})
     if not isinstance(usage_value, dict):
@@ -292,6 +340,8 @@ def _validate_analysis(value: Any, snapshot_id: str, known_sources: set[str]) ->
             raise AIError("模型板块正文格式无效，请重试。")
         for paragraph in paragraphs:
             _meaningful(paragraph, 3000, "板块正文")
+        if sum(character.isalnum() for paragraph in paragraphs for character in paragraph) < 30:
+            raise AIError("模型板块正文过短，未形成完整业务分析，请重新生成。")
         limitations = section["limitations"]
         if not isinstance(limitations, list) or len(limitations) > 2:
             raise AIError("模型局限说明格式无效，请重试。")

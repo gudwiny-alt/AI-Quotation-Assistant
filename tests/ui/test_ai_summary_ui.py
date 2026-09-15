@@ -60,7 +60,7 @@ def test_late_reply_is_not_current_after_price_changes(workbench, session):
 def test_worker_failure_arrives_as_safe_error_without_tk_reference():
     import time
 
-    def fail(*_):
+    def fail(*_, **kwargs):
         raise RuntimeError("secret-key-never-show")
 
     state = SummaryState()
@@ -91,7 +91,7 @@ def test_successful_generation_and_local_key_settings(workbench, session, tmp_pa
     page = workbench._review_view
     state = workbench._ai_state
 
-    def fake(settings, snapshot, _prompt):
+    def fake(settings, snapshot, _prompt, **kwargs):
         return {
             "analysis": {
                 "snapshot_id": snapshot["snapshot_id"],
@@ -221,3 +221,19 @@ def test_waiting_notice_displays_elapsed_time_without_claiming_completion(workbe
     state.busy = False
     page._status()
     assert "正在等待" not in page.notice.cget("text")
+
+
+def test_stream_status_shows_actual_reception_and_keeps_generation_disabled(workbench, session):
+    workbench._review_session = session
+    workbench._review_manual = True
+    workbench.show_page("ai_summary")
+    state = workbench._ai_state
+    state.busy = True
+    state.progress = {"stage": "thinking", "reasoning_chars": 123}
+    page = workbench._review_view
+    page._status()
+    assert "模型正在分析" in page.notice.cget("text")
+    state.progress = {"stage": "receiving", "answer_chars": 456}
+    page._status()
+    assert "456" in page.notice.cget("text") and "接收" in page.notice.cget("text")
+    assert workbench.start_button.cget("state") == "disabled"

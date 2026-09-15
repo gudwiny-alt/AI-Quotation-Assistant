@@ -1,5 +1,5 @@
 {
-  "modules_verified": 99,
+  "modules_verified": 101,
   "modules": [
     "quote_app",
     "quote_app.app",
@@ -46,8 +46,10 @@
     "quote_app.paths",
     "quote_app.resources",
     "quote_app.services",
+    "quote_app.services.ai_diagnostics",
     "quote_app.services.ai_gateway",
     "quote_app.services.ai_prompt",
+    "quote_app.services.ai_protocol",
     "quote_app.services.ai_summary",
     "quote_app.services.channel_audit",
     "quote_app.services.core_pipeline",
