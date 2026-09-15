@@ -202,3 +202,22 @@ def test_ai_responsive_cards_and_scroll_reach_footer(workbench, session, geometr
         page.footer.winfo_rooty() + page.footer.winfo_height()
         <= canvas.winfo_rooty() + canvas.winfo_height() + 2
     )
+
+
+def test_waiting_notice_displays_elapsed_time_without_claiming_completion(workbench, session):
+    import time
+
+    workbench._review_session = session
+    workbench._review_manual = True
+    workbench.show_page("ai_summary")
+    state = workbench._ai_state
+    state.busy = True
+    state.started_at = time.monotonic() - 124
+    page = workbench._review_view
+    page._status()
+    assert "2 分 4 秒" in page.notice.cget("text")
+    assert "正在等待" in page.notice.cget("text")
+    assert workbench.start_button.cget("state") == "disabled"
+    state.busy = False
+    page._status()
+    assert "正在等待" not in page.notice.cget("text")

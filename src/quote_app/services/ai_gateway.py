@@ -21,6 +21,8 @@ DEFAULT_BASE_URL = ""
 DEFAULT_MODEL = ""
 MAX_REQUEST_BYTES = 500 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
+# Deep reasoning services can legitimately exceed 90s before returning headers.
+RESPONSE_TIMEOUT_SECONDS = 300
 SECTION_TITLES = {
     "batch": "AI批次总结",
     "market": "价格情报理解",
@@ -142,6 +144,7 @@ def generate_analysis(
                     {"role": "user", "content": user_content},
                 ],
                 "stream": False,
+                "response_format": {"type": "json_object"},
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -160,7 +163,9 @@ def generate_analysis(
     )
     started = time.monotonic()
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=90) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(
+            request, timeout=RESPONSE_TIMEOUT_SECONDS
+        ) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise AIError("模型响应超过 1MB，请缩小分析范围后重试。")
@@ -171,7 +176,9 @@ def generate_analysis(
             raise AIError("模型服务拒绝访问，请检查 API 密钥。") from None
         raise AIError(f"模型服务请求失败（HTTP {exc.code}），请稍后重试。") from None
     except (TimeoutError, socket.timeout):
-        raise AIError("模型服务请求超时（90 秒），请稍后重试。") from None
+        raise AIError(
+            f"模型服务响应等待超时（{RESPONSE_TIMEOUT_SECONDS} 秒），请稍后重试。"
+        ) from None
     except (urllib.error.URLError, OSError):
         raise AIError("无法连接模型服务，请检查地址和网络。") from None
 

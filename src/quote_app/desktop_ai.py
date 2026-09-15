@@ -46,16 +46,22 @@ class SummaryState:
         self.error = ""
         self.pending = None
         self.queue = Queue()
+        self.started_at = None
 
     def start(self, settings, snapshot, *, gateway=generate_analysis):
         if self.busy:
             return
         self.busy = True
+        self.started_at = time.monotonic()
         self.error = ""
         self.pending = copy.deepcopy(snapshot)
         Thread(
             target=_request, args=(settings, self.pending, self.queue, gateway), daemon=True
         ).start()
+
+    @property
+    def elapsed_seconds(self):
+        return max(0, int(time.monotonic() - self.started_at)) if self.started_at is not None else 0
 
     def collect(self):
         try:
@@ -183,7 +189,7 @@ class AISummaryView:
         ).grid(row=0, column=1, padx=5)
         button(toolbar, "查看数据依据", self.show_sources).grid(row=0, column=2, padx=5)
         button(toolbar, "模型设置", lambda: show_ai_settings(workbench)).grid(row=0, column=3)
-        self.notice = label(self.content, "", size=-14, color=ACCENTS[0], bg=BG, justify="left")
+        self.notice = self._wrapped(self.content, "", -14, color=ACCENTS[0], bg=BG)
         self.notice.grid(row=1, column=0, sticky="ew", pady=(0, 9))
         hero = tk.Frame(self.content, bg=NAVY, padx=24, pady=22)
         hero.grid(row=2, column=0, sticky="ew")
@@ -290,7 +296,8 @@ class AISummaryView:
             ready = False
         notice = self.state.error or self.snapshot_error
         if self.state.busy:
-            notice = "正在生成分析，可继续查看其他页面；本次请求使用点击时的数据快照。"
+            minutes, seconds = divmod(self.state.elapsed_seconds, 60)
+            notice = f"正在等待模型分析结果 · 已用时 {minutes} 分 {seconds} 秒。复杂批次可能需要数分钟，可切换页面继续工作。"
         elif stale:
             notice = "当前数据已变化，以下为旧快照建议，请重新生成分析。" + (
                 " " + notice if notice else ""
@@ -318,6 +325,12 @@ class AISummaryView:
         if self.state.collect():
             self.refresh(force=True)
             self.render()
+        elif (
+            self.state.busy
+            and getattr(self, "_last_wait_second", None) != self.state.elapsed_seconds
+        ):
+            self._last_wait_second = self.state.elapsed_seconds
+            self._status()
         self.after_id = self.workbench.root.after(250, self._poll)
 
     def generate(self):

@@ -187,6 +187,7 @@ def test_posts_openai_compatible_read_only_request_and_returns_metadata() -> Non
             },
         ],
         "stream": False,
+        "response_format": {"type": "json_object"},
     }
     assert result["analysis"] == _analysis()
     assert result["model"] == "local-model"
@@ -374,3 +375,37 @@ def test_new_install_has_no_bundled_provider_or_credentials(tmp_path):
     settings = load_settings(tmp_path / "ai-settings.json")
     assert settings.base_url == settings.model == settings.api_key == ""
     assert not settings.ready
+
+
+def test_deep_analysis_can_finish_after_the_old_90_second_limit(monkeypatch):
+    """The company service completed the unchanged real request at 124 seconds."""
+    from io import BytesIO
+    import urllib.request
+
+    class DelayedService:
+        def open(self, request, timeout):
+            if timeout < 124:
+                raise TimeoutError("simulated server still generating at 90 seconds")
+            return BytesIO(json.dumps(_response()).encode())
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_: DelayedService())
+    result = generate_analysis(
+        AISettings("https://example.test/v1", "model", "secret"), _payload(), "prompt"
+    )
+    assert result["analysis"]["snapshot_id"] == _payload()["snapshot_id"]
+
+
+def test_timeout_remains_bounded_and_error_matches_configured_wait(monkeypatch):
+    import urllib.request
+
+    class StalledService:
+        def open(self, request, timeout):
+            assert timeout == 300
+            raise TimeoutError("secret must not appear")
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_: StalledService())
+    with pytest.raises(AIError, match="300 秒") as caught:
+        generate_analysis(
+            AISettings("https://example.test/v1", "model", "secret"), _payload(), "prompt"
+        )
+    assert "secret" not in str(caught.value)
