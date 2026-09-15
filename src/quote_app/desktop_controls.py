@@ -115,6 +115,8 @@ class SoftSelect(SoftButton):
         self._destroying = False
         self._outside_binding = None
         self._focus_check = None
+        self._previous_grab = None
+        self._previous_grab_status = None
         self.leading = icon
         self.art = Artwork(parent.winfo_toplevel())
         self.chevron = self.art.get("ui-icons/chevron-down-muted", 16)
@@ -176,6 +178,7 @@ class SoftSelect(SoftButton):
         self.popup.configure(bg=LINE, padx=1, pady=1)
         self.popup.bind("<Escape>", lambda e: self.close_popup())
         self.popup.bind("<FocusOut>", self._defer_focus_check)
+        self.popup.bind("<ButtonPress-1>", self._outside, add="+")
         self._outside_binding = top.bind("<ButtonPress-1>", self._outside, add="+")
         return self.popup
 
@@ -188,6 +191,18 @@ class SoftSelect(SoftButton):
         popup.geometry(f"{width}x{height}+{x}+{y}")
         popup.deiconify()
         popup.lift()
+        current = self.grab_current()
+        if current is not None and current is not popup:
+            # A modal dialog's grab excludes events for this separate window.
+            # Borrow it while the dropdown is open, then return it on dismissal.
+            self._previous_grab = current
+            self._previous_grab_status = current.grab_status()
+            if self.tk.call("tk", "windowingsystem") == "aqua":
+                # Like a native popup menu, receive the outside click as well.
+                # An Aqua local grab alone drops clicks in the parent window.
+                popup.grab_set_global()
+            else:
+                popup.grab_set()
         focus.focus_set()
         self._draw()
 
@@ -264,8 +279,18 @@ class SoftSelect(SoftButton):
         return False
 
     def _outside(self, event):
-        if not self._inside(event.widget, self) and not self._inside(event.widget, self.popup):
-            self.close_popup(restore=False)
+        if self._inside(event.widget, self):
+            return
+        popup = self.popup
+        if popup and self._inside(event.widget, popup):
+            # Under a grab, Tk redirects clicks outside the popup to the popup.
+            if (popup.winfo_rootx() <= event.x_root < popup.winfo_rootx() + popup.winfo_width()
+                    and popup.winfo_rooty() <= event.y_root < popup.winfo_rooty() + popup.winfo_height()):
+                return
+        top = self.winfo_toplevel()
+        in_dialog = (top.winfo_rootx() <= event.x_root < top.winfo_rootx() + top.winfo_width()
+                     and top.winfo_rooty() <= event.y_root < top.winfo_rooty() + top.winfo_height())
+        self.close_popup(restore=self._previous_grab is not None and in_dialog)
 
     def _defer_focus_check(self, _event):
         if self._destroying or not self.popup:
@@ -292,7 +317,20 @@ class SoftSelect(SoftButton):
             self._outside_binding = None
         if self.popup:
             popup, self.popup = self.popup, None
+            owns_grab = self.grab_current() is popup
+            previous, status = self._previous_grab, self._previous_grab_status
+            self._previous_grab = self._previous_grab_status = None
             popup.destroy()
+            if owns_grab and previous is not None:
+                try:
+                    if previous.winfo_exists():
+                        if status == "global":
+                            previous.grab_set_global()
+                        else:
+                            previous.grab_set()
+                except tk.TclError:
+                    # The parent dialog may itself be in the process of closing.
+                    pass
             if restore and self.winfo_exists():
                 # Closing a borderless popup on macOS can deactivate its parent window.
                 # Restore only for explicit selection/cancel, never external focus loss.
