@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 from PIL import Image, ImageTk
 
 from quote_app.resources import bundled_resource_path
+from quote_app.browser.channel_detection import BrowserNotFoundError, detect_browser_choice
+from quote_app.services.readiness import ReadinessCheck
 from quote_app.desktop_controls import MonthPicker, SoftEntry, SoftSelect, SoftScrolledText
 from quote_app.desktop_scrolling import bind_scrolling, scroll_canvas
 from quote_app.desktop_widgets import (
@@ -180,6 +182,7 @@ class DesktopWorkbench:
         self._review_manual = False
         self._review_view = None
         self.review_product_id = None
+        self._environment_states = {}
         self._configure_styles()
         self.root.title(title)
         startup_height = min(1020, max(720, self.root.winfo_screenheight() - 100))
@@ -666,6 +669,9 @@ class DesktopWorkbench:
             self.task_status.grid()
         self.refresh()
 
+        if page == "settings":
+            self.app.check_readiness()
+
     def _review_context(self):
         from quote_app.domain.models import QuoteMonth
 
@@ -1136,6 +1142,60 @@ class DesktopWorkbench:
         if path:
             self._open_path(path)
 
+    def update_readiness(self, readiness: ReadinessCheck | None):
+        """Keep a read-only display snapshot; never alter quotation preflight rules."""
+        items = {item.key: item for item in readiness.items} if readiness is not None else {}
+        states = {}
+        try:
+            browser = detect_browser_choice()
+            if browser.browser_name == "chrome":
+                detail = f"已检测到 Google Chrome：\n{browser.executable_path}"
+                profile = items.get("browser_profile")
+                if profile is not None:
+                    detail += "\n\n" + (profile.label if profile.ready else
+                                         profile.failure_message or profile.label)
+                states["chrome"] = ("已检测", "green", detail)
+            else:
+                states["chrome"] = ("未检测到", "orange", "未检测到 Chrome；当前可用浏览器为 Edge。")
+        except BrowserNotFoundError:
+            states["chrome"] = ("未检测到", "orange", "未检测到本机 Google Chrome，请安装后重新检测。")
+        except Exception:
+            states["chrome"] = ("检测失败", "orange", "无法确认浏览器安装状态，请重新检测。")
+        for key in ("screen_capture", "accessibility"):
+            item = items.get(key)
+            if sys.platform != "darwin":
+                states[key] = ("不适用", "muted", "此项为 macOS 系统权限，当前系统无需配置。")
+            elif readiness is None:
+                states[key] = ("检测失败", "orange", "本次未能读取系统权限，请重新检测。")
+            elif item is None:
+                states[key] = ("未检测", "muted", "本次检测未返回此项权限结果。")
+            elif item.ready:
+                states[key] = ("已授权", "green", f"当前运行进程已获得{item.label}。")
+            else:
+                states[key] = ("未授权", "orange", item.failure_message or item.label)
+        self._environment_states = states
+        self._render_environment_status()
+
+    def _render_environment_status(self):
+        if self.page != "settings":
+            return
+        for key, widget in self.environment_status_labels.items():
+            text, tone, _ = self._environment_states.get(key, ("未检测", "muted", ""))
+            widget.configure(text=text, fg={"green": GREEN, "orange": ORANGE}.get(tone, MUTED))
+            icon = "circle-check" if tone == "green" else "triangle-alert" if tone == "orange" else "clock"
+            self.environment_status_icons[key].configure(image=self._icon(icon, tone, 23) or "")
+
+    def _show_environment_detail(self, key):
+        titles = {"chrome": "Google Chrome 检测结果", "screen_capture": "屏幕录制权限",
+                  "accessibility": "辅助功能权限"}
+        _, _, detail = self._environment_states.get(key, ("未检测", "muted", "请先点击重新检测运行环境。"))
+        if key != "chrome" and sys.platform == "darwin":
+            section = "屏幕与系统音频录制（或屏幕录制）" if key == "screen_capture" else "辅助功能"
+            detail += (f"\n\n前往 macOS「系统设置 → 隐私与安全性 → {section}」，"
+                       "为本软件开启权限。返回后点击「重新检测运行环境」。"
+                       "若系统提示重启应用，请重新打开本软件后再检测。")
+        messagebox.showinfo(titles[key], detail, parent=self.root)
+
     def _settings(self):
         content = self._scrollable(self.body)
         columns = tk.Frame(content, bg=BG)
@@ -1146,18 +1206,21 @@ class DesktopWorkbench:
         environment.grid(row=0, column=0, sticky="nsew", padx=(0, 13))
         environment.columnconfigure(0, weight=1)
         label(environment, "运行环境", size=18, bold=True).grid(row=0, column=0, sticky="w")
-        label(environment, "浏览器与系统权限检查结果显示在下方日志。", size=11, color=MUTED).grid(
+        label(environment, "检查浏览器与系统权限，确认当前运行状态。", size=11, color=MUTED).grid(
             row=1, column=0, sticky="w", pady=(7, 17)
         )
-        for index, (icon, title, subtitle) in enumerate(
+        self.environment_status_labels = {}
+        self.environment_status_icons = {}
+        for index, (key, icon, title, subtitle) in enumerate(
             (
-                ("globe", "Google Chrome", "访问官网、京东与天猫获取价格"),
-                ("monitor", "屏幕录制权限", "保存真实网页截图作为取价证据"),
-                ("shield-check", "辅助功能权限", "用于网页窗口与截图流程"),
+                ("chrome", "globe", "Google Chrome", "访问电商网站获取价格信息"),
+                ("screen_capture", "monitor", "屏幕录制权限", "保存网页截图作为取价证据"),
+                ("accessibility", "shield-check", "辅助功能权限", "控制浏览器窗口与页面操作"),
             )
         ):
             line = tk.Frame(environment, bg="#F5F8FD", padx=14, pady=13)
             line.grid(row=index + 2, column=0, sticky="ew", pady=3)
+            line.columnconfigure(1, weight=1)
             if title == "Google Chrome":
                 label(
                     line, image=self.artwork.get("ui-brands/chrome", 32) or "", bg="#F5F8FD"
@@ -1167,10 +1230,25 @@ class DesktopWorkbench:
                     row=0, column=0, rowspan=2, padx=(0, 14)
                 )
             label(line, title, size=13, bold=True, bg="#F5F8FD").grid(row=0, column=1, sticky="w")
-            label(line, subtitle, size=10, color=MUTED, bg="#F5F8FD").grid(
+            description = label(line, subtitle, size=10, color=MUTED, bg="#F5F8FD",
+                                wraplength=175, justify="left")
+            description.grid(
                 row=1, column=1, sticky="w", pady=(4, 0)
             )
-        button(environment, "检查运行环境", self.app.check_readiness).grid(
+            status = tk.Frame(line, bg="#F5F8FD")
+            status.grid(row=0, column=2, sticky="e", padx=(10, 0))
+            mark = self._icon_label(status, "clock", size=23, bg="#F5F8FD")
+            mark.pack(side="left", padx=(0, 5))
+            state = label(status, "未检测", size=11, color=MUTED, bg="#F5F8FD")
+            state.pack(side="left")
+            self.environment_status_labels[key] = state
+            self.environment_status_icons[key] = mark
+            button(line, "查看检测结果" if key == "chrome" else "权限说明",
+                   lambda key=key: self._show_environment_detail(key), padding=(8, 5)).grid(
+                row=1, column=2, sticky="e", padx=(10, 0), pady=(7, 0)
+            )
+        self._render_environment_status()
+        button(environment, "重新检测运行环境", self.app.check_readiness).grid(
             row=5, column=0, sticky="ew", pady=(15, 0)
         )
         storage = card(columns, padx=18, pady=20)

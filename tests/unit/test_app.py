@@ -431,6 +431,32 @@ def test_gui_schedules_readiness_check_when_desktop_opens() -> None:
     assert checked == [True]
 
 
+def test_readiness_publishes_rows_and_clears_stale_success_on_error(tmp_path):
+    from types import SimpleNamespace
+    from quote_app.app import QuoteApp
+    from quote_app.paths import build_app_paths
+    from quote_app.services.readiness import ReadinessCheck, ReadinessItem
+
+    app = object.__new__(QuoteApp)
+    app.app_paths = build_app_paths("Darwin", home=tmp_path)
+    app._widgets_available = lambda: True
+    statuses, published = [], []
+    app._set_status = statuses.append
+    app.workbench = SimpleNamespace(update_readiness=published.append)
+    expected = ReadinessCheck((ReadinessItem("screen_capture", "录屏权限", True),))
+    app.readiness_checker = lambda _: expected
+    app.check_readiness()
+    assert published == [expected]
+
+    def fail(_):
+        raise OSError("native check unavailable")
+
+    app.readiness_checker = fail
+    app.check_readiness()
+    assert published == [expected, None]
+    assert "检测失败" in statuses[-1]
+
+
 def test_gui_readiness_button_rechecks_and_shows_the_latest_state(
     tmp_path: Path,
 ) -> None:

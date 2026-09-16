@@ -543,7 +543,16 @@ class QuoteApp:
         """Render the current local capture and browser preflight state."""
         if not self._widgets_available():
             return
-        readiness = self._current_readiness()
+        workbench = getattr(self, "workbench", None)
+        try:
+            readiness = self._current_readiness()
+        except Exception:
+            if workbench is not None:
+                workbench.update_readiness(None)
+            self._set_status("运行环境检测失败，请重新检测；无法确认的权限不会显示为已授权。")
+            return
+        if workbench is not None:
+            workbench.update_readiness(readiness)
         self._readiness_check_count = (
             getattr(self, "_readiness_check_count", 0) + 1
         )
