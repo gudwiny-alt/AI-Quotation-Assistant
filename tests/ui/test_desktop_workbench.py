@@ -40,6 +40,7 @@ def workbench(tmp_path):
         "run",
         "continue_current_task",
         "cancel_manual_action",
+        "stop_and_export",
         "open_output_directory",
         "open_login_browser",
         "check_readiness",

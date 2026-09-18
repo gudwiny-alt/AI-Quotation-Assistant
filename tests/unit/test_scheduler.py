@@ -949,10 +949,15 @@ def test_pause_during_retry_delay_leaves_retryable_failure_resumable(
     _seed(repository, task)
     control = SchedulerControl()
     calls = 0
+    timer = threading.Timer(0.05, control.request_pause)
 
     def fail(_task, _token, _control):
         nonlocal calls
         calls += 1
+        if calls == 1:
+            # Start after the first attempt actually begins: slow database setup
+            # must not turn this retry-delay test into a pause-before-start test.
+            timer.start()
         raise RetryableTechnicalError("NETWORK_ERROR", "网络连接失败")
 
     scheduler = BrowserTaskScheduler(
@@ -962,8 +967,6 @@ def test_pause_during_retry_delay_leaves_retryable_failure_resumable(
         retry_policy=RetryPolicy(retry_delay_seconds=5),
         control=control,
     )
-    timer = threading.Timer(0.05, control.request_pause)
-    timer.start()
     try:
         scheduler.run_until_idle()
     finally:
@@ -1555,3 +1558,62 @@ def test_waiting_publication_and_manual_requeue_complete_without_lock_cycle(
     assert not worker.is_alive()
     assert repository.task_state(task.task_id) is TaskState.PENDING
     assert repository.waiting_site(task.task_id) is None
+
+
+def test_recovery_does_not_replay_82_exhausted_failures(tmp_path):
+    with SQLiteTaskRepository(tmp_path / 'retry.db') as repo:
+        repo.create_run(_run(tmp_path))
+        failed = [_task(f'failed-{n}', channel=WebsiteChannel.JD, output_row=n + 2) for n in range(82)]
+        pending = _task('pending', channel=WebsiteChannel.TMALL, output_row=90)
+        for task in [*failed, pending]:
+            repo.upsert_task(task)
+        for task in failed:
+            for _ in range(3):
+                token = repo.start_attempt(task.task_id)
+                repo.save_result(_technical_failure(task.task_id), token=token)
+        called = []
+        def attempt(task, token, control):
+            called.append(task.task_id)
+            return _success(tmp_path, task)
+        scheduler = BrowserTaskScheduler(repo, 'run-1', attempt)
+        scheduler.run_until_idle()
+        assert called == ['pending']
+        assert all(len(repo.list_attempts(t.task_id)) == 3 for t in failed)
+
+
+def test_channel_scope_cannot_collect_other_persisted_channels(tmp_path):
+    with SQLiteTaskRepository(tmp_path / 'scope.db') as repo:
+        repo.create_run(_run(tmp_path))
+        official = _task('official', channel=WebsiteChannel.OFFICIAL, output_row=2)
+        jd = _task('jd', channel=WebsiteChannel.JD, output_row=2)
+        for task in (official, jd):
+            repo.upsert_task(task)
+        seen = []
+        def attempt(task, token, control):
+            seen.append(task.channel)
+            return _success(tmp_path, task)
+        scheduler = BrowserTaskScheduler(repo, 'run-1', attempt)
+        scheduler.allowed_task_ids = frozenset({'official'})
+        scheduler.run_until_idle()
+        assert seen == [WebsiteChannel.OFFICIAL]
+        assert repo.task_state(jd.task_id) is TaskState.PENDING
+
+
+def test_restart_retains_only_one_remaining_technical_attempt(tmp_path):
+    database = tmp_path / 'remaining.db'
+    task = _task('last-retry', channel=WebsiteChannel.JD, output_row=2)
+    with SQLiteTaskRepository(database) as repo:
+        repo.create_run(_run(tmp_path))
+        repo.upsert_task(task)
+        for _ in range(2):
+            token = repo.start_attempt(task.task_id)
+            repo.save_result(_technical_failure(task.task_id), token=token)
+    with SQLiteTaskRepository(database) as repo:
+        seen = []
+        def failure(task, token, control):
+            seen.append(token.attempt_number)
+            return _technical_failure(task.task_id)
+        BrowserTaskScheduler(repo, 'run-1', failure,
+                             retry_policy=RetryPolicy(retry_delay_seconds=0)).run_until_idle()
+        assert seen == [3]
+        assert len(repo.list_attempts(task.task_id)) == 3

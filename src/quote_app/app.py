@@ -40,9 +40,10 @@ from quote_app.services.web_run import (
     run_website_tasks,
 )
 from quote_app.tasks.models import WebsiteChannel
+from quote_app.tasks.repository import SQLiteTaskRepository
 
 
-APP_BUILD_LABEL = "终端福建分公司报价协同智能体 2026.09.15.170"
+APP_BUILD_LABEL = "终端福建分公司报价协同智能体 2026.09.18.171"
 BETA_NOTICE = (
     "执行顺序：品牌官网、天猫、京东；遇到登录或验证页面时，人工登录完成后点击“继续当前任务”按钮。"
 )
@@ -449,30 +450,40 @@ class QuoteApp:
         if selected:
             variable.set(selected)
 
-    def run(self) -> None:
+    def run(self, *, resume_run_id: str | None = None, export_only: bool = False) -> None:
         if not self._widgets_available():
             return
         if self._pipeline_thread is not None and self._pipeline_thread.is_alive():
             self._set_status("自动报价正在运行，请等待当前任务完成")
             return
-        readiness = self._current_readiness()
-        if not readiness.ready:
+        if self._worker_is_running(getattr(self, "_website_thread", None)):
+            self._set_status("网站查价正在运行，请等待当前任务完成")
+            return
+        readiness = self._current_readiness() if resume_run_id is None else None
+        if readiness is not None and not readiness.ready:
             self._set_status(
                 "运行前检查未通过：" + "；".join(readiness.messages)
             )
             return
         self.open_button.configure(state="disabled")
         try:
-            request = make_run_request(
-                base=self.base_var.get(),
-                marketing=self.marketing_var.get(),
-                bop=self.bop_var.get(),
-                output_dir=self.output_dir_var.get(),
-                year=_as_optional_int(self.year_var.get()),
-                month=_as_optional_int(self.month_var.get()),
-            )
-            selected_brand = self._selected_brand_from_mode()
-            selected_channels = self._selected_channels_from_mode()
+            if resume_run_id is None:
+                request = make_run_request(
+                    base=self.base_var.get(), marketing=self.marketing_var.get(),
+                    bop=self.bop_var.get(), output_dir=self.output_dir_var.get(),
+                    year=_as_optional_int(self.year_var.get()),
+                    month=_as_optional_int(self.month_var.get()),
+                )
+                selected_brand = self._selected_brand_from_mode()
+                selected_channels = self._selected_channels_from_mode()
+            else:
+                with SQLiteTaskRepository(self.app_paths.task_database, recover_interrupted=False) as repo:
+                    saved = repo.load_run(resume_run_id)
+                    legacy_recovery = repo.recovery_context(resume_run_id) is None
+                paths = {f.source_role: f.path for f in saved.input_fingerprints}
+                request = RunRequest(InputPaths(paths['base'], paths['marketing'], paths['bop'],
+                                                saved.output_dir), saved.quote_month)
+                selected_brand = selected_channels = None
             controller = WebsiteRunController()
             self._website_controller = controller
             self._shown_manual_action_task_id = None
@@ -496,14 +507,21 @@ class QuoteApp:
                 selected_channels=selected_channels,
                 event_sink=queue_worker_event,
             )
-        except InputValidationError as error:
-            self._set_status(f"输入无效：{error}")
+            full_request = replace(full_request, resume_run_id=resume_run_id, export_only=export_only)
+        except Exception as error:
+            self._set_status(f"无法准备报价任务：{error}")
             return
         workbench = getattr(self, "workbench", None)
         if workbench is not None:
-            workbench.begin_run()
+            if resume_run_id is None:
+                workbench.begin_run()
+            else:
+                workbench.begin_recovery(saved, export_only=export_only)
         status = f"{APP_BUILD_LABEL}\n自动报价运行中"
-        status = f"{self._run_mode_status_prefix()}\n{status}"
+        status = (f"原批次 {resume_run_id}：" + ("正在校验并导出已有成果" if export_only else "正在校验并恢复未完成任务")
+                  if resume_run_id else f"{self._run_mode_status_prefix()}\n{status}")
+        if resume_run_id and legacy_recovery:
+            status += "\n旧版批次未保存完整渠道范围：仅恢复已登记任务，不补跑未知范围。"
         self._set_status(status)
 
         def work() -> None:
@@ -520,6 +538,19 @@ class QuoteApp:
         )
         self._pipeline_thread.start()
         self._schedule_pipeline_poll()
+
+    def recover_run(self, run_id: str, *, export_only: bool = False) -> None:
+        self.run(resume_run_id=run_id, export_only=export_only)
+
+    def stop_and_export(self) -> None:
+        if not self._widgets_available():
+            return
+        controller = getattr(self, "_website_controller", None)
+        if controller is None or not self._worker_is_running(getattr(self, "_pipeline_thread", None)):
+            self._set_status("当前没有运行中的报价任务；可在任务记录中仅导出已有成果")
+            return
+        controller.request_shutdown()
+        self._set_status("已请求停止并导出：当前采集步骤安全结束后停止，保留未完成任务供下次恢复。")
 
     def _selected_brand_from_mode(self) -> str | None:
         return self._selected_run_mode_scope().selected_brand
@@ -688,7 +719,7 @@ class QuoteApp:
             return
         self._set_manual_action_buttons(enabled=False)
         self._shown_manual_action_task_id = None
-        self._set_status("已取消本次网页任务；当前等待任务将保留，之后可重新开始报价")
+        self._set_status("已取消本次网页任务；当前等待任务将保留，之后可在任务记录中恢复未完成任务")
 
     def _render_manual_action_if_waiting(self) -> None:
         controller = getattr(self, "_website_controller", None)
@@ -705,11 +736,13 @@ class QuoteApp:
         )
 
     def _set_manual_action_buttons(self, *, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        for name in ("continue_button", "cancel_button"):
-            button = getattr(self, name, None)
-            if button is not None:
-                button.configure(state=state)
+        button = getattr(self, "continue_button", None)
+        if button is not None:
+            button.configure(state="normal" if enabled else "disabled")
+        stop = getattr(self, "cancel_button", None)
+        if stop is not None:
+            running = self._worker_is_running(getattr(self, "_pipeline_thread", None))
+            stop.configure(state="normal" if running else "disabled")
 
     def _schedule_pipeline_poll(self) -> None:
         if (

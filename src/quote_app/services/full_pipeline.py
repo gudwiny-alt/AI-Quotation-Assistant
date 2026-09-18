@@ -37,6 +37,7 @@ from quote_app.tasks.builder import (
     create_run_record,
 )
 from quote_app.tasks.models import (
+    RunState,
     TaskState,
     WebsiteChannel,
     WebsiteObservationCheckpoint,
@@ -77,6 +78,8 @@ class FullPipelineRequest:
     selected_brand: str | None = None
     selected_channels: frozenset[WebsiteChannel] | None = None
     event_sink: EventSink | None = None
+    resume_run_id: str | None = None
+    export_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +101,11 @@ def run_full_pipeline(
         raise TypeError("request must be a FullPipelineRequest")
     if not callable(website_runner):
         raise TypeError("website_runner must be callable")
+    if request.resume_run_id is not None:
+        from quote_app.services.recovery import recover_full_pipeline
+        return recover_full_pipeline(request, website_runner=website_runner)
+    if request.export_only:
+        raise ValueError("仅导出需要选择已有批次")
     selected_brand = _normalize_selected_brand(request.selected_brand)
     selected_channels = _normalize_selected_channels(request.selected_channels)
     if request.runtime_readiness is not None and not callable(
@@ -134,7 +142,14 @@ def run_full_pipeline(
     )
 
     with SQLiteTaskRepository(request.database_path) as repository:
-        repository.create_run(run)
+        repository.create_run(run, tasks=tasks, recovery_context={
+            "version": 1,
+            "task_ids": [task.task_id for task in tasks],
+            "evidence_dir": str(request.evidence_dir.resolve()),
+            "template_path": str(Path(request.template_path).resolve()),
+            "capture_acceptance_policy": request.capture_acceptance_policy.value,
+        })
+        repository.update_run_status(run.run_id, RunState.RUNNING)
 
     publisher = IncrementalExcelPublisher(
         quote_month=request.quote_month,
@@ -220,6 +235,9 @@ def run_full_pipeline(
         final_quote_path=output.quote_path,
         final_report_path=output.report_path,
     )
+    from quote_app.services.recovery import finish_run_status
+    finish_run_status(request.database_path, run.run_id, request.controller,
+                      output.quote_path, output.report_path)
     return FullPipelineResult(
         quote_path=output.quote_path,
         report_path=output.report_path,

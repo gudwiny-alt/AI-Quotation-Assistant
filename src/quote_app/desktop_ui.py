@@ -62,7 +62,7 @@ PAGES = (
     ("decision", "file-text", "报价决策智能体", "多源价格比较与报价规则处理"),
     ("audit", "shield-check", "稽核审查智能体", "证据核验与异常追溯"),
     ("ai_summary", "file-text", "AI 智能总结", "本批次业务执行、经营决策与风险分析"),
-    ("history", "history", "任务记录", "本机已保存任务 · 只读查看"),
+    ("history", "history", "任务记录", "查看执行记录 · 恢复未完成任务 · 导出已有成果"),
     ("settings", "settings", "系统设置", "浏览器登录、截图权限与本机存储"),
 )
 
@@ -375,9 +375,9 @@ class DesktopWorkbench:
         ).pack(side="left")
         self.sidebar_version = label(
             sidebar,
-            ".170 · UI 预览版  |  ⌘1–6 切页"
+            ".171 · 重启恢复版  |  ⌘1–6 切页"
             if sys.platform == "darwin"
-            else ".170 · UI 预览版  |  Ctrl 1–6",
+            else ".171 · 重启恢复版  |  Ctrl 1–6",
             color=MUTED,
             size=9,
             bg=SIDEBAR,
@@ -523,8 +523,8 @@ class DesktopWorkbench:
         )
         self.app.cancel_button = button(
             self.log_actions,
-            "取消网页任务",
-            self.app.cancel_manual_action,
+            "停止并导出",
+            self.app.stop_and_export,
             state="disabled",
             padding=(12, 6),
         )
@@ -1060,6 +1060,11 @@ class DesktopWorkbench:
         button(hint, "登录与权限  →", lambda: self.show_page("settings")).grid(
             row=0, column=1, rowspan=2, padx=(10, 0)
         )
+        button(hint, "恢复未完成任务  →", lambda: self.show_page("history")).grid(
+            row=2, column=0, sticky="w", pady=(10, 0)
+        )
+        label(hint, "重启后请从任务记录恢复；开始自动报价会新建批次。",
+              color=MUTED, size=10).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
     def _reports(self, content):
         label(content, "本次任务输出", size=18, bold=True, bg=BG).grid(
@@ -1570,6 +1575,7 @@ class DesktopWorkbench:
         self.refresh()
 
     def refresh(self):
+        self.app.cancel_button.configure(state="normal" if self.model.running else "disabled")
         rows = self.model.rows
         configuration = (
             self.app.year_var.get(),
@@ -1992,7 +1998,7 @@ class DesktopWorkbench:
         header = tk.Frame(panel, bg=WHITE)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 16))
         label(header, "本机任务记录", size=18, bold=True).pack(side="left")
-        label(header, "最近 200 次 · 只读查看", size=10, color=MUTED).pack(side="right")
+        label(header, "最近 200 次 · 可恢复原批次", size=10, color=MUTED).pack(side="right")
         filters = tk.Frame(panel, bg=WHITE)
         filters.grid(row=1, column=0, sticky="ew", pady=(0, 14))
         filters.columnconfigure(1, weight=1)
@@ -2038,7 +2044,7 @@ class DesktopWorkbench:
         self.history_title = label(detail, "选择批次查看记录", size=14, bold=True, bg="#F2F6FD")
         self.history_title.grid(row=0, column=0, sticky="w")
         self.history_meta = label(
-            detail, "历史查看不会恢复、取消或修改任务。", size=10, color=MUTED, bg="#F2F6FD"
+            detail, "选中原批次后恢复；仅导出不会重新采集。", size=10, color=MUTED, bg="#F2F6FD"
         )
         self.history_meta.grid(row=1, column=0, sticky="w", pady=(7, 0))
         self.history_detail_button = button(
@@ -2049,6 +2055,19 @@ class DesktopWorkbench:
             state="disabled",
         )
         self.history_detail_button.grid(row=0, column=1, rowspan=2, padx=(10, 0))
+        actions = tk.Frame(detail, bg="#F2F6FD")
+        actions.grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self.history_resume_button = button(
+            actions, "恢复未完成任务", lambda: self._recover_selected_run(), primary=True, state="disabled")
+        self.history_resume_button.pack(side="left")
+        self.history_export_button = button(
+            actions, "仅导出已有成果", lambda: self._recover_selected_run(export_only=True), state="disabled")
+        self.history_export_button.pack(side="left", padx=(12, 0))
+        recovery_hint = label(detail, "恢复前校验原输入与截图；跳过已完成项及耗尽重试的失败项。新成果另存，旧文件保留。",
+                              size=10, color=MUTED, bg="#F2F6FD", anchor="w", justify="left")
+        recovery_hint.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        recovery_hint.bind("<Configure>", lambda e: e.widget.configure(wraplength=max(120, e.width - 8)))
+
         self._trace_ids.append(
             (
                 self.history_query,
@@ -2113,14 +2132,22 @@ class DesktopWorkbench:
             None,
         )
         self.history_detail_button.configure(state="normal" if run else "disabled")
+        enabled = bool(run) and not self.model.running
+        self.history_resume_button.configure(state="normal" if enabled else "disabled")
+        self.history_export_button.configure(state="normal" if enabled else "disabled")
         self.history_title.configure(
             text=f"批次 · {run.created_at[:19].replace('T', ' ')}" if run else "选择批次查看记录"
         )
         self.history_meta.configure(
             text=f"{STATE_LABELS.get(run.state, run.state)}    ·    最近更新 {run.updated_at[:19].replace('T', ' ')}"
             if run
-            else "历史查看不会恢复、取消或修改任务。"
+            else "选中原批次后恢复；仅导出不会重新采集。"
         )
+
+    def _recover_selected_run(self, *, export_only=False):
+        selected = self.history_table.selection()
+        if selected and not self.model.running:
+            self.app.recover_run(selected[0], export_only=export_only)
 
     def _history_detail(self, tree):
         selected = tree.selection()
@@ -2226,6 +2253,23 @@ class DesktopWorkbench:
         )
         self.model.begin_run()
         self.show_page("intelligence")
+
+    def begin_recovery(self, run, *, export_only=False):
+        self.begin_run()
+        self._run_context = (str(run.quote_month.year), str(run.quote_month.month),
+                             "原批次范围", f"{datetime.now():%Y-%m-%d}")
+        self.model.run_id = run.run_id
+        self.model.rows, error = read_task_rows(self.app.app_paths.task_database, run.run_id)
+        self.model.summary = "正在导出已有成果" if export_only else "正在恢复原批次"
+        for variable, value in ((self.app.year_var, run.quote_month.year),
+                                (self.app.month_var, run.quote_month.month)):
+            variable.set(str(value))
+        for fingerprint in run.input_fingerprints:
+            getattr(self.app, fingerprint.source_role + "_var").set(str(fingerprint.path))
+        self.app.output_dir_var.set(str(run.output_dir))
+        if error:
+            self.append_log(error)
+        self.refresh()
 
     def apply_event(self, event: WorkerEvent):
         self.model.apply_event(event)

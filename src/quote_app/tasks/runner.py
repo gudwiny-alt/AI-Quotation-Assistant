@@ -310,6 +310,7 @@ class WebsiteTaskRunner:
         for task in ordered:
             self._ensure_task(task)
         self.repository.audit_evidence(self.run_id)
+        self.scheduler.allowed_task_ids = frozenset(task.task_id for task in ordered)
         self.scheduler.run_until_idle()
         results: list[WebsiteResult] = []
         for task in ordered:

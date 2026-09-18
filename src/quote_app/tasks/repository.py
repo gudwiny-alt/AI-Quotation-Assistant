@@ -6,7 +6,7 @@ import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
@@ -14,6 +14,7 @@ from typing import BinaryIO, Protocol, TypeVar, cast
 
 from quote_app.tasks.models import (
     RunRecord,
+    RunState,
     TaskState,
     WebsiteObservationCheckpoint,
     WebsiteResult,
@@ -24,6 +25,7 @@ from quote_app.tasks.serialization import PayloadError, from_payload, to_payload
 _T = TypeVar(
     "_T",
     RunRecord,
+    RunState,
     WebsiteTask,
     WebsiteObservationCheckpoint,
     WebsiteResult,
@@ -153,7 +155,7 @@ class _DatabaseLock:
 class SQLiteTaskRepository:
     """Single-owner, crash-safe local storage for browser task checkpoints."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, recover_interrupted: bool = True) -> None:
         if not isinstance(database_path, Path):
             raise ValueError("database_path must be a Path")
         self.database_path = database_path.expanduser().resolve()
@@ -167,7 +169,8 @@ class SQLiteTaskRepository:
             self._lock.acquire()
             self._closed = False
             self._initialize_schema()
-            self.recover_interrupted_tasks()
+            if recover_interrupted:
+                self.recover_interrupted_tasks()
         except BaseException:
             self._closed = True
             try:
@@ -189,7 +192,12 @@ class SQLiteTaskRepository:
         self._closed = True
         self._lock.close()
 
-    def create_run(self, run: RunRecord) -> None:
+    def create_run(
+        self, run: RunRecord, *, tasks: tuple[WebsiteTask, ...] = (),
+        recovery_context: dict | None = None,
+    ) -> None:
+        if any(task.run_id != run.run_id for task in tasks):
+            raise ValueError("任务必须属于当前批次")
         payload = _encode(run)
         with self._transaction() as connection:
             existing = connection.execute(
@@ -214,6 +222,45 @@ class SQLiteTaskRepository:
                     run.created_at.isoformat(),
                     run.updated_at.isoformat(),
                 ),
+            )
+
+            for task in tasks:
+                connection.execute(
+                    "INSERT INTO website_tasks(task_id, run_id, payload_json, state, "
+                    "attempt_count, waiting_site, generation, updated_at) "
+                    "VALUES (?, ?, ?, ?, 0, NULL, 0, ?)",
+                    (task.task_id, run.run_id, _encode(task), TaskState.PENDING.value,
+                     run.created_at.isoformat()),
+                )
+            if recovery_context is not None:
+                connection.execute(
+                    "INSERT INTO quotation_recovery_context(run_id, payload_json) VALUES (?, ?)",
+                    (run.run_id, json.dumps(recovery_context, ensure_ascii=False)),
+                )
+
+    def recovery_context(self, run_id: str) -> dict | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM quotation_recovery_context WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_tasks(self, run_id: str) -> tuple[WebsiteTask, ...]:
+        return self._select_tasks(run_id, tuple(TaskState))
+
+    def update_run_status(
+        self, run_id: str, state: RunState, *,
+        quote_path: Path | None = None, report_path: Path | None = None,
+    ) -> None:
+        run = self.load_run(run_id)
+        updated = replace(run, state=state, updated_at=_utc_now(),
+                          quote_path=quote_path or run.quote_path,
+                          report_path=report_path or run.report_path)
+        with self._transaction() as connection:
+            connection.execute(
+                "UPDATE quotation_runs SET payload_json=?, state=?, updated_at=? WHERE run_id=?",
+                (_encode(updated), state.value, updated.updated_at.isoformat(), run_id),
             )
 
     def load_run(self, run_id: str) -> RunRecord:
@@ -1080,6 +1127,7 @@ class SQLiteTaskRepository:
             if version == _DB_SCHEMA_VERSION:
                 connection.execute(_OBSERVATION_SCHEMA_STATEMENT)
                 self._verify_schema(connection)
+                connection.execute(_RECOVERY_CONTEXT_SCHEMA)
                 return
             existing_tables = {
                 cast(str, row["name"])
@@ -1096,6 +1144,7 @@ class SQLiteTaskRepository:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version={_DB_SCHEMA_VERSION}")
             self._verify_schema(connection)
+            connection.execute(_RECOVERY_CONTEXT_SCHEMA)
 
     def _verify_schema(self, connection: sqlite3.Connection) -> None:
         for table_name, expected_columns in _EXPECTED_COLUMNS.items():
@@ -1475,3 +1524,11 @@ def _stat_identity(stat: os.stat_result) -> tuple[int, int, int, int, int]:
         stat.st_mtime_ns,
         stat.st_ctime_ns,
     )
+
+
+_RECOVERY_CONTEXT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS quotation_recovery_context (
+    run_id TEXT PRIMARY KEY REFERENCES quotation_runs(run_id),
+    payload_json TEXT NOT NULL
+)
+"""

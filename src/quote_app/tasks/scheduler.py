@@ -140,6 +140,7 @@ class BrowserTaskScheduler:
         self.task_site_resolver = task_site_resolver
         self.stop_after_brand_issue = stop_after_brand_issue
         self.max_manual_verification_retries = max_manual_verification_retries
+        self.allowed_task_ids: frozenset[str] | None = None
         self._run_lock = threading.Lock()
         self._manual_lock = threading.Lock()
         self._waiting_action: ManualActionEvent | None = None
@@ -236,6 +237,11 @@ class BrowserTaskScheduler:
             self.control.request_stop()
             return True
 
+    def _in_scope(self, tasks: tuple[WebsiteTask, ...]) -> tuple[WebsiteTask, ...]:
+        if self.allowed_task_ids is None:
+            return tasks
+        return tuple(task for task in tasks if task.task_id in self.allowed_task_ids)
+
     def _eligible_tasks(self) -> tuple[WebsiteTask, ...]:
         if self.repository.select_waiting(self.run_id):
             return ()
@@ -245,7 +251,7 @@ class BrowserTaskScheduler:
             for task in self.repository.select_failed(self.run_id)
             if self._can_retry_persisted_failure(task.task_id)
         )
-        tasks = pending + failed
+        tasks = self._in_scope(pending + failed)
         if self.task_site_resolver is not None:
             waiting_sites = {
                 self._task_site(task)
@@ -264,7 +270,7 @@ class BrowserTaskScheduler:
         with self._manual_lock:
             if self._waiting_action is not None or self.control.manual_site is not None:
                 return
-            waiting = self.repository.select_waiting(self.run_id)
+            waiting = self._in_scope(self.repository.select_waiting(self.run_id))
             if not waiting:
                 return
             if len(waiting) != 1:

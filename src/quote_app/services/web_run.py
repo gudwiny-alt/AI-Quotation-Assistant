@@ -35,6 +35,7 @@ from quote_app.tasks.models import (
 from quote_app.tasks.repository import RepositoryError, SQLiteTaskRepository
 from quote_app.tasks.runner import WebsiteTaskRunner, task_sort_key
 from quote_app.tasks.scheduler import EventSink, ManualActionEvent
+from quote_app.tasks.retry import SchedulerControl
 
 RuntimeFactory = Callable[[AdapterRegistry], MacFormalCaptureRuntime]
 CheckpointSink = Callable[["WebsiteRunSnapshot"], None]
@@ -48,6 +49,7 @@ class WebsiteRunController:
         self._waiting_action: ManualActionEvent | None = None
         self._resolution: bool | None = None
         self._shutdown_requested = False
+        self.scheduler_control = SchedulerControl()
 
     @property
     def waiting_action(self) -> ManualActionEvent | None:
@@ -66,11 +68,16 @@ class WebsiteRunController:
 
     def request_shutdown(self) -> None:
         """Resolve current or future manual waits as cancellation."""
+        self.scheduler_control.request_stop()
         with self._condition:
             self._shutdown_requested = True
             if self._waiting_action is not None:
                 self._resolution = False
             self._condition.notify_all()
+
+    @property
+    def stopped(self) -> bool:
+        return self.scheduler_control.stopped
 
     def continue_current_task(self) -> None:
         self._resolve(True)
@@ -115,6 +122,7 @@ class WebsiteRunRequest:
     controller: WebsiteRunController | None = None
     event_sink: EventSink | None = None
     checkpoint_sink: CheckpointSink | None = None
+    snapshot_tasks: tuple[WebsiteTask, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.run_id, str) or not self.run_id.strip():
@@ -274,6 +282,8 @@ def run_website_tasks(
 
         combined_results: list[WebsiteResult] = []
         for phase_tasks, browser_session in phases:
+            if request.controller is not None and request.controller.stopped:
+                break
             phase_results, cancelled = _run_browser_phase(
                 request=request,
                 tasks=phase_tasks,
@@ -390,6 +400,7 @@ def _run_browser_phase(
             # A technical failure is recorded per task; it must not prevent
             # the next brand or the later JD phase from being processed.
             stop_after_brand_issue=False,
+            control=request.controller.scheduler_control if request.controller else None,
         )
         while True:
             phase_results = runner.run(tasks)
@@ -492,7 +503,7 @@ def _event_sink_for_request(
     if request.event_sink is None and request.checkpoint_sink is None:
         return None
     snapshot_index = (
-        _WebsiteRunSnapshotIndex(request.tasks, repository)
+        _WebsiteRunSnapshotIndex(request.snapshot_tasks or request.tasks, repository)
         if request.checkpoint_sink is not None
         else None
     )

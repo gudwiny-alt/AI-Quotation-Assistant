@@ -67,7 +67,7 @@ def test_beta_notice_describes_execution_order_and_manual_resume() -> None:
 def test_app_build_label_uses_the_approved_short_title() -> None:
     from quote_app.app import APP_BUILD_LABEL
 
-    assert APP_BUILD_LABEL == "终端福建分公司报价协同智能体 2026.09.15.170"
+    assert APP_BUILD_LABEL == "终端福建分公司报价协同智能体 2026.09.18.171"
 
 
 def test_desktop_full_request_reuses_per_user_browser_and_task_state(
@@ -333,7 +333,7 @@ def test_gui_build_shows_author_credit_and_uses_readonly_selectors(
     assert selectors[0]["values"] == ("全品牌", "荣耀", "小米", "OPPO", "vivo", "华为", "苹果")
     assert any(item.get("command") == app.run for item in widgets)
     assert any(item.get("command") == app.continue_current_task for item in widgets)
-    assert any(item.get("command") == app.cancel_manual_action for item in widgets)
+    assert any(item.get("command") == app.stop_and_export for item in widgets)
 
 
 @pytest.mark.parametrize("mode", ("全部品牌", "测试品牌"))
@@ -1477,3 +1477,62 @@ def test_gui_ignores_stale_completed_outcome_when_a_new_run_starts(
     assert "网站查价成功：2" in statuses[-1]
     assert "截图成功：2" in statuses[-1]
     assert "网站查价成功：1" not in statuses[-1]
+
+
+def test_stop_and_export_requests_shutdown_without_waiting_for_login():
+    from quote_app.app import QuoteApp
+    from quote_app.services.web_run import WebsiteRunController
+    app = object.__new__(QuoteApp)
+    app._widgets_available = lambda: True
+    app._pipeline_thread = SimpleNamespace(is_alive=lambda: True)
+    app._website_controller = WebsiteRunController()
+    messages = []
+    app._set_status = messages.append
+    app.stop_and_export()
+    assert app._website_controller.stopped
+    assert '导出' in messages[-1]
+
+
+def test_continuing_login_keeps_stop_available_while_worker_is_alive():
+    from quote_app.app import QuoteApp
+    app = object.__new__(QuoteApp)
+    app.continue_button = _GuiButton()
+    app.cancel_button = _GuiButton()
+    app._pipeline_thread = SimpleNamespace(is_alive=lambda: True)
+    app._set_manual_action_buttons(enabled=False)
+    assert app.continue_button.state == 'disabled'
+    assert app.cancel_button.state == 'normal'
+
+
+def test_restart_entry_uses_saved_inputs_and_month_without_current_form_or_browser_check(tmp_path):
+    from quote_app.app import QuoteApp
+    from quote_app.paths import build_app_paths
+    from quote_app.tasks.repository import SQLiteTaskRepository
+    from tests.unit.test_scheduler import _run
+    app = object.__new__(QuoteApp)
+    app.root = _GuiRoot()
+    app.app_paths = build_app_paths('Darwin', home=tmp_path / 'user')
+    saved = _run(tmp_path)
+    with SQLiteTaskRepository(app.app_paths.task_database) as repo:
+        repo.create_run(saved)
+    received, messages = [], []
+    app.pipeline = lambda request: received.append(request) or _result()
+    app.open_button = _GuiButton()
+    app._pipeline_results = queue.SimpleQueue()
+    app._pipeline_thread = None
+    app._pipeline_after_id = None
+    app._pipeline_generation = 0
+    app._active_pipeline_generation = None
+    app._closing = app._destroyed = False
+    app._widgets_available = lambda: True
+    app._set_status = messages.append
+    app.readiness_checker = lambda _: pytest.fail('仅导出不要求浏览器权限')
+    # No form variables exist: restart must be independent of current/new-run inputs.
+    app.recover_run(saved.run_id, export_only=True)
+    app._pipeline_thread.join(timeout=5)
+    app.root.run_next()
+    assert received[0].resume_run_id == saved.run_id
+    assert received[0].export_only is True
+    assert received[0].quote_month == saved.quote_month
+    assert received[0].paths.base == saved.input_fingerprints[0].path
+    assert any('旧版批次' in message for message in messages)
