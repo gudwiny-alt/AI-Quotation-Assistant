@@ -130,3 +130,18 @@ def test_system_permission_prompt_is_failed_evidence_not_approved_page():
     assert checks[-1].status == '未通过'
     assert '权限弹窗' in checks[-1].reason
     assert all(c.status == '未检查' for c in checks[:3])
+
+
+def test_huawei_rom_only_audit_uses_trusted_brand_and_approved_store():
+    from quote_app.services.channel_audit import inspect_channel
+    for channel,store,host in [('jd','华为京东自营官方旗舰店','item.jd.com'),('tmall','华为官方旗舰店','detail.tmall.com')]:
+        t=TaskRow('h',model_name='nova 16 SE',channel=channel,price='2699',state='succeeded',outcome='price_found',url='https://'+host+'/product')
+        scan=Recognition('done',store+'\nnova 16 SE\n256GB 天际白\n售价 ¥2699',1600,1000)
+        checks=inspect_channel(t,'nova 16 SE','8GB / 256GB / 天际白',scan,'2699',brand_name='华为')
+        assert checks[0].status == checks[1].status == '通过'
+        assert '未标 RAM' in checks[1].reason
+        for wrong in ['12GB+256GB 天际白','12GB运行内存 256GB 天际白','12+256GB 天际白','12G+256GB 天际白','12/256GB 天际白','内存RAM12 256GB 天际白','512GB 天际白','256GB 星空黑']:
+            changed=Recognition('done',scan.text.replace('256GB 天际白',wrong),1600,1000)
+            assert inspect_channel(t,'nova 16 SE','8GB / 256GB / 天际白',changed,'2699',brand_name='华为')[1].status == '待复核'
+        unknown=Recognition('done',scan.text.replace(store,'其他店铺'),1600,1000)
+        assert inspect_channel(t,'nova 16 SE','8GB / 256GB / 天际白',unknown,'2699',brand_name='华为')[1].status == '待复核'

@@ -1264,7 +1264,7 @@ def test_huawei_changxiang_90_pro_max_accepts_storage_only_capacity_group() -> N
     assert observation.price == Decimal("4399")
 
 
-def test_huawei_storage_only_capacity_rejects_wrong_fixed_ram() -> None:
+def test_huawei_explicit_ram_mismatch_is_rejected() -> None:
     task = _task(
         brand="华为",
         model_name="华为畅享 90 Pro Max",
@@ -1273,7 +1273,7 @@ def test_huawei_storage_only_capacity_rejects_wrong_fixed_ram() -> None:
         color="白色",
     )
     page = _FixturePage(
-        html=_huawei_storage_only_html(),
+        html=_huawei_storage_only_html().replace(">256GB<", ">8GB+256GB<"),
         after_search_url=(
             "https://huaweistore.tmall.com/"
             "?q=%E5%8D%8E%E4%B8%BA%E7%95%85%E4%BA%AB%2090%20Pro%20Max"
@@ -4185,3 +4185,83 @@ def test_honor_semantic_change_is_never_retried_as_geometry(monkeypatch):
     with pytest.raises(LayoutRecognitionError):
         adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('model,ram', [('nova 16 SE','8GB'),('nova 16','12GB'),('华为畅享 90 Plus','8GB')])
+def test_huawei_flagship_storage_only_uses_rom_when_ram_not_published(model, ram):
+    html = _huawei_storage_only_html().replace('华为畅享 90 Pro Max', model).replace('华为畅享90 Pro Max',model)
+    task = _task(brand='华为',model_name=model,ram=ram,storage='256GB',color='白色')
+    from urllib.parse import quote
+    page = _FixturePage(html=html,after_search_url='https://huaweistore.tmall.com/?q='+quote(model)+_LIVE_RESULTS_STATIC_QUERY)
+    assert TmallAdapter(_huawei_spec()).observe(task,cast(Any,page)).outcome is BusinessOutcome.PRICE_FOUND
+
+
+@pytest.mark.parametrize('label', ['天际白\n万人加购','天际白\n店长主推'])
+def test_tmall_color_badge_is_not_part_of_color_name(label):
+    from quote_app.sites.tmall import _tmall_color_matches
+    assert _tmall_color_matches('天际白',label)
+    assert not _tmall_color_matches('星空黑',label)
+    assert not _tmall_color_matches('天际白','天际白/星空黑\n万人加购')
+
+
+def _huawei_rom_only_title_case(title_capacity: str):
+    html = (_huawei_storage_only_html().replace('华为畅享 90 Pro Max', 'nova 16')
+            .replace('华为畅享90 Pro Max', 'nova 16')
+            .replace('<h1 class="ItemTitle--fixture">nova 16</h1>',
+                     '<h1 class="ItemTitle--fixture">nova 16 ' + title_capacity + '</h1>'))
+    task = _task(brand='华为', model_name='nova 16', ram='8GB', storage='256GB', color='白色')
+    page = _FixturePage(html=html, after_search_url=(
+        'https://huaweistore.tmall.com/?q=nova%2016' + _LIVE_RESULTS_STATIC_QUERY))
+    return TmallAdapter(_huawei_spec()), task, page
+
+
+@pytest.mark.parametrize('title_capacity', ['12GB+256GB', '12+256', '12GB内存 256GB', 'RAM12GB 256GB'])
+def test_huawei_rom_only_rejects_explicit_detail_title_ram(title_capacity):
+    adapter, task, page = _huawei_rom_only_title_case(title_capacity)
+    with pytest.raises(LayoutRecognitionError, match='RAM'):
+        adapter.observe(task, cast(Any, page))
+
+
+def test_huawei_rom_only_rechecks_title_ram_before_capture():
+    adapter, task, page = _huawei_rom_only_title_case('8GB+256GB')
+    observation = adapter.observe(task, cast(Any, page))
+    page.locator('[class^="ItemTitle--"]').nodes[0].text_parts = ['nova 16 12+256 白色']
+    with pytest.raises(LayoutRecognitionError):
+        adapter.verified_state_reader(task, cast(Any, page), observation.semantic_state)()
+
+
+def test_huawei_rom_only_checks_title_after_sku_selection(monkeypatch):
+    adapter, task, page = _huawei_rom_only_title_case('12GB+256GB')
+    click = page.click_option
+    def select_and_update_title(node):
+        click(node)
+        page.locator('[class^="ItemTitle--"]').nodes[0].text_parts = ['nova 16 8+256 白色']
+    monkeypatch.setattr(page, 'click_option', select_and_update_title)
+    assert adapter.observe(task, cast(Any, page)).outcome is BusinessOutcome.PRICE_FOUND
+
+
+@pytest.mark.parametrize(('fixture', 'outcome', 'role'), [
+    ('capacity_disabled.html', BusinessOutcome.CAPACITY_UNAVAILABLE, 'capacity'),
+    ('color_disabled.html', BusinessOutcome.COLOR_UNAVAILABLE, 'color'),
+])
+def test_data_disabled_sku_returns_legal_no_without_click(fixture, outcome, role):
+    html = (FIXTURES / fixture).read_text('utf-8').replace(
+        'class="tmall-option unavailable" aria-disabled="true"',
+        'class="tmall-option" data-disabled="true"',
+    )
+    page = _FixturePage(html=html)
+    task = _task()
+    adapter = TmallAdapter(_xiaomi_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    assert observation.outcome is outcome
+    assert observation.price is None
+    assert tuple(rect.role for rect in observation.css_rectangles) == (role,)
+    assert 'click:' + role not in page.option_events
+    assert adapter.verified_state_reader(task, cast(Any, page), observation.semantic_state)() == observation.semantic_state
+
+
+def test_data_disabled_false_sku_remains_selectable():
+    html = (FIXTURES / 'normal.html').read_text('utf-8').replace(
+        'class="tmall-option"', 'class="tmall-option" data-disabled="false"',
+    )
+    assert _observe(html=html).outcome is BusinessOutcome.PRICE_FOUND

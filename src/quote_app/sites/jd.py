@@ -15,6 +15,7 @@ from quote_app.sites.catalog import SiteSpec
 from quote_app.sites.detail_capture_view import (
     CaptureViewGeometryError,
     apply_capture_scale,
+    ensure_detail_seller_for_capture,
     fit_search_results_for_capture,
     position_detail_for_capture,
     position_result_cards_for_capture,
@@ -52,6 +53,7 @@ from quote_app.sites.matching import (
     color_matches,
     model_matches,
     normalize_product_text,
+    title_has_conflicting_ram,
 )
 from quote_app.sites.navigation import click_and_wait_for_navigation
 from quote_app.sites.prices import (
@@ -97,6 +99,7 @@ _JD_ITEM_PATH = re.compile(r"^/[0-9]+\.html$")
 _JD_STORE_SEARCH_PATH = re.compile(r"^/view_search-[0-9-]+\.html$")
 _JD_RESULT_MODEL_VARIANTS = (
     "PRO",
+    "SE",
     "PLUS",
     "ULTRA",
     "MAX",
@@ -1355,6 +1358,17 @@ class JDAdapter:
             upward_recovery_steps=6,
             preserve_ready_position=True,
         )
+        seller = unique_visible_locator(
+            browser_page,
+            (JD_MODERN_DETAIL_SELLER_MARKERS
+             if visible_locators(browser_page, JD_MODERN_DETAIL_TITLES)
+             else JD_DETAIL_SELLER_MARKERS),
+            semantic_name="capture seller",
+        )
+        ensure_detail_seller_for_capture(
+            browser_page, seller=seller, title=title, prices=prices,
+            capacity=capacity, color=color, site_name="JD",
+        )
 
     def restore_capture_view(
         self,
@@ -2210,6 +2224,19 @@ class JDAdapter:
                 and atomic_snapshot == previous
                 and transition_observed
             ):
+                if (_allows_huawei_storage_only_capacity(task) and any(
+                    is_selected and normalize_product_text(_modern_option_label(label))
+                    == normalize_product_text(task.storage)
+                    for label, is_selected in configuration
+                )):
+                    title = unique_visible_locator(
+                        page, JD_MODERN_DETAIL_TITLES,
+                        semantic_name="modern product detail title",
+                    )
+                    if title_has_conflicting_ram(title.inner_text(), task.ram):
+                        raise LayoutRecognitionError(
+                            "JD selected detail title has conflicting explicit RAM"
+                        )
                 return selected
             previous = atomic_snapshot
             page.wait_for_timeout(_POLL_INTERVAL_MS)
@@ -2655,34 +2682,32 @@ def _is_modern_capacity_label(value: str) -> bool:
     return _JD_MODERN_CAPACITY_LABEL.fullmatch(value.replace(" ", "")) is not None
 
 
-def _allows_fixed_ram_storage_only_capacity(task: WebsiteTask) -> bool:
-    """Allow storage-only JD labels for one Huawei model with fixed 8GB RAM."""
+def _allows_huawei_storage_only_capacity(task: WebsiteTask) -> bool:
+    """Approved Huawei self-operated pages may publish ROM without RAM."""
 
-    return (
-        normalize_product_text(task.brand) == "华为"
-        and normalize_product_text(task.model_name)
-        == normalize_product_text("华为畅享 90 Pro Max")
-        and normalize_product_text(task.ram) == "8GB"
-    )
+    return normalize_product_text(task.brand) == "华为"
 
 
 def _is_jd_modern_capacity_label(task: WebsiteTask, value: str) -> bool:
     label = _modern_option_label(value).replace(" ", "")
     if (
         normalize_product_text(task.brand) == "苹果"
-        or _allows_fixed_ram_storage_only_capacity(task)
+        or _allows_huawei_storage_only_capacity(task)
     ):
-        return _JD_STORAGE_ONLY_CAPACITY_LABEL.fullmatch(label) is not None
+        return (_JD_STORAGE_ONLY_CAPACITY_LABEL.fullmatch(label) is not None
+                or _is_modern_capacity_label(label))
     return _is_modern_capacity_label(label)
 
 
 def _jd_modern_capacity_matches(task: WebsiteTask, candidate: str) -> bool:
-    """Match Apple's storage-only JD buttons without weakening other brands."""
+    """Use explicit RAM+ROM first; permit unpublished RAM only for approved brands."""
 
     label = _modern_option_label(candidate)
+    if capacity_matches(label, task.ram, task.storage):
+        return True
     if (
         normalize_product_text(task.brand) == "苹果"
-        or _allows_fixed_ram_storage_only_capacity(task)
+        or _allows_huawei_storage_only_capacity(task)
     ):
         return normalize_product_text(label) == normalize_product_text(task.storage)
     return capacity_matches(label, task.ram, task.storage)
@@ -2877,9 +2902,9 @@ def _result_card_matches_configuration(card: Any, task: WebsiteTask) -> bool:
         return False
     model = re.escape(normalize_product_text(task.model_name)).replace(r"\ ", r"\s*")
     color = re.escape(normalize_product_text(task.color))
-    if _allows_fixed_ram_storage_only_capacity(task):
-        # The same narrowly scoped 8GB rule already validates this model's
-        # detail-page capacity options; JD's search titles also omit its RAM.
+    if _allows_huawei_storage_only_capacity(task):
+        # This approved store may omit RAM. The detail observer still verifies
+        # explicit capacity labels, selected configuration and store identity.
         storage = re.escape(normalize_product_text(task.storage))
         storage_only = rf"(?<![A-Z0-9]){model}\s+{storage}\s+{color}(?=\s|$)"
         if re.search(storage_only, title) is not None:

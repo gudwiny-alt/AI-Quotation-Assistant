@@ -222,6 +222,34 @@ def capacity_matches(label: str, ram: str, storage: str) -> bool:
     )
 
 
+def title_has_conflicting_ram(title: str, ram: str) -> bool:
+    """Detect published phone RAM, including JD's unitless 12+256 titles.
+
+    Storage-only titles are not evidence of RAM. Small GB amounts are RAM;
+    unitless pairs require a plausible ROM amount to avoid marketing 1+1.
+    """
+    normalized = normalize_product_text(title)
+    wanted = _requested_capacity(ram)
+    if wanted is None:
+        return True
+    amounts = [
+        Decimal(match[1])
+        for match in re.finditer(
+            r"(?<![\d.])(\d+(?:\.\d+)?)\s*GB(?![A-Z0-9])", normalized
+        )
+        if Decimal(match[1]) < 128
+    ]
+    for match in re.finditer(
+        r"(?<![A-Z0-9.])(\d+(?:\.\d+)?)\s*(?:GB|G)?\s*[+/]\s*"
+        r"(\d+(?:\.\d+)?)\s*(GB|TB|G|T)?(?![A-Z0-9.])",
+        normalized,
+    ):
+        storage = Decimal(match[2]) * (1024 if match[3] in {"TB", "T"} else 1)
+        if storage >= 128:
+            amounts.append(Decimal(match[1]))
+    return any(wanted.unit != "GB" or amount != wanted.number for amount in amounts)
+
+
 def color_matches(target: str, candidate: str) -> bool:
     """Match colors exactly after only NFKC, case, and whitespace normalization."""
 

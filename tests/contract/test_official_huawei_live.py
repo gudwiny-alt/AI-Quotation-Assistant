@@ -2174,3 +2174,23 @@ def test_huawei_final_rectangle_read_does_not_query_capture_selectors() -> None:
     )
     assert page.capture_selector_arguments == []
     assert rectangles == ()
+
+
+@pytest.mark.parametrize('model,title', [
+    ('nova 16', 'nova 16 12GB+256GB 星空黑 双卡 全网通版'),
+    ('nova 16 Pro', 'nova 16 Pro 12GB+512GB 幻彩贝母 双卡 全网通版'),
+    ('nova 16 Ultra', 'nova 16 Ultra 12GB+512GB 晴空蓝 双卡 全网通版'),
+    ('nova 16 SE', 'nova 16 SE 256GB 樱雪晴空 双卡 全网通版'),
+])
+def test_nova_current_detail_title_accepts_network_suffix(model, title):
+    from quote_app.sites.official_brands.huawei import _title_matches
+    assert _title_matches(model, title)
+
+
+@pytest.mark.parametrize('title', [
+    'nova 16 SE', 'nova 16 Pro 12GB+256GB 星空黑 双卡 全网通版',
+    'nova 16z 256GB 星空黑', 'nova 16 手机壳',
+])
+def test_nova_base_title_keeps_variant_and_accessory_boundaries(title):
+    from quote_app.sites.official_brands.huawei import _title_matches
+    assert not _title_matches('nova 16', title)

@@ -328,6 +328,27 @@ def position_detail_for_capture(
     )
 
 
+def ensure_detail_seller_for_capture(
+    page: Any, *, seller: Any, title: Any, prices: Sequence[Any],
+    capacity: Any, color: Any, site_name: str,
+) -> None:
+    """Retain the real shop header as well as the selected offer in the frame."""
+    for step in range(7):
+        if _in_viewport(seller, safe_stage="结果区域定位") and _detail_capture_ready(
+            title=title, prices=prices, capacity=capacity, color=color,
+        ):
+            return
+        if step < 6:
+            # Use the shop's scroll ancestor: the SKU panel can scroll
+            # independently and cannot bring an offscreen page header back.
+            seller.evaluate(_SMALL_UPWARD_NUDGE_IN_NEAREST_SCROLL_AREA)
+            page.wait_for_timeout(_SMALL_NUDGE_WAIT_MS)
+    raise CaptureViewGeometryError(
+        f"{site_name} seller, title, price and selected options must share the capture viewport",
+        safe_stage="结果区域定位",
+    )
+
+
 def _reveal_clipped_title(
     page: Any,
     *,

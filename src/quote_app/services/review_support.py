@@ -34,7 +34,7 @@ CATEGORIES = (
     "报价规则与资格",
     "报表与报送一致性",
 )
-RULE_VERSION = "decision-audit-2026-09-14-v2"
+RULE_VERSION = "decision-audit-2026-09-19-v3"
 
 
 @dataclass(slots=True)
@@ -561,7 +561,10 @@ class ReviewSession:
                     pass
             column = {'jd': 'AI', 'tmall': 'AJ', 'official': 'AK'}.get(t.channel)
             written = self._rows.get(p.output_row, {}).get(column)
-            findings = inspect_channel(t, p.title, t.specification or p.specification, scan, written)
+            findings = inspect_channel(
+                t, p.title, t.specification or p.specification, scan, written,
+                brand_name=str(self._rows.get(p.output_row, {}).get('B') or ''),
+            )
             reused = t.evidence_path and sum(x.evidence_path == t.evidence_path for item in self.products for x in item.channels) > 1
             if reused or (t.material_code and t.material_code != p.material_code):
                 findings[-1].status = '未通过'

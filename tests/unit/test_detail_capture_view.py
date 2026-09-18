@@ -464,3 +464,35 @@ def test_jd_no_model_fails_when_all_results_do_not_fit_even_at_minimum_scale() -
         )
 
     assert page.capture_scales == [0.8, 0.7, 0.6, 0.5]
+
+
+@pytest.mark.parametrize('reveals', [True, False])
+def test_seller_outside_frame_requires_bounded_repositioning(reveals):
+    from quote_app.sites.detail_capture_view import ensure_detail_seller_for_capture
+    page = _Page()
+    page.in_viewport.update(title=True,price=True,capacity=True,color=True,seller=False)
+    original = page.nudge_up
+    def nudge():
+        original()
+        if reveals and page.upward_scrolls == 2:
+            page.in_viewport['seller'] = True
+    page.nudge_up = nudge
+    def capture():
+        ensure_detail_seller_for_capture(page,seller=_Locator(page,'seller'),title=_Locator(page,'title'),
+            prices=(_Locator(page,'price'),),capacity=_Locator(page,'capacity'),color=_Locator(page,'color'),site_name='JD')
+    if reveals:
+        capture()
+        assert page.upward_scrolls == 2
+    else:
+        with pytest.raises(LayoutRecognitionError,match='seller'):
+            capture()
+        assert page.upward_scrolls == 6
+
+
+def test_seller_complete_frame_is_not_scrolled():
+    from quote_app.sites.detail_capture_view import ensure_detail_seller_for_capture
+    page = _Page()
+    page.in_viewport.update(title=True,price=True,capacity=True,color=True,seller=True)
+    ensure_detail_seller_for_capture(page,seller=_Locator(page,'seller'),title=_Locator(page,'title'),
+        prices=(_Locator(page,'price'),),capacity=_Locator(page,'capacity'),color=_Locator(page,'color'),site_name='JD')
+    assert page.upward_scrolls == 0

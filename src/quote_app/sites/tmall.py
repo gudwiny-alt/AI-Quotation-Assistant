@@ -48,6 +48,7 @@ from quote_app.sites.matching import (
     color_matches,
     model_matches,
     normalize_product_text,
+    title_has_conflicting_ram,
 )
 from quote_app.sites.navigation import click_and_wait_for_navigation
 from quote_app.sites.prices import (
@@ -1703,7 +1704,7 @@ class TmallAdapter:
         if capacity_matches(label, task.ram, task.storage):
             return True
         if not (
-            self._allows_huawei_fixed_ram_storage_only(group, task)
+            self._allows_huawei_storage_only(group, task)
             or self._allows_apple_storage_only(group, task)
         ):
             return False
@@ -1726,16 +1727,14 @@ class TmallAdapter:
         )
 
     @staticmethod
-    def _allows_huawei_fixed_ram_storage_only(
+    def _allows_huawei_storage_only(
         group: Any,
         task: WebsiteTask,
     ) -> bool:
-        if (
-            normalize_product_text(task.brand) != "华为"
-            or normalize_product_text(task.model_name)
-            != normalize_product_text("华为畅享 90 Pro Max")
-            or normalize_product_text(task.ram) != "8GB"
-        ):
+        # The approved Huawei flagship may publish ROM without RAM. Accept
+        # this only when the entire capacity group omits RAM; explicit RAM
+        # labels still use the exact RAM+ROM matcher above.
+        if normalize_product_text(task.brand) != "华为":
             return False
         labels = tuple(
             normalize_product_text(option.inner_text())
@@ -1770,6 +1769,14 @@ class TmallAdapter:
             semantic_name="color",
             allow_visual_selected=_uses_honor_visual_selection(task),
         )
+        if (normalize_product_text(task.brand) == "华为"
+                and normalize_product_text(capacity.inner_text())
+                == normalize_product_text(task.storage)):
+            if any(title_has_conflicting_ram(title.inner_text(), task.ram)
+                   for title in self._matching_detail_titles(page, task)):
+                raise LayoutRecognitionError(
+                    "Tmall selected detail title has conflicting explicit RAM"
+                )
         return (
             normalize_product_text(capacity.inner_text()),
             normalize_product_text(color.inner_text()),
@@ -2323,7 +2330,8 @@ def _is_named_store_marker(value: str) -> bool:
 def _is_explicitly_disabled(locator: Any) -> bool:
     if locator.get_attribute("disabled") is not None:
         return True
-    if locator.get_attribute("aria-disabled") == "true":
+    if (locator.get_attribute("aria-disabled") == "true"
+            or locator.get_attribute("data-disabled") == "true"):
         return True
     classes = set((locator.get_attribute("class") or "").lower().split())
     return bool(classes & _DISABLED_CLASSES)
@@ -2332,6 +2340,7 @@ def _is_explicitly_disabled(locator: Any) -> bool:
 def _tmall_color_matches(target: str, candidate: str) -> bool:
     """Match an exact colour or a single marketing label for a base colour."""
 
+    candidate = re.sub(r"\s+(?:万人加购|店长主推)$", "", candidate.strip())
     if color_matches(target, candidate):
         return True
     normalized_target = normalize_product_text(target)

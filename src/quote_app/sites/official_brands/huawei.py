@@ -66,6 +66,7 @@ _ACCESSORY_MARKERS = (
 )
 _DERIVED_PREFIXES = (
     "PRO",
+    "SE",
     "+",
     "PLUS",
     "ULTRA",
@@ -92,6 +93,7 @@ _LEGAL_STATUS_TAILS = (
 )
 _COLOR_TAIL = re.compile(
     r"(?:[\u3400-\u9fff]{1,8}(?:黑|白|红|蓝|绿|紫|金|银|灰|橙|粉|青|棕|色)"
+    r"|幻彩贝母|樱雪晴空"
     r"|BLACK|WHITE|RED|BLUE|GREEN|PURPLE|GOLD|SILVER|GRAY|GREY|ORANGE|PINK)"
 )
 _CAPACITY_TAIL = re.compile(r"\d+(?:\.\d+)?(?:GB|TB)(?:\+\d+(?:\.\d+)?(?:GB|TB))?")
@@ -1536,6 +1538,9 @@ def _title_matches(target: str, candidate: str) -> bool:
 
 def _legal_model_tail(value: str) -> bool:
     remainder = value.strip()
+    # VMALL appends network descriptors after the selected SKU. They are
+    # presentation suffixes, never substitutes for a model/configuration match.
+    remainder = re.sub(r"(?:\s+|^)(?:双卡\s+)?全网通版$", "", remainder).strip()
     if not remainder:
         return True
     for marker in _LEGAL_STATUS_TAILS:

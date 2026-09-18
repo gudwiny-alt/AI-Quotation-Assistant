@@ -1218,12 +1218,13 @@ def test_huawei_search_resolves_storage_only_target_with_fixed_ram() -> None:
 
 
 @pytest.mark.parametrize("ram", ["12GB", "16GB"])
-def test_huawei_search_storage_only_does_not_infer_other_ram(ram: str) -> None:
+def test_huawei_search_storage_only_accepts_unpublished_ram(ram: str) -> None:
     html = (FIXTURES / "huawei_changxiang_storage_only_results.html").read_text("utf-8")
     task = _task(brand="华为", model_name="华为畅享 90 Pro Max", ram=ram,
                  storage="256GB", color="曜金黑")
-    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
-        JDAdapter(_huawei_spec())._search_result(task, _huawei_search_page(html))
+    assert JDAdapter(_huawei_spec())._search_result(task, _huawei_search_page(html)) == (
+        "https://item.jd.com/100331677402.html"
+    )
 
 
 @pytest.mark.parametrize("replacement", ["512GB 曜金黑", "256GB 曜金黑限定", "256 曜金黑", "256GB"])
@@ -2105,7 +2106,7 @@ def test_huawei_changxiang_90_pro_max_matches_fixed_ram_storage_only_capacity() 
     assert observation.price == Decimal("4299")
 
 
-def test_huawei_storage_only_capacity_is_rejected_for_wrong_fixed_ram() -> None:
+def test_huawei_explicit_capacity_is_rejected_for_wrong_ram() -> None:
     html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text(
         "utf-8"
     )
@@ -2123,7 +2124,7 @@ def test_huawei_storage_only_capacity_is_rejected_for_wrong_fixed_ram() -> None:
         "华为畅享 90 Pro Max 256GB 曜金黑 鸿蒙智能手机",
     ).replace(
         ">12GB+256GB<",
-        ">256GB<",
+        ">8GB+256GB<",
     ).replace(
         ">黑色<",
         ">曜金黑<",
@@ -4187,3 +4188,61 @@ def test_adapter_navigates_only_to_approved_entry_and_exact_jd_item_url() -> Non
         spec.entry_url,
         "https://item.jd.com/100012345678.html",
     ]
+
+
+def test_nova_search_does_not_confuse_base_model_and_se_variant():
+    from quote_app.sites.jd import _modern_result_card_matches
+    assert not _modern_result_card_matches('nova 16','华为nova 16 SE 256GB 樱雪晴空 国家补贴15%')
+    assert _modern_result_card_matches('nova 16','华为nova 16 时代少年团代言 256GB 幻彩贝母')
+    assert _modern_result_card_matches('nova 16 SE','华为nova 16 SE 256GB 樱雪晴空')
+
+
+@pytest.mark.parametrize('model,ram', [('nova 16 SE','8GB'),('nova 16','12GB'),('华为畅享 90 Plus','8GB')])
+def test_huawei_rom_only_detail_matching_does_not_hide_explicit_ram_mismatch(model, ram):
+    from quote_app.sites.jd import _jd_modern_capacity_matches, _is_jd_modern_capacity_label
+    task = _task(brand='华为',model_name=model,ram=ram,storage='256GB')
+    assert _jd_modern_capacity_matches(task,'256GB')
+    assert not _jd_modern_capacity_matches(task,'512GB')
+    assert not _jd_modern_capacity_matches(task,'16GB+256GB')
+    assert _jd_modern_capacity_matches(task,ram+'+256GB')
+    assert _is_jd_modern_capacity_label(task,ram+'+256GB')
+    assert _is_jd_modern_capacity_label(task,'256GB')
+
+
+def _huawei_rom_only_title_case(title_capacity: str):
+    html = (FIXTURES / 'modern_detail_capacity_unavailable.html').read_text('utf-8')
+    html = (html.replace('小米京东自营旗舰店', '华为京东自营官方旗舰店')
+            .replace('小米 15', 'nova 16').replace('小米15', 'nova 16')
+            .replace('>12GB+256GB<', '>256GB<')
+            .replace('>16GB+512GB 无货<', '>512GB 无货<')
+            .replace('<h1 class="page-right-skuname">nova 16 12+256',
+                     '<h1 class="page-right-skuname">nova 16 ' + title_capacity))
+    task = _task(brand='华为', model_name='nova 16', ram='8GB', storage='256GB', color='黑色')
+    page = _FixturePage(html=html, after_search_url=(
+        'https://mall.jd.com/view_search-1000004255-99-1-24-1.html?keyword=nova%2016'))
+    return JDAdapter(_huawei_spec()), task, page
+
+
+@pytest.mark.parametrize('title_capacity', ['12GB+256GB', '12+256', '12GB内存 256GB', 'RAM12GB 256GB'])
+def test_huawei_rom_only_rejects_explicit_detail_title_ram(title_capacity):
+    adapter, task, page = _huawei_rom_only_title_case(title_capacity)
+    with pytest.raises(LayoutRecognitionError, match='RAM'):
+        adapter.observe(task, cast(Any, page))
+
+
+def test_huawei_rom_only_rechecks_title_ram_before_capture():
+    adapter, task, page = _huawei_rom_only_title_case('8GB+256GB')
+    observation = adapter.observe(task, cast(Any, page))
+    page.locator('.page-right-skuname').nodes[0].text_parts = ['nova 16 12+256 黑色']
+    with pytest.raises(LayoutRecognitionError):
+        adapter.verified_state_reader(task, cast(Any, page), observation.semantic_state)()
+
+
+def test_huawei_rom_only_checks_title_after_sku_selection(monkeypatch):
+    adapter, task, page = _huawei_rom_only_title_case('12GB+256GB')
+    click = page.click_option
+    def select_and_update_title(node):
+        click(node)
+        page.locator('.page-right-skuname').nodes[0].text_parts = ['nova 16 8+256 黑色']
+    monkeypatch.setattr(page, 'click_option', select_and_update_title)
+    assert adapter.observe(task, cast(Any, page)).outcome is BusinessOutcome.PRICE_FOUND

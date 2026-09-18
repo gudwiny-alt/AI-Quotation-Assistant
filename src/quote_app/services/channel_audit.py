@@ -20,7 +20,7 @@ def compact(value):
     return re.sub(r"[\s·/＋+_-]", "", str(value)).lower()
 
 
-def inspect_channel(task, title, specification, scan, written_price):
+def inspect_channel(task, title, specification, scan, written_price, *, brand_name=""):
     channel = task.channel
     name = {"jd": "京东", "tmall": "天猫", "official": "官网"}.get(channel, channel)
     checks = [
@@ -91,7 +91,9 @@ def inspect_channel(task, title, specification, scan, written_price):
         "iphone": ("apple.com", "apple.com.cn"),
         "苹果": ("apple.com", "apple.com.cn"),
     }
-    brand = next((b for b in brands if b in title.lower()), "")
+    brand = next((b for b in brands if b == brand_name.strip().lower()), "") or next(
+        (b for b in brands if b in title.lower()), ""
+    )
     domains = (
         ("jd.com",)
         if channel == "jd"
@@ -136,6 +138,29 @@ def inspect_channel(task, title, specification, scan, written_price):
         for part in specification.split("/")
         if part.strip() and compact(part) not in normalized
     ]
+    parts = [part.strip() for part in specification.split("/") if part.strip()]
+    rom_only = False
+    if (brand == "华为" and channel in {"jd", "tmall"} and store.status == "通过"
+            and len(parts) == 3 and missing == [parts[0]]
+            and re.fullmatch(r"\d+GB", parts[0], re.I)
+            and re.fullmatch(r"\d+(?:GB|TB)", parts[1], re.I)):
+        # Missing OCR text alone cannot override explicitly displayed RAM.
+        # Small standalone memory amounts and RAM labels conservatively block
+        # this exception, even if they belong to another visible offer.
+        memory_amounts = re.findall(r"(?<![\d.])(\d+)\s*GB(?![A-Za-z0-9])", text, re.I)
+        capacity_pairs = re.findall(
+            r"(?<![\d.])(\d+)\s*(?:GB|G)?\s*[+＋/]\s*(\d+)\s*(GB|G|TB|T)?",
+            text, re.I,
+        )
+        ram_visible = (
+            any(int(amount) < 128 for amount in memory_amounts)
+            or any(int(storage) >= 128 or unit.upper() in {"TB", "T"}
+                   for _, storage, unit in capacity_pairs)
+            or bool(re.search(r"(?<![A-Za-z])RAM(?![A-Za-z])|运行内存", text, re.I))
+        )
+        if not ram_visible:
+            missing = []
+            rom_only = True
     sku.status = (
         "通过"
         if len(compact(title)) >= 3
@@ -146,6 +171,9 @@ def inspect_channel(task, title, specification, scan, written_price):
     )
     sku.comparison = f"{title} · {specification}"
     sku.reason = (
+        "华为官方渠道未标 RAM，已按目标机型、ROM 和颜色核验；不推定 RAM 数值"
+        if sku.status == "通过" and rom_only
+        else
         "截图文字与目标机型、容量和颜色一致"
         if sku.status == "通过"
         else "未完整识别目标机型及规格：" + ("、".join(missing) or title) + "；请核对当前选中配置"
