@@ -4265,3 +4265,51 @@ def test_data_disabled_false_sku_remains_selectable():
         'class="tmall-option"', 'class="tmall-option" data-disabled="false"',
     )
     assert _observe(html=html).outcome is BusinessOutcome.PRICE_FOUND
+
+
+@pytest.mark.parametrize("badge", ["千人加购", "多人加购", "万人加购", "店长主推"])
+def test_color_name_node_excludes_promotion_badge_and_snapshot_uses_name(badge):
+    html = _huawei_storage_only_html().replace(
+        ">白色</div>",
+        '><span class="valueItemText--live" title="白色">白色</span>'
+        '<span class="corner--live">' + badge + '</span></div>',
+    )
+    assert 'valueItemText--live' in html
+    task = _task(brand="华为", model_name="华为畅享 90 Pro Max", ram="8GB", storage="256GB", color="白色")
+    page = _FixturePage(html=html, after_search_url=(
+        "https://huaweistore.tmall.com/?q=华为畅享+90+Pro+Max" + _LIVE_RESULTS_STATIC_QUERY))
+    adapter = TmallAdapter(_huawei_spec())
+    result = adapter.observe(task, cast(Any, page))
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert adapter._selected_configuration_snapshot(page, task)[1] == "白色"
+
+
+def test_color_name_node_does_not_accept_different_color():
+    from quote_app.sites.tmall import _tmall_color_matches
+    html = _huawei_storage_only_html().replace(
+        ">白色</div>",
+        '><span class="valueItemText--live">黑色</span><span class="corner--live">白色</span></div>',
+    )
+    page = _FixturePage(html=html)
+    page.activate("product")
+    adapter = TmallAdapter(_huawei_spec())
+    group = adapter._sku_option_group(page, "机身颜色")
+    with pytest.raises(LayoutRecognitionError):
+        adapter._exact_option(group, ('[class^="valueItem--"]',),
+                              lambda s: _tmall_color_matches("白色", s), semantic_name="color")
+
+
+def test_two_color_name_nodes_are_ambiguous_even_if_one_matches():
+    from quote_app.sites.tmall import _tmall_color_matches
+    html = _huawei_storage_only_html().replace(
+        ">白色</div>",
+        '><span class="valueItemText--live">白色</span>'
+        '<span class="valueItemText--other">黑色</span></div>',
+    )
+    page = _FixturePage(html=html)
+    page.activate("product")
+    adapter = TmallAdapter(_huawei_spec())
+    group = adapter._sku_option_group(page, "机身颜色")
+    with pytest.raises(LayoutRecognitionError, match="ambiguous"):
+        adapter._exact_option(group, ('[class^="valueItem--"]',),
+                              lambda s: _tmall_color_matches("白色", s), semantic_name="color")

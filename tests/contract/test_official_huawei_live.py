@@ -178,6 +178,14 @@ class _HuaweiLocator(_OfficialLocator):
 
     def evaluate(self, script: str) -> object:
         node = self.nodes[0]
+        if "VMALL_SEARCH_CHROME" in script:
+            nodes = (node, *_ancestors(node), *node.descendants())
+            return any(
+                n.tag in {"header", "nav"} or n.attrs.get("role") == "search"
+                or "searchbar" in n.attrs.get("data-testid", "")
+                for n in nodes
+            ) or any(n.tag in {"input", "textarea"} or n.attrs.get("role") == "searchbox"
+                     for n in (node, *node.descendants()))
         if "data-quote-capture-proof" in script:
             node.attrs["data-quote-capture-proof"] = "price"
             return True
@@ -2194,3 +2202,52 @@ def test_nova_current_detail_title_accepts_network_suffix(model, title):
 def test_nova_base_title_keeps_variant_and_accessory_boundaries(title):
     from quote_app.sites.official_brands.huawei import _title_matches
     assert not _title_matches('nova 16', title)
+
+
+@pytest.mark.parametrize("use_exact_text", [True, False])
+def test_huawei_search_placeholder_cannot_be_clicked_as_product(use_exact_text):
+    page = _HuaweiPage()
+    _set_huawei_cards(page, (), retain_late=True)
+    page.late_after_waits = 2
+    placeholder = _OfficialNode("div", {
+        "data-testid": "vui_searchbar_container_placeholderMate703",
+    }, page.results_root)
+    text = _OfficialNode("div", {}, placeholder)
+    text.text_parts = ["HUAWEI Mate 70 Pro"]
+    placeholder.children.append(text)
+    page.results_root.children.insert(0, placeholder)
+    if not use_exact_text:
+        page.get_by_text = None
+    result = _adapter().observe(_task(), page)
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.result_waits >= 2
+    assert result.url == "https://item.vmall.com/product/10086259366535.html"
+
+
+def test_huawei_search_placeholder_alone_does_not_prove_product_exists():
+    page = _HuaweiPage()
+    _set_huawei_cards(page, ())
+    placeholder = _OfficialNode("div", {
+        "data-testid": "vui_searchbar_container_placeholderMate703",
+    }, page.results_root)
+    placeholder.text_parts = ["HUAWEI Mate 70 Pro"]
+    page.results_root.children.append(placeholder)
+    result = _adapter().observe(_task(), page)
+    assert result.outcome is BusinessOutcome.NO_MODEL
+
+
+@pytest.mark.parametrize("tag,attrs", [
+    ("input", {}), ("textarea", {}), ("div", {"role": "searchbox"}),
+    ("nav", {}), ("header", {}), ("div", {"role": "search"}),
+])
+def test_huawei_container_with_search_control_is_not_a_product_title(tag, attrs):
+    page = _HuaweiPage()
+    _set_huawei_cards(page, (), retain_late=True)
+    page.late_after_waits = 2
+    outer = _OfficialNode("div", {}, page.results_root)
+    outer.text_parts = ["HUAWEI Mate 70 Pro"]
+    control = _OfficialNode(tag, attrs, outer)
+    outer.children.append(control)
+    page.results_root.children.insert(0, outer)
+    assert _adapter().observe(_task(), page).outcome is BusinessOutcome.PRICE_FOUND
+    assert page.result_waits >= 2

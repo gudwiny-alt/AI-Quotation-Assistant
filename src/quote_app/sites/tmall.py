@@ -1604,7 +1604,7 @@ class TmallAdapter:
             raise LayoutRecognitionError(
                 f"Tmall {semantic_name} option structure is missing"
             )
-        exact = tuple(option for option in options if matches(option.inner_text()))
+        exact = tuple(option for option in options if matches(_option_label(option, semantic_name)))
         if len(exact) != 1:
             raise LayoutRecognitionError(
                 f"Tmall exact {semantic_name} option is missing or ambiguous"
@@ -1779,7 +1779,7 @@ class TmallAdapter:
                 )
         return (
             normalize_product_text(capacity.inner_text()),
-            normalize_product_text(color.inner_text()),
+            normalize_product_text(_option_label(color, "color")),
         )
 
     def _matching_detail_title_snapshot(
@@ -1814,7 +1814,7 @@ class TmallAdapter:
                 allow_visual_selected=allow_visual_selected,
             )
         )
-        if len(selected) != 1 or not matches(selected[0].inner_text()):
+        if len(selected) != 1 or not matches(_option_label(selected[0], semantic_name)):
             raise LayoutRecognitionError(
                 f"Tmall final selected {semantic_name} is missing, ambiguous, or changed"
             )
@@ -2335,6 +2335,20 @@ def _is_explicitly_disabled(locator: Any) -> bool:
         return True
     classes = set((locator.get_attribute("class") or "").lower().split())
     return bool(classes & _DISABLED_CLASSES)
+
+
+def _option_label(option: Any, semantic_name: str) -> str:
+    """Read the visible colour name without the sibling marketing corner."""
+    if semantic_name == "color":
+        names = visible_locators(option, ('[class^="valueItemText--"]',))
+        if len(names) > 1:
+            raise LayoutRecognitionError("Tmall color name is ambiguous")
+        if names:
+            label = names[0].inner_text().strip()
+            if not label:
+                raise LayoutRecognitionError("Tmall color name is empty")
+            return label
+    return option.inner_text()
 
 
 def _tmall_color_matches(target: str, candidate: str) -> bool:

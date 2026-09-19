@@ -816,7 +816,8 @@ class HuaweiOfficialAdapter(LiveOfficialAdapterBase):
         scope = page
         for selector in _CURRENT_RESULT_TITLES:
             for title in _visible(scope, (selector,)):
-                if _title_matches(model_name, title.inner_text()):
+                if (_title_matches(model_name, title.inner_text())
+                        and not _is_search_chrome(title)):
                     return _ExactSearchTarget(title, "current_text", None), saw_invalid
         return None, saw_invalid
 
@@ -1481,6 +1482,19 @@ def _strip_brand_prefix(value: str) -> str:
     return re.sub(r"^(?:HUAWEI|华为)\s*", "", normalized, count=1)
 
 
+def _is_search_chrome(candidate: Any) -> bool:
+    """Exclude search controls/recommendations from the legacy text fallback."""
+    return candidate.evaluate(r"""
+        element => {
+          // VMALL_SEARCH_CHROME: matching a model in the header is not a product.
+          const chrome = 'header, nav, [role="search"], [data-testid*="searchbar"]';
+          return Boolean(element.closest(chrome) || element.querySelector(chrome)
+            || element.matches('input, textarea, [role="searchbox"]')
+            || element.querySelector('input, textarea, [role="searchbox"]'));
+        }
+    """) is not False
+
+
 def _current_exact_text_target(page: Any, model_name: str) -> Any | None:
     """Return a visible current-grid title without requiring a card selector."""
 
@@ -1508,7 +1522,7 @@ def _current_exact_text_target(page: Any, model_name: str) -> Any | None:
             # the same rendered text but no click handler of its own.
             for index in reversed(range(candidates.count())):
                 candidate = candidates.nth(index)
-                if candidate.is_visible():
+                if candidate.is_visible() and not _is_search_chrome(candidate):
                     return candidate
         except (AttributeError, RuntimeError):
             continue
