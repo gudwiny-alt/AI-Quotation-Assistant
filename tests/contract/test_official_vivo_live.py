@@ -1348,3 +1348,32 @@ def test_vivo_new_detail_waits_for_title_hydration_without_relaxing_model(monkey
     monkeypatch.setattr(page, "wait_for_timeout", wait)
     assert _adapter().observe(_task(), page).outcome is BusinessOutcome.PRICE_FOUND
     assert len(polls) >= 2
+
+
+@pytest.mark.parametrize("initial_url", ["", "about:blank"])
+def test_vivo_popup_waits_for_initial_navigation(monkeypatch, initial_url):
+    page = _ModernVivoPage(popup=True, target=initial_url)
+    original_wait = page.wait_for_timeout
+    popup_polls = []
+
+    def wait(milliseconds):
+        original_wait(milliseconds)
+        if len(page.context.pages) > 1:
+            popup_polls.append(milliseconds)
+            if len(popup_polls) == 2:
+                page.context.pages[-1].url = "https://shop.vivo.com.cn/product/10010284"
+
+    monkeypatch.setattr(page, "wait_for_timeout", wait)
+    result = _adapter().observe(_task(), page)
+    assert result.price == Decimal("4399")
+    assert len(popup_polls) >= 2
+    assert page.popup_closed
+
+
+@pytest.mark.parametrize("initial_url", ["", "about:blank"])
+def test_vivo_popup_that_never_navigates_fails_and_is_closed(initial_url):
+    page = _ModernVivoPage(popup=True, target=initial_url)
+    with pytest.raises(LayoutRecognitionError, match="did not reach a detail page"):
+        _adapter().observe(_task(), page)
+    assert page.popup_closed
+    assert page.active != "detail"

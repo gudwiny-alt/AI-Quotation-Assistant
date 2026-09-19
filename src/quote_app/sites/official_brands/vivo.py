@@ -295,7 +295,9 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
                     raise LayoutRecognitionError("vivo product click opened ambiguous tabs")
                 destination = created[0] if created else page
                 url = str(destination.url)
-                if url != "about:blank" and (created or not _is_search_url(url)):
+                # CDP can expose a new tab before its first URL arrives.
+                # Empty/blank is pending navigation, never an approved URL.
+                if url not in {"", "about:blank"} and (created or not _is_search_url(url)):
                     try:
                         return _product_url(url)
                     except ValueError as error:
