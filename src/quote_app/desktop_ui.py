@@ -375,9 +375,9 @@ class DesktopWorkbench:
         ).pack(side="left")
         self.sidebar_version = label(
             sidebar,
-            ".173 · 渠道识别优化版  |  ⌘1–6 切页"
+            ".174 · vivo 官网兼容版  |  ⌘1–6 切页"
             if sys.platform == "darwin"
-            else ".173 · 渠道识别优化版  |  Ctrl 1–6",
+            else ".174 · vivo 官网兼容版  |  Ctrl 1–6",
             color=MUTED,
             size=9,
             bg=SIDEBAR,

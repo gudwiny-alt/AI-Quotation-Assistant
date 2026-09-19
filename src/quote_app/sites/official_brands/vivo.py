@@ -56,6 +56,12 @@ _ACCESSORY_MARKERS = (
     "ACCESSORY",
 )
 _SEARCH_INPUT = 'input[placeholder="请输入搜索内容"]'
+_MODERN_SEARCH_INPUT = 'input.vs-search-input'
+_MODERN_RESULT_INPUT = 'input.search-input'
+_SEARCH_OPEN = '#vpHeadSearchOpenBtn'
+_MODERN_RESULT_REGION = 'main.search-result-body'
+_MODERN_RESULT_CARD = 'div.goods-card'
+_MODERN_RESULT_TITLE = 'div.goods-title'
 _RESULT_REGION = ".page-search-result-content"
 _RESULT_CARD = "div[data-position][data-skuid]"
 _RESULT_TITLE = "p.result-title"
@@ -120,13 +126,18 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
             raise LayoutRecognitionError("vivo homepage search input is unavailable")
         search.fill(task.model_name)
         search.press("Enter")
+        for tick in range(41):
+            if _is_search_url(browser.url):
+                break
+            if tick < 40:
+                browser.wait_for_timeout(250)
         if not _is_search_url(browser.url):
             raise LayoutRecognitionError("vivo search submission did not reach searchResult")
         self._wait_for_results(browser, task)
         link = self._exact_result_link(browser, task)
         if link is None:
             return self.build_observation(task, self._no_model_state(task, browser))
-        target_url = _product_url(link.get_attribute("href"))
+        target_url = self._result_product_url(browser, link)
         browser.goto(target_url, wait_until="domcontentloaded")
         browser.wait_for_load_state("domcontentloaded")
         if _detail_identity(browser.url).product_key != _detail_identity(target_url).product_key:
@@ -135,9 +146,15 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
 
     def _wait_for_search_input(self, page: Any) -> Any | None:
         for tick in range(41):
-            search = _first_visible(page, (_SEARCH_INPUT,))
+            search = _first_visible(page, (_SEARCH_INPUT, _MODERN_SEARCH_INPUT))
             if search is not None:
                 return search
+            # The new panel mounts lazily; an early click can precede its
+            # handler. Retry only while no input is visible, at most 3 times.
+            if tick in (0, 8, 16):
+                opener = _first_visible(page, (_SEARCH_OPEN,))
+                if opener is not None:
+                    opener.click()
             if tick < 40:
                 page.wait_for_timeout(250)
         return None
@@ -169,6 +186,11 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
 
     def _observe_scaled_detail(self, task: WebsiteTask, page: Any) -> AdapterObservation:
         identity = _detail_identity(page.url)
+        for tick in range(21):
+            if _first_visible(page, (_DETAIL_TITLE,)) is not None:
+                break
+            if tick < 20:
+                page.wait_for_timeout(250)
         self._require_detail_title(page, task.model_name)
         capacity = self._wait_for_target_option(page, "capacity", task)
         if capacity is None or _disabled(capacity):
@@ -219,7 +241,7 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
     def _wait_for_results(self, page: Any, task: WebsiteTask) -> None:
         saw_terminal_empty = False
         for tick in range(41):
-            region = _first_visible(page, (_RESULT_REGION,))
+            region = _first_visible(page, (_RESULT_REGION, _MODERN_RESULT_REGION))
             if region is not None:
                 if self._exact_result_link(page, task) is not None:
                     return
@@ -232,17 +254,19 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         raise LayoutRecognitionError("vivo search results lacked a reliable terminal state")
 
     def _exact_result_link(self, page: Any, task: WebsiteTask) -> Any | None:
-        region = _first_visible(page, (_RESULT_REGION,))
+        region = _first_visible(page, (_RESULT_REGION, _MODERN_RESULT_REGION))
         if region is None:
             return None
         saw_exact = False
-        for card in _visible(region, (_RESULT_CARD,)):
-            title = _first_visible(card, (_RESULT_TITLE,))
+        for card in _visible(region, (_RESULT_CARD, _MODERN_RESULT_CARD)):
+            title = _first_visible(card, (_RESULT_TITLE, _MODERN_RESULT_TITLE))
             if title is None or not _title_matches(task.model_name, title.inner_text()):
                 continue
             saw_exact = True
             link = _first_visible(card, (_RESULT_LINK,))
             if link is None:
+                if "goods-card" in (card.get_attribute("class") or "").split():
+                    return card
                 continue
             try:
                 _product_url(link.get_attribute("href"))
@@ -252,6 +276,36 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
         if saw_exact:
             raise LayoutRecognitionError("vivo exact-model cards have no approved product URL")
         return None
+
+    def _result_product_url(self, page: Any, target: Any) -> str:
+        href = target.get_attribute("href")
+        if href:
+            return _product_url(href)
+        # Modern cards open a tab instead of exposing an anchor. Inspect only
+        # tabs created by this click, and never derive a URL from tracking IDs.
+        context = getattr(page, "context", None)
+        before = tuple(context.pages) if context is not None else ()
+        created: list[Any] = []
+        try:
+            target.click()
+            for tick in range(41):
+                pages = tuple(context.pages) if context is not None else ()
+                created = [item for item in pages if item not in before]
+                if len(created) > 1:
+                    raise LayoutRecognitionError("vivo product click opened ambiguous tabs")
+                destination = created[0] if created else page
+                url = str(destination.url)
+                if url != "about:blank" and (created or not _is_search_url(url)):
+                    try:
+                        return _product_url(url)
+                    except ValueError as error:
+                        raise LayoutRecognitionError("vivo product click reached an unapproved URL") from error
+                if tick < 40:
+                    page.wait_for_timeout(250)
+            raise LayoutRecognitionError("vivo product card did not reach a detail page")
+        finally:
+            for popup in created:
+                popup.close()
 
     def _require_detail_title(self, page: Any, model_name: str) -> Any:
         title = _first_visible(page, (_DETAIL_TITLE,))
@@ -377,14 +431,11 @@ class VivoOfficialAdapter(LiveOfficialAdapterBase):
 
     def _no_model_state(self, task: WebsiteTask, page: Any) -> OfficialBusinessState:
         keyword = next(
-            (
-                page.locator(_SEARCH_INPUT).nth(index)
-                for index in range(page.locator(_SEARCH_INPUT).count())
-                if page.locator(_SEARCH_INPUT).nth(index).input_value().strip() == task.model_name
-            ),
+            (field for field in _visible(page, (_SEARCH_INPUT, _MODERN_RESULT_INPUT))
+             if field.input_value().strip() == task.model_name),
             None,
         )
-        region = _first_visible(page, (_RESULT_REGION,))
+        region = _first_visible(page, (_RESULT_REGION, _MODERN_RESULT_REGION))
         if keyword is None or keyword.input_value().strip() != task.model_name or region is None:
             raise LayoutRecognitionError("vivo no-model evidence is incomplete")
         if self._exact_result_link(page, task) is not None:
@@ -551,7 +602,7 @@ def _is_search_url(url: str) -> bool:
         and parsed.port in {None, 443}
         and parsed.username is None
         and parsed.password is None
-        and parsed.path == "/search/searchResult"
+        and parsed.path in {"/search/searchResult", "/search/result"}
     )
 
 

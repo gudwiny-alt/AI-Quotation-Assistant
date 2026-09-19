@@ -1237,3 +1237,114 @@ def test_vivo_capture_does_not_rewrite_an_existing_eighty_percent_scale() -> Non
     adapter.restore_capture_view(_task(), page, observation.semantic_state)
 
     assert page.capture_scale == 0.8
+
+
+class _ModernVivoPage(_VivoPage):
+    def __init__(self, *, popup=False, target="https://shop.vivo.com.cn/product/10010284"):
+        super().__init__()
+        from types import SimpleNamespace
+        self.home_root = self._parse(
+            '<html><body><span id="vpHeadSearchOpenBtn" role="button"></span>'
+            '<input class="vs-search-input" placeholder="搜索手机或者帖子" hidden></body></html>'
+        )
+        self.results_root = self._parse(
+            '<html><body><input class="search-input" value="vivo X200">'
+            '<main class="search-result-body"><div class="goods-card"><div class="goods-title">'
+            'vivo X200 Pro 5G</div></div><div class="goods-card"><div class="goods-title">'
+            'vivo X200 5G</div><div class="goods-price">999</div></div></main></body></html>'
+        )
+        self.search_result_url_override = "https://www.vivo.com.cn/search/result?keyword=vivo%2520X200"
+        self.context = SimpleNamespace(pages=[self])
+        self.popup = popup
+        self.popup_closed = False
+        self.target = target
+        self.open_clicks = 0
+
+    def locator(self, selector):
+        loc = super().locator(selector)
+        return _ModernVivoLocator(self, loc.nodes)
+
+
+class _ModernVivoLocator(_VivoLocator):
+    def nth(self, index):
+        return _ModernVivoLocator(self.page, [self.nodes[index]])
+
+    def locator(self, selector):
+        loc = super().locator(selector)
+        return _ModernVivoLocator(self.page, loc.nodes)
+
+    def click(self):
+        node = self.nodes[0]
+        if node.attrs.get("id") == "vpHeadSearchOpenBtn":
+            self.page.open_clicks += 1
+            # First click happens before the component's handler is ready.
+            if self.page.open_clicks >= 2:
+                for n in self.page.home_root.descendants():
+                    if n.tag == "input":
+                        n.attrs.pop("hidden", None)
+            return
+        if "goods-card" in node.attrs.get("class", ""):
+            assert node.children[0].text == "vivo X200 5G"
+            if self.page.popup:
+                from types import SimpleNamespace
+                def close():
+                    self.page.popup_closed = True
+                self.page.context.pages.append(SimpleNamespace(url=self.page.target, close=close))
+            else:
+                self.page.goto(self.page.target)
+            return
+        return super().click()
+
+
+@pytest.mark.parametrize("popup", [False, True])
+def test_vivo_modern_search_opens_panel_and_uses_verified_detail_price(popup):
+    page = _ModernVivoPage(popup=popup)
+    result = _adapter().observe(_task(), page)
+    assert result.outcome is BusinessOutcome.PRICE_FOUND
+    assert result.price == Decimal("4399")  # Never the search-card starting price 999.
+    assert page.open_clicks == 2
+    assert page.popup_closed == popup
+
+
+@pytest.mark.parametrize("target", [
+    "https://evil.example/product/10010284", "https://shop.vivo.com.cn/product/not-a-number",
+])
+def test_vivo_modern_search_rejects_unapproved_popup(target):
+    page = _ModernVivoPage(popup=True, target=target)
+    with pytest.raises(LayoutRecognitionError):
+        _adapter().observe(_task(), page)
+    assert page.popup_closed
+    assert page.active != "detail"
+
+
+def test_vivo_modern_detail_still_rejects_wrong_model():
+    page = _ModernVivoPage(popup=True)
+    page.title_override = "vivo X200 Pro 12GB+256GB 辰夜黑"
+    with pytest.raises(LayoutRecognitionError, match="title"):
+        _adapter().observe(_task(), page)
+
+
+def test_vivo_modern_search_recommendations_are_not_a_no_model_result():
+    page = _ModernVivoPage()
+    page.results_root = page._parse('<main class="search-result-body">'
+                                   '<div class="goods-card"><div class="goods-title">'
+                                   'vivo X200 Pro 5G</div></div></main>')
+    with pytest.raises(LayoutRecognitionError, match="terminal"):
+        _adapter().observe(_task(), page)
+
+
+def test_vivo_new_detail_waits_for_title_hydration_without_relaxing_model(monkeypatch):
+    page = _ModernVivoPage()
+    title = next(n for n in page.detail_root.descendants() if n.tag == "h1")
+    title.attrs["hidden"] = "true"
+    original_wait = page.wait_for_timeout
+    polls = []
+    def wait(milliseconds):
+        original_wait(milliseconds)
+        if page.active == "detail" and milliseconds == 250:
+            polls.append(milliseconds)
+            if len(polls) == 2:
+                title.attrs.pop("hidden", None)
+    monkeypatch.setattr(page, "wait_for_timeout", wait)
+    assert _adapter().observe(_task(), page).outcome is BusinessOutcome.PRICE_FOUND
+    assert len(polls) >= 2

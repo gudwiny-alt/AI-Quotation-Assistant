@@ -43,7 +43,7 @@ from quote_app.tasks.models import WebsiteChannel
 from quote_app.tasks.repository import SQLiteTaskRepository
 
 
-APP_BUILD_LABEL = "终端福建分公司报价协同智能体 2026.09.19.173"
+APP_BUILD_LABEL = "终端福建分公司报价协同智能体 2026.09.19.174"
 BETA_NOTICE = (
     "执行顺序：品牌官网、天猫、京东；遇到登录或验证页面时，人工登录完成后点击“继续当前任务”按钮。"
 )
