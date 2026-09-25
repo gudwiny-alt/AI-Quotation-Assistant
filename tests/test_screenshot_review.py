@@ -65,3 +65,12 @@ def test_verified_no_model_does_not_require_a_product_price():
         "",
     )
     assert unknown["C03"][0] == "待复核"
+
+
+def test_unpublished_price_keeps_model_and_spec_checks():
+    scan = Recognition('done', '京东自营 荣耀Magic9 512GB 待发布', 1600, 1000)
+    result = assess(scan, '荣耀Magic9', '512GB', 'jd', '', outcome='price_unavailable')
+    assert result['C03'][0] == '不适用'
+    assert result['C04'][0] == '通过'
+    assert assess(scan, '荣耀Magic9', '1TB', 'jd', '', outcome='price_unavailable')['C02'][0] == '待复核'
+    assert assess(scan, '荣耀Magic9', '512GB', 'jd', '999999', outcome='price_unavailable')['C03'][0] == '未通过'

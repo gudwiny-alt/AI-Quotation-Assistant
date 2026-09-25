@@ -32,6 +32,7 @@ class BusinessOutcome(StrEnum):
     CAPACITY_UNAVAILABLE = "capacity_unavailable"
     COLOR_UNAVAILABLE = "color_unavailable"
     SOLD_OUT = "sold_out"
+    PRICE_UNAVAILABLE = "price_unavailable"
 
 
 class TaskState(StrEnum):
@@ -385,6 +386,7 @@ _OUTCOME_EVIDENCE_STATES = {
     BusinessOutcome.CAPACITY_UNAVAILABLE: EvidenceState.CAPACITY_UNAVAILABLE,
     BusinessOutcome.COLOR_UNAVAILABLE: EvidenceState.COLOR_UNAVAILABLE,
     BusinessOutcome.SOLD_OUT: EvidenceState.SOLD_OUT,
+    BusinessOutcome.PRICE_UNAVAILABLE: EvidenceState.PRICE_UNAVAILABLE,
 }
 
 

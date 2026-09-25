@@ -63,6 +63,7 @@ _CHANNEL_COLUMNS = {
 _LEGAL_NO_OUTCOMES = frozenset(
     (
         BusinessOutcome.NO_MODEL,
+        BusinessOutcome.PRICE_UNAVAILABLE,
         BusinessOutcome.CAPACITY_UNAVAILABLE,
         BusinessOutcome.COLOR_UNAVAILABLE,
         BusinessOutcome.SOLD_OUT,

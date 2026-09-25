@@ -5,6 +5,7 @@ import re
 from urllib.parse import urlsplit
 
 from quote_app.services.review_workbook import money
+from quote_app.services.screenshot_review import has_unavailable_price_text
 
 
 @dataclass
@@ -179,6 +180,17 @@ def inspect_channel(task, title, specification, scan, written_price, *, brand_na
         else "未完整识别目标机型及规格：" + ("、".join(missing) or title) + "；请核对当前选中配置"
     )
     adopted, written = money(task.price), money(written_price)
+    if task.state == "succeeded" and task.outcome == "price_unavailable":
+        numeric = adopted is not None or written is not None
+        status_visible = has_unavailable_price_text(text)
+        price.status = "未通过" if numeric else "不适用" if status_visible else "待复核"
+        price.comparison = "暂无有效整机报价；不参与最低价比较"
+        price.reason = (
+            "无有效整机报价记录不得采用或回填数值价格" if numeric
+            else "已关联采集结果与截图价格状态；机型、规格、来源仍单独核验" if status_visible
+            else "截图未清晰识别未公布售价或预约占位依据，请核对原图"
+        )
+        return checks
     found, conditional = False, False
     # Each amount is paired with its preceding label, never another advertisement.
     lines = text.splitlines()

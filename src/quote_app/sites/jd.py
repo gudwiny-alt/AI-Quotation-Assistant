@@ -1011,6 +1011,16 @@ class JDAdapter:
         ).inner_text().strip()
         if not region:
             raise LayoutRecognitionError("JD modern delivery region is blank")
+        pending = self._honor_pending_price_state(task, page, canonical_url)
+        if pending is not None:
+            # Recheck seller/model after JD replaces the document during selection.
+            pending = self._read_modern_price_state(task, page, canonical_url)
+            if pending.outcome is not BusinessOutcome.PRICE_UNAVAILABLE:
+                raise LayoutRecognitionError("JD pending price changed while verifying detail")
+            return AdapterObservation(
+                outcome=pending.outcome, price=None, url=canonical_url,
+                css_rectangles=pending.css_rectangles, semantic_state=pending,
+            )
         selected_price = self._modern_selected_price(
             page,
             task,
@@ -1100,7 +1110,13 @@ class JDAdapter:
             for poll in range(_MAX_VERIFIED_STATE_POLLS):
                 self._raise_if_authentication_blocked(browser_page)
                 try:
-                    if expected.outcome is not BusinessOutcome.PRICE_FOUND:
+                    if expected.outcome is BusinessOutcome.PRICE_UNAVAILABLE:
+                        current = self._read_modern_price_state(
+                            task, browser_page, expected.canonical_url,
+                        )
+                        if _same_quote_price_state(current, expected):
+                            return expected
+                    elif expected.outcome is not BusinessOutcome.PRICE_FOUND:
                         self._read_legal_no_state(
                             task,
                             browser_page,
@@ -1157,6 +1173,11 @@ class JDAdapter:
         self._validate_task(task)
         browser_page = _playwright_page(page)
         self._raise_if_authentication_blocked(browser_page)
+        if expected.outcome is BusinessOutcome.PRICE_UNAVAILABLE:
+            current = self._read_modern_price_state(task, browser_page, expected.canonical_url)
+            if not _same_quote_price_state(current, expected):
+                raise LayoutRecognitionError("JD pending price status changed before capture")
+            return current.css_rectangles
         if expected.outcome is not BusinessOutcome.NO_MODEL:
             return expected.css_rectangles
         self._read_legal_no_state(task, browser_page, expected)
@@ -1267,7 +1288,9 @@ class JDAdapter:
                 already_positioned=True,
             )
             return
-        if expected.outcome is not BusinessOutcome.PRICE_FOUND:
+        if expected.outcome not in {
+            BusinessOutcome.PRICE_FOUND, BusinessOutcome.PRICE_UNAVAILABLE,
+        }:
             return
         if visible_locators(browser_page, JD_MODERN_DETAIL_TITLES):
             current = self._read_modern_price_state(
@@ -1693,6 +1716,9 @@ class JDAdapter:
                 )
             )
         )
+        pending = self._honor_pending_price_state(task, page, canonical_url)
+        if pending is not None:
+            return pending
         return self._semantic_state(
             task,
             page,
@@ -1707,6 +1733,37 @@ class JDAdapter:
             region=region,
             stock_state="JD modern selectable configuration",
             canonical_url=canonical_url,
+        )
+
+    def _honor_pending_price_state(
+        self, task: WebsiteTask, page: Any, canonical_url: str,
+    ) -> VerifiedSemanticState | None:
+        """Bind JD's explicit unpublished price to the exact selected HONOR SKU."""
+        if task.brand.upper() != "HONOR":
+            return None
+        previous = None
+        for _ in range(2):
+            nodes = self._modern_price_nodes(page)
+            if len(nodes) != 1 or nodes[0].inner_text().strip() != "待发布":
+                return None
+            configuration = self._modern_configuration_snapshot(page, task)
+            self._require_exact_modern_configuration(task, configuration)
+            if previous is not None and configuration != previous:
+                raise LayoutRecognitionError("JD pending-price configuration changed")
+            previous = configuration
+            page.wait_for_timeout(_POLL_INTERVAL_MS)
+            self._raise_if_authentication_blocked(page)
+        # Read once more after settling: a newly published amount is not pending.
+        nodes = self._modern_price_nodes(page)
+        if len(nodes) != 1 or nodes[0].inner_text().strip() != "待发布":
+            return None
+        if self._modern_configuration_snapshot(page, task) != previous:
+            raise LayoutRecognitionError("JD pending-price configuration changed")
+        return self._semantic_state(
+            task, page, outcome=BusinessOutcome.PRICE_UNAVAILABLE, price=None,
+            rectangles=(_css_rect(nodes[0], "price_status"),),
+            current_sku="not-applicable", region="not-applicable",
+            stock_state="not-applicable", canonical_url=canonical_url,
         )
 
     def _read_legacy_price_state(
@@ -1811,6 +1868,16 @@ class JDAdapter:
         task: WebsiteTask,
         base_url: str,
     ) -> str:
+        if task.brand.upper() == "HONOR":
+            # Presale phone listings may mention gifts; only explicit non-phone
+            # or invalid links are excluded. A unique model link is still just
+            # navigation: the detail page must prove the requested configuration.
+            cards = tuple(
+                card for card in cards
+                if not any(marker in card.inner_text() for marker in (
+                    "拍下无效", "定金链接", "订金链接", "仅售礼盒", "仅售赠品",
+                ))
+            )
         card_urls = tuple(
             (card, self._card_detail_url(card, base_url=base_url))
             for card in cards
@@ -2859,6 +2926,10 @@ def _modern_result_card_matches(model_name: str, card_text: str) -> bool:
     if suffix and _is_attached_ascii(suffix[0]):
         return False
     meaningful_suffix = suffix.lstrip()
+    if wanted.startswith(("荣耀", "HONOR")) and meaningful_suffix.startswith(
+        ("超能版", "系列")
+    ):
+        return False
     return not any(
         meaningful_suffix.startswith(variant) for variant in _JD_RESULT_MODEL_VARIANTS
     )
@@ -2923,7 +2994,15 @@ def _result_card_matches_configuration(card: Any, task: WebsiteTask) -> bool:
         rf"(?<![A-Z0-9]){model}\s+{capacities[0]}\s*\+\s*{capacities[1]}"
         rf"\s+{color}(?=\s|$)"
     )
-    return re.search(pattern, title) is not None
+    if re.search(pattern, title) is not None:
+        return True
+    if task.brand.upper() == "HONOR":
+        color_first = (
+            rf"(?<![A-Z0-9]){model}\s+{color}\s+"
+            rf"{capacities[0]}\s*\+\s*{capacities[1]}(?=\s|$)"
+        )
+        return re.search(color_first, title) is not None
+    return False
 
 
 def _is_attached_ascii(character: str) -> bool:

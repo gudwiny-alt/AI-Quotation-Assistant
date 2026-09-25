@@ -55,6 +55,7 @@ _LEGAL_NO_LABELS = {
     BusinessOutcome.CAPACITY_UNAVAILABLE: "无（容量不可用）",
     BusinessOutcome.COLOR_UNAVAILABLE: "无（颜色不可用）",
     BusinessOutcome.SOLD_OUT: "无（已售罄）",
+    BusinessOutcome.PRICE_UNAVAILABLE: "无（暂无有效整机报价）",
 }
 STATUS_LABELS = {
     RowStatus.COMPLETED: "完成",

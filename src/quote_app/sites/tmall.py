@@ -330,6 +330,7 @@ class TmallAdapter:
             raise ValueError("spec channel must be TMALL")
         self.spec = spec
         self._approved_detail_sources: set[tuple[int, str, str]] = set()
+        self._honor_absent_capacities: dict[tuple[str, str], tuple[str, ...]] = {}
 
     def execute(
         self,
@@ -472,10 +473,24 @@ class TmallAdapter:
     ) -> AdapterObservation:
         """Observe one verified detail while its 80% capture scale is active."""
 
-        capacity_group = self._sku_option_group(
-            browser_page,
-            "存储容量",
-        )
+        self._honor_absent_capacities.pop((task.task_id, browser_page.url), None)
+        self._honor_version(browser_page, task, select=True)
+        if _uses_honor_visual_selection(task) and browser_page.url != detail_url:
+            detail_url = _approved_item_url(browser_page.url, base_url=detail_url)
+            self._require_approved_detail_seller(browser_page, task=task, detail_url=detail_url)
+            self._matching_detail_titles(browser_page, task)
+            apply_capture_scale(browser_page, scale=0.8)
+        capacity_group = self._sku_option_group(browser_page, "存储容量")
+        if self._honor_missing_capacity(browser_page, task):
+            labels = self._honor_capacity_labels(browser_page)
+            browser_page.wait_for_timeout(_CONFIGURATION_SETTLE_MS)
+            self._require_exact_detail_url(browser_page, detail_url)
+            if (not self._honor_missing_capacity(browser_page, task)
+                    or self._honor_capacity_labels(browser_page) != labels):
+                raise LayoutRecognitionError("Tmall capacity options changed during verification")
+            self._honor_absent_capacities[(task.task_id, browser_page.url)] = labels
+            return self._legal_no(task, BusinessOutcome.CAPACITY_UNAVAILABLE,
+                                  browser_page, (_css_rect(capacity_group, "capacity"),))
         capacity = self._exact_option(
             capacity_group,
             TMALL_SKU_VALUES,
@@ -553,6 +568,12 @@ class TmallAdapter:
                 color,
                 retry_resolver=retry_color,
             )
+            if capacity_available and color_available and not _is_approved_selected(
+                retry_capacity(), allow_visual_selected=True
+            ):
+                capacity_available = self._try_select_honor_option(
+                    browser_page, retry_capacity(), retry_resolver=retry_capacity
+                )
             if not capacity_available or not color_available:
                 current_capacity = retry_capacity()
                 current_color = retry_color()
@@ -617,6 +638,15 @@ class TmallAdapter:
         )
         self._require_exact_detail_url(browser_page, detail_url)
 
+        unavailable = self._honor_price_unavailable(browser_page, task)
+        if unavailable:
+            browser_page.wait_for_timeout(_CONFIGURATION_SETTLE_MS)
+            if (self._selected_configuration_snapshot(browser_page, task) != configuration
+                    or not self._honor_price_unavailable(browser_page, task)):
+                raise LayoutRecognitionError("Tmall presale state changed during verification")
+            self._require_exact_detail_url(browser_page, detail_url)
+            return self._legal_no(task, BusinessOutcome.PRICE_UNAVAILABLE, browser_page,
+                                  (_css_rect(unavailable, "price_status"),))
         selected_price = self._stable_visible_price(
             browser_page,
             task,
@@ -824,7 +854,9 @@ class TmallAdapter:
 
         roles = {rectangle.role for rectangle in expected.css_rectangles}
         targets: list[Any] = []
-        if "capacity" in roles:
+        if "capacity" in roles and self._honor_missing_capacity(page, task):
+            targets.append(self._sku_option_group(page, "存储容量"))
+        elif "capacity" in roles:
             capacity_group = self._sku_option_group(page, "存储容量")
             targets.append(
                 self._exact_option(
@@ -997,6 +1029,8 @@ class TmallAdapter:
         browser_page = _playwright_page(page)
         self._raise_if_blocked_or_error(browser_page)
         if expected.outcome is not BusinessOutcome.NO_MODEL:
+            if _uses_honor_visual_selection(task) and expected.css_rectangles:
+                return self._read_legal_no_state(task, browser_page, expected).css_rectangles
             return expected.css_rectangles
         self._read_legal_no_state(task, browser_page, expected)
         result_region = _unique_visible_locator(
@@ -1124,6 +1158,23 @@ class TmallAdapter:
             detail_url=expected.canonical_url,
         )
         self._matching_detail_titles(page, task)
+        self._honor_version(page, task, select=False)
+        if expected.outcome is BusinessOutcome.PRICE_UNAVAILABLE:
+            self._selected_configuration_snapshot(page, task)
+            status = self._honor_price_unavailable(page, task)
+            if status is None:
+                raise LayoutRecognitionError("Tmall presale price status changed before capture")
+            return self._legal_no(task, expected.outcome, page,
+                                  (_css_rect(status, "price_status"),)).semantic_state
+        if (expected.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+                and (task.task_id, page.url) in self._honor_absent_capacities):
+            if (not self._honor_missing_capacity(page, task)
+                    or self._honor_capacity_labels(page) != self._honor_absent_capacities[
+                        (task.task_id, page.url)]):
+                raise LayoutRecognitionError("Tmall absent capacity options changed before capture")
+            return self._legal_no(task, expected.outcome, page,
+                (_css_rect(self._sku_option_group(page, "存储容量"), "capacity"),)
+            ).semantic_state
         capacity_group = self._sku_option_group(page, "存储容量")
         capacity = self._exact_option(
             capacity_group,
@@ -1140,7 +1191,7 @@ class TmallAdapter:
             if _is_approved_selected(
                 capacity,
                 allow_visual_selected=allow_visual_selected,
-            ):
+            ) and not (allow_visual_selected and _is_explicitly_disabled(capacity)):
                 raise LayoutRecognitionError(
                     "Tmall unavailable capacity changed before capture"
                 )
@@ -1161,7 +1212,7 @@ class TmallAdapter:
             if _is_approved_selected(
                 capacity,
                 allow_visual_selected=allow_visual_selected,
-            ):
+            ) and not (allow_visual_selected and _is_explicitly_disabled(capacity)):
                 raise LayoutRecognitionError(
                     "Tmall unavailable capacity changed before capture"
                 )
@@ -1591,6 +1642,77 @@ class TmallAdapter:
             ),
         )
 
+    def _honor_version(self, page: Any, task: WebsiteTask, *, select: bool) -> None:
+        if not _uses_honor_visual_selection(task):
+            return
+        roots = visible_locators(page, TMALL_SKU_OPTION_ROOTS)
+        candidates = (*visible_locators(page, ('[class^="Auctions--"]',)),
+                      *(group for root in roots for group in visible_locators(root, TMALL_SKU_GROUPS)))
+        groups = tuple(group for group in candidates
+                       if any(label.inner_text().strip() == "版本"
+                              for label in visible_locators(group, TMALL_SKU_GROUP_LABELS)))
+        if not groups:
+            return
+        if len(groups) != 1:
+            raise LayoutRecognitionError("Tmall version group is ambiguous")
+        options = visible_locators(groups[0], TMALL_SKU_VALUES)
+        wanted = normalize_product_text(task.model_name)
+        storage = normalize_product_text(task.storage)
+        exact_storage = tuple(option for option in options
+                              if normalize_product_text(option.inner_text()).replace(" ", "")
+                              == (wanted + storage + "版本").replace(" ", ""))
+        candidates = exact_storage or tuple(option for option in options
+                         if normalize_product_text(option.inner_text()) == wanted)
+        if len(candidates) != 1:
+            raise LayoutRecognitionError("Tmall exact model/storage version is missing or ambiguous")
+        option = candidates[0]
+        if select and not _is_approved_selected(option, allow_visual_selected=True):
+            self._prepare_exact_option(option)
+            page.wait_for_timeout(_CONFIGURATION_SETTLE_MS)
+            self._wait_for_detail_layout(page, task, page.url)
+            self._honor_version(page, task, select=False)
+            return
+        self._unique_selected_option(groups[0], TMALL_SKU_VALUES,
+            lambda label: normalize_product_text(label) == normalize_product_text(option.inner_text()),
+            semantic_name="version", allow_visual_selected=True)
+
+    def _honor_capacity_labels(self, page: Any) -> tuple[str, ...]:
+        return tuple(normalize_product_text(_option_label(option, "capacity"))
+                     for option in visible_locators(
+                         self._sku_option_group(page, "存储容量"), TMALL_SKU_VALUES))
+
+    def _honor_missing_capacity(self, page: Any, task: WebsiteTask) -> bool:
+        if not _uses_honor_visual_selection(task):
+            return False
+        self._honor_version(page, task, select=False)
+        group = self._sku_option_group(page, "存储容量")
+        labels = tuple(_option_label(option, "capacity")
+                       for option in visible_locators(group, TMALL_SKU_VALUES))
+        normalized = tuple(normalize_product_text(label).replace(" ", "") for label in labels)
+        return (bool(labels) and len(set(normalized)) == len(labels)
+                and all(re.fullmatch(r"\d+GB\+\d+(?:GB|TB)", label) for label in normalized)
+                and not any(self._capacity_label_matches(group, task, label) for label in labels))
+
+    def _honor_price_unavailable(self, page: Any, task: WebsiteTask) -> Any:
+        if not _uses_honor_visual_selection(task):
+            return None
+        containers = visible_locators(page, _TMALL_CURRENT_SELLING_PRICE_CONTAINERS)
+        statuses = (*visible_locators(page, ('[class^="skuWrapper--"]',)),
+                    *self._matching_detail_titles(page, task))
+        explicit = ("价格待公布", "价格待发布", "售价待公布", "暂无报价", "价格未公布")
+        for locator in (*containers, *statuses):
+            text = locator.inner_text()
+            if any(marker in text for marker in explicit):
+                return locator
+        presale = any(any(marker in locator.inner_text() for marker in
+                         ("预约新品", "立即预约", "新品预约", "预约抢购"))
+                      for locator in (*containers, *statuses))
+        if presale and self._direct_current_price(page) == Decimal("999999"):
+            prices = tuple(locator for locator in self._visible_current_price_locators(page)
+                           if parse_price(locator.inner_text()) == Decimal("999999"))
+            return prices[0] if prices else None
+        return None
+
     def _exact_option(
         self,
         page: Any,
@@ -1750,6 +1872,7 @@ class TmallAdapter:
         page: Any,
         task: WebsiteTask,
     ) -> tuple[str, str]:
+        self._honor_version(page, task, select=False)
         capacity_group = self._sku_option_group(page, "存储容量")
         capacity = self._unique_selected_option(
             capacity_group,
@@ -2469,6 +2592,12 @@ def _tmall_result_card_matches(model_name: str, card_text: str) -> bool:
 
     wanted = normalize_product_text(model_name)
     actual = normalize_product_text(card_text)
+    if ("荣耀" in wanted or "HONOR" in wanted) and (
+        ("超能版" in actual and "超能版" not in wanted)
+        or (any(marker in actual for marker in ("礼盒", "礼品套装", "礼包"))
+            and not any(marker in actual for marker in ("新品预约", "预约新品")))
+    ):
+        return False
     if not wanted or not actual or any(
         marker in actual for marker in _TMALL_RESULT_ACCESSORY_MARKERS
     ):

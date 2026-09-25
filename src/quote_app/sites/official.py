@@ -172,7 +172,7 @@ class HonorStableOffer:
     current_sku: str
     region: str
     stock_state: str
-    price: Decimal
+    price: Decimal | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -603,8 +603,8 @@ class OfficialSiteAdapter:
             or task.brand != "HONOR"
             or task.channel is not WebsiteChannel.OFFICIAL
             or not isinstance(expected, VerifiedSemanticState)
-            or expected.outcome is not BusinessOutcome.PRICE_FOUND
-            or expected.css_rectangles
+            or expected.outcome not in (BusinessOutcome.PRICE_FOUND, BusinessOutcome.PRICE_UNAVAILABLE)
+            or (expected.outcome is BusinessOutcome.PRICE_FOUND and expected.css_rectangles)
             or expected.brand != task.brand
             or expected.model_name != task.model_name
             or expected.capacity != f"{task.ram}+{task.storage}"
@@ -645,9 +645,10 @@ class OfficialSiteAdapter:
             current = self._semantic_state(
                 task,
                 page,
-                outcome=BusinessOutcome.PRICE_FOUND,
+                outcome=(BusinessOutcome.PRICE_UNAVAILABLE if offer.price is None
+                         else BusinessOutcome.PRICE_FOUND),
                 price=offer.price,
-                rectangles=(),
+                rectangles=expected.css_rectangles if offer.price is None else (),
                 current_sku=offer.current_sku,
                 region=offer.region,
                 stock_state=offer.stock_state,
@@ -659,6 +660,21 @@ class OfficialSiteAdapter:
             return current
 
         return read
+
+    def _honor_price_status_rectangles(self, page: Any) -> tuple[CssRect, ...]:
+        target = HonorOfficialOverride.unavailable_price_target(page)
+        if target is None:
+            raise LayoutRecognitionError("Official HONOR unavailable price status disappeared")
+        return (_css_rect(target, "price_status"),)
+
+    def capture_rectangles_for_capture(
+        self, task: WebsiteTask, page: Any, expected: VerifiedSemanticState,
+    ) -> tuple[CssRect, ...]:
+        """Refresh HONOR unavailable-price evidence after capture positioning."""
+        if task.brand == "HONOR" and expected.outcome is BusinessOutcome.PRICE_UNAVAILABLE:
+            self.verified_state_reader(task, page, expected)()
+            return self._honor_price_status_rectangles(page)
+        return expected.css_rectangles
 
     def _observe_honor_live(
         self,
@@ -746,6 +762,7 @@ class OfficialSiteAdapter:
         if override is None:
             raise AssertionError("HONOR override must be present")
         expected_host = _required_entry_host(self.spec.entry_url)
+        deposit_detail_urls: list[str] = []
         available_detail_urls: list[str] = []
         unavailable_detail_urls: list[str] = []
         cards = visible_locators(
@@ -756,7 +773,9 @@ class OfficialSiteAdapter:
             if not override.card_matches_model(task.model_name, card.inner_text()):
                 continue
             detail_urls = (
-                unavailable_detail_urls
+                deposit_detail_urls
+                if override.card_is_deposit(card.inner_text())
+                else unavailable_detail_urls
                 if override.card_is_temporarily_unavailable(card.inner_text())
                 else available_detail_urls
             )
@@ -773,7 +792,9 @@ class OfficialSiteAdapter:
             if not override.card_matches_model(task.model_name, link.inner_text()):
                 continue
             detail_urls = (
-                unavailable_detail_urls
+                deposit_detail_urls
+                if override.card_is_deposit(link.inner_text())
+                else unavailable_detail_urls
                 if override.card_is_temporarily_unavailable(link.inner_text())
                 else available_detail_urls
             )
@@ -784,7 +805,7 @@ class OfficialSiteAdapter:
                 task=task,
                 expected_host=expected_host,
             )
-        return tuple(available_detail_urls or unavailable_detail_urls)
+        return tuple(available_detail_urls or unavailable_detail_urls or deposit_detail_urls)
 
     def _append_honor_detail_url(
         self,
@@ -942,13 +963,15 @@ class OfficialSiteAdapter:
             )
         override.select_task_sku(page, task)
         self._raise_if_blocked(page)
-        self._wait_for_honor_address_hydration(page)
+        if override.unavailable_price_status(page) is None:
+            self._wait_for_honor_address_hydration(page)
         offer = self._stable_honor_live_offer(page, task)
         self._require_exact_detail_url(
             page,
             detail_url,
             task.model_name,
         )
+        rectangles = self._honor_price_status_rectangles(page) if offer.price is None else ()
         semantic_state = VerifiedSemanticState(
             canonical_url=page.url,
             brand=task.brand,
@@ -959,14 +982,16 @@ class OfficialSiteAdapter:
             region=offer.region,
             stock_state=offer.stock_state,
             price=offer.price,
-            outcome=BusinessOutcome.PRICE_FOUND,
-            css_rectangles=(),
+            outcome=(BusinessOutcome.PRICE_UNAVAILABLE if offer.price is None
+                     else BusinessOutcome.PRICE_FOUND),
+            css_rectangles=rectangles,
         )
         return AdapterObservation(
-            outcome=BusinessOutcome.PRICE_FOUND,
+            outcome=(BusinessOutcome.PRICE_UNAVAILABLE if offer.price is None
+                     else BusinessOutcome.PRICE_FOUND),
             price=offer.price,
             url=page.url,
-            css_rectangles=(),
+            css_rectangles=rectangles,
             semantic_state=semantic_state,
         )
 
@@ -1043,6 +1068,23 @@ class OfficialSiteAdapter:
         override = self._honor_override
         if override is None:
             raise AssertionError("HONOR override must be present")
+        if override.unavailable_price_status(page) is not None:
+            previous_status = None
+            for _ in range(_MAX_PRICE_POLLS):
+                sku = override.selected_sku(page, task)
+                status = override.unavailable_price_status(page)
+                self._raise_if_blocked(page)
+                snapshot = (sku, status)
+                if status is not None and snapshot == previous_status:
+                    if (override.selected_sku(page, task),
+                            override.unavailable_price_status(page)) == snapshot:
+                        return HonorStableOffer(
+                            current_sku="not-applicable", region="not-applicable",
+                            stock_state="not-applicable", price=None,
+                        )
+                previous_status = snapshot
+                page.wait_for_timeout(_POLL_INTERVAL_MS)
+            raise LayoutRecognitionError("Official HONOR price status did not stabilize")
         previous: (
             tuple[str, str, str, str, tuple[PriceCandidate, ...]] | None
         ) = None

@@ -16,6 +16,7 @@ class EvidenceState(StrEnum):
     CAPACITY_UNAVAILABLE = "capacity_unavailable"
     COLOR_UNAVAILABLE = "color_unavailable"
     SOLD_OUT = "sold_out"
+    PRICE_UNAVAILABLE = "price_unavailable"
 
 
 class MacCapturePolicy(StrEnum):

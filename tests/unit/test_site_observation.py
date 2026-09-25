@@ -19,6 +19,7 @@ class _Probe:
 
 _RECTANGLES = {
     BusinessOutcome.PRICE_FOUND: (),
+    BusinessOutcome.PRICE_UNAVAILABLE: (CssRect(1, 2, 3, 4, "price_status"),),
     BusinessOutcome.NO_MODEL: (
         CssRect(1, 2, 3, 4, "search_keyword"),
         CssRect(5, 6, 7, 8, "result_region"),
@@ -44,6 +45,7 @@ def _semantic_state(
 ) -> VerifiedSemanticState:
     is_not_applicable = outcome in {
         BusinessOutcome.NO_MODEL,
+        BusinessOutcome.PRICE_UNAVAILABLE,
         BusinessOutcome.CAPACITY_UNAVAILABLE,
         BusinessOutcome.COLOR_UNAVAILABLE,
     }

@@ -2574,6 +2574,12 @@ class _HonorPage(_Locator):
                 ): version,
                 "#pro-predict.product-address": address,
                 "div.product-price-info": price_region,
+                "div.product-price-info #pro-price-label": _EmptyLocator(),
+                "div.product-price-info #pro-price": _EmptyLocator(),
+                "div.product-price-info #pro-price-hand": _EmptyLocator(),
+                "#deposit": _EmptyLocator(),
+                "#deposit #pro-price-deposit": _EmptyLocator(),
+
                 '[data-official-role="login"]': _EmptyLocator(),
                 '[data-official-role="risk-control"]': _EmptyLocator(),
             }

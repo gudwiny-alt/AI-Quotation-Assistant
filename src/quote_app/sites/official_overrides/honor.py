@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from quote_app.sites.locators import visible_locators
@@ -40,6 +41,11 @@ _IMMEDIATE_MODEL_VARIANTS = (
     "活力版",
     "竞速版",
     "至尊版",
+    "超能版",
+    "权益包",
+    "系列新品权益包",
+    "手机壳",
+    "保护套",
 )
 _GENERIC_COLOR_NAMES = frozenset(
     {
@@ -135,6 +141,11 @@ class HonorOfficialOverride:
         return False
 
     @staticmethod
+    def card_is_deposit(card_text: str) -> bool:
+        return any(marker in normalize_product_text(card_text)
+                   for marker in ("【订金】", "【定金】"))
+
+    @staticmethod
     def card_is_temporarily_unavailable(card_text: str) -> bool:
         return "暂时缺货" in normalize_product_text(card_text)
 
@@ -155,6 +166,10 @@ class HonorOfficialOverride:
     def detail_matches_task(task: WebsiteTask, detail_text: str) -> bool:
         model = normalize_product_text(task.model_name)
         candidate = normalize_product_text(detail_text)
+        for prefix in ("【订金】", "【定金】", "【全款预售】"):
+            if candidate.startswith(prefix):
+                candidate = candidate.removeprefix(prefix).lstrip()
+                break
         if not model or not candidate.startswith(model):
             return False
         remainder = candidate[len(model) :].lstrip()
@@ -381,6 +396,11 @@ class HonorOfficialOverride:
         """Read either live delivery data or a visible arrival-notice state."""
         address = cls.attached_address_root(page)
         if address.is_visible():
+            titles = visible_locators(page, cls.detail_titles)
+            if (len(titles) == 1 and normalize_product_text(titles[0].inner_text())
+                    .startswith("【全款预售】")
+                    and not visible_locators(address, ("a.product-pulldown-btn",))):
+                return cls._full_presale_stock_snapshot(address)
             return cls.stock_snapshot(page)
         notifications = tuple(
             option
@@ -410,6 +430,29 @@ class HonorOfficialOverride:
             locator=notifications[0],
         )
 
+    @staticmethod
+    def _full_presale_stock_snapshot(address: Any) -> HonorStockSnapshot:
+        prompt = _unique_visible(address, ("div.product-address-prompt",),
+                                 semantic_name="presale dispatch context")
+        state = _unique_visible(prompt, ("span",), semantic_name="presale dispatch state")
+        state_text = normalize_product_text(state.inner_text())
+        match = re.fullmatch(r"预计(\d{4}-\d{2}-\d{2})开始发货", state_text)
+        if match is None:
+            raise LayoutRecognitionError("Official HONOR presale dispatch state is invalid")
+        try:
+            date.fromisoformat(match.group(1))
+        except ValueError as error:
+            raise LayoutRecognitionError("Official HONOR presale dispatch date is invalid") from error
+        context = normalize_product_text(prompt.inner_text())
+        region = _unique_attached(address, ("a.product-pulldown-btn",),
+                                  semantic_name="presale delivery region")
+        region_text = normalize_product_text(region.inner_text())
+        if (not region_text or len(region_text) > _MAX_CONTEXT_LENGTH
+                or len(context) > _MAX_CONTEXT_LENGTH or context.count(state_text) != 1):
+            raise LayoutRecognitionError("Official HONOR presale delivery context is invalid")
+        return HonorStockSnapshot(state_text=state_text, bounded_context=context,
+                                  region_text=region_text, locator=state)
+
     @classmethod
     def attached_address_root(cls, page: Any) -> Any:
         address = page.locator(cls.address_roots[0])
@@ -424,8 +467,43 @@ class HonorOfficialOverride:
             )
         return address.nth(0)
 
+    @classmethod
+    def unavailable_price_status(cls, page: Any) -> str | None:
+        target = cls.unavailable_price_target(page)
+        return None if target is None else normalize_product_text(target.inner_text())
+
+    @staticmethod
+    def unavailable_price_target(page: Any) -> Any | None:
+        """Require scoped, visible evidence that a full selling price is unavailable."""
+        labels = visible_locators(page, ("div.product-price-info #pro-price-label",))
+        if len(labels) > 1:
+            raise LayoutRecognitionError("Official HONOR price status is ambiguous")
+        amounts = visible_locators(page, (
+            "div.product-price-info #pro-price",
+            "div.product-price-info #pro-price-hand",
+        ))
+        has_full_price = any(normalize_product_text(item.inner_text()) for item in amounts)
+        if labels:
+            if normalize_product_text(labels[0].inner_text()) != "暂无报价":
+                return None
+            if has_full_price:
+                raise LayoutRecognitionError("Official HONOR price status is conflicting")
+            return labels[0]
+        deposits = visible_locators(page, ("#deposit",))
+        if len(deposits) != 1 or has_full_price:
+            return None
+        deposit_labels = visible_locators(deposits[0], ("label",))
+        deposit_amounts = visible_locators(deposits[0], ("#pro-price-deposit",))
+        if (len(deposit_labels) == 1 and len(deposit_amounts) == 1
+                and normalize_product_text(deposit_labels[0].inner_text()).replace(" ", "")
+                in {"订金", "定金"}):
+            return deposits[0]
+        return None
+
     @staticmethod
     def price_candidates(page: Any) -> tuple[PriceCandidate, ...]:
+        if visible_locators(page, ("#deposit #pro-price-deposit",)):
+            raise LayoutRecognitionError("Official HONOR deposit is not a full selling price")
         region = _unique_visible(
             page,
             ("div.product-price-info",),

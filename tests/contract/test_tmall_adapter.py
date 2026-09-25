@@ -4313,3 +4313,127 @@ def test_two_color_name_nodes_are_ambiguous_even_if_one_matches():
     with pytest.raises(LayoutRecognitionError, match="ambiguous"):
         adapter._exact_option(group, ('[class^="valueItem--"]',),
                               lambda s: _tmall_color_matches("白色", s), semantic_name="color")
+
+
+def _magic9_page(*, capacity='12GB + 256GB', price='¥999999', status='预约新品'):
+    html = (_live_observed_html().replace('小米官方旗舰店', '荣耀官方旗舰店')
+            .replace('xiaomi.tmall.com', 'hihonor.tmall.com')
+            .replace('小米 15', '荣耀Magic9').replace('小米15', '荣耀Magic9'))
+    html = html.replace('12GB + 256GB', capacity)
+    html = html.replace('¥4,299', price).replace('¥4,399', price)
+    html = html.replace('现货', status)
+    return _FixturePage(html=html, after_search_url=_honor_power2_result_url().replace('Power2', 'Magic9'))
+
+
+def test_honor_magic9_placeholder_is_price_unavailable_through_capture():
+    page = _magic9_page()
+    task = _task(brand='HONOR', model_name='荣耀Magic9')
+    adapter = TmallAdapter(_honor_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    assert observation.outcome.value == 'price_unavailable'
+    assert observation.price is None
+    assert [r.role for r in observation.css_rectangles] == ['price_status']
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    assert adapter.verified_state_reader(task, page, observation.semantic_state)() == observation.semantic_state
+    assert adapter.capture_rectangles_for_capture(task, page, observation.semantic_state)
+    for node in page.root.descendants():
+        if node.text_parts == ['预约新品']:
+            node.text_parts = ['现货']
+    with pytest.raises(LayoutRecognitionError):
+        adapter.verified_state_reader(task, page, observation.semantic_state)()
+
+
+def test_honor_magic9_trustworthy_missing_capacity_is_legal_no():
+    page = _magic9_page(capacity='16GB+512GB', price='¥5999', status='现货')
+    task = _task(brand='HONOR', model_name='荣耀Magic9')
+    adapter = TmallAdapter(_honor_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+    adapter.prepare_capture_view(task, page, observation.semantic_state)
+    assert adapter.verified_state_reader(task, page, observation.semantic_state)() == observation.semantic_state
+
+
+def test_honor_magic9_standard_excludes_chinese_variant_and_gift_package():
+    from quote_app.sites.tmall import _tmall_result_card_matches
+    assert not _tmall_result_card_matches('荣耀Magic9', '荣耀Magic9 超能版 手机')
+    assert not _tmall_result_card_matches('荣耀Magic9', '荣耀Magic9 礼盒套装 手机')
+    assert _tmall_result_card_matches('荣耀Magic9 超能版', '荣耀Magic9 超能版 手机')
+
+
+def test_honor_capacity_is_reselected_if_color_clears_it():
+    page = _magic9_page(price='¥5999', status='现货')
+    original_click = page.click_option
+    def click(node):
+        original_click(node)
+        if node.text == '黑色':
+            for option in page.root.descendants():
+                if option.text == '12GB + 256GB':
+                    option.attrs['aria-selected'] = 'false'
+    page.click_option = click
+    observation = TmallAdapter(_honor_spec()).observe(
+        _task(brand='HONOR', model_name='荣耀Magic9'), cast(Any, page))
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert page.option_click_counts['capacity'] == 2
+
+
+def test_honor_magic9_selects_storage_version_before_capacity():
+    page = _magic9_page(price='¥5999', status='现货')
+    root = next(n for n in page.root.descendants() if n.attrs.get('id') == 'skuOptionsArea')
+    parser = _DocumentParser()
+    parser.feed('<div class="Auctions--fixture"><div class="ItemLabel--fixture">版本</div>'
+                '<div class="valueItem--fixture" aria-selected="true">荣耀Magic9</div>'
+                '<div class="valueItem--fixture" aria-selected="false">荣耀Magic9 1TB版本</div></div>')
+    group = parser.root.children[0]
+    group.parent = root.parent
+    root.parent.children.insert(0, group)
+    original_click = page.click_option
+    clicks = []
+    def click(node):
+        clicks.append(node.text)
+        if node.parent is group:
+            page._url = 'https://detail.tmall.com/item.htm?id=1081067582951'
+            for sibling in group.children[1:]:
+                sibling.attrs['aria-selected'] = 'false'
+            node.attrs['aria-selected'] = 'true'
+            for option in page.root.descendants():
+                if option.text == '12GB + 256GB':
+                    option.text_parts = ['16GB+1TB']
+        else:
+            original_click(node)
+    page.click_option = click
+    observation = TmallAdapter(_honor_spec()).observe(
+        _task(brand='HONOR', model_name='荣耀Magic9', ram='16GB', storage='1TB'), cast(Any, page))
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+    assert clicks[:2] == ['荣耀Magic9 1TB版本', '16GB+1TB']
+
+
+@pytest.mark.parametrize(('price', 'status'), [('¥999999', '现货'), ('¥1299999', '预约新品')])
+def test_honor_price_unavailable_does_not_infer_numeric_ceiling(price, status):
+    page = _magic9_page(price=price, status=status)
+    observation = TmallAdapter(_honor_spec()).observe(
+        _task(brand='HONOR', model_name='荣耀Magic9'), cast(Any, page))
+    assert observation.outcome is BusinessOutcome.PRICE_FOUND
+
+
+def test_honor_missing_capacity_must_remain_absent_before_capture():
+    page = _magic9_page(capacity='16GB+512GB', price='¥5999', status='现货')
+    task = _task(brand='HONOR', model_name='荣耀Magic9')
+    adapter = TmallAdapter(_honor_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    for node in page.root.descendants():
+        if node.text_parts == ['16GB+512GB']:
+            node.text_parts = ['12GB + 256GB']
+    with pytest.raises(LayoutRecognitionError):
+        adapter.verified_state_reader(task, page, observation.semantic_state)()
+
+
+def test_honor_disabled_selected_capacity_remains_valid_unavailable_evidence():
+    page = _magic9_page()
+    for node in page.root.descendants():
+        if node.text_parts == ['12GB + 256GB']:
+            node.attrs.update({'aria-selected': 'true', 'data-disabled': 'true'})
+    task = _task(brand='HONOR', model_name='荣耀Magic9')
+    adapter = TmallAdapter(_honor_spec())
+    observation = adapter.observe(task, cast(Any, page))
+    assert observation.outcome is BusinessOutcome.CAPACITY_UNAVAILABLE
+    assert adapter.verified_state_reader(task, page, observation.semantic_state)() == observation.semantic_state

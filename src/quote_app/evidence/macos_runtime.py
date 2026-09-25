@@ -1345,7 +1345,7 @@ class MacFormalCaptureRuntime:
         if (
             self._uses_darwin_beta_visual_review()
             and task.channel is WebsiteChannel.JD
-            and state.outcome is not BusinessOutcome.NO_MODEL
+            and state.outcome not in {BusinessOutcome.NO_MODEL, BusinessOutcome.PRICE_UNAVAILABLE}
         ):
             return None
         reader = getattr(adapter, "capture_rectangles_for_capture", None)

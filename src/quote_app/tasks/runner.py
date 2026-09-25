@@ -70,6 +70,7 @@ _OUTCOME_STATES = {
     BusinessOutcome.CAPACITY_UNAVAILABLE: EvidenceState.CAPACITY_UNAVAILABLE,
     BusinessOutcome.COLOR_UNAVAILABLE: EvidenceState.COLOR_UNAVAILABLE,
     BusinessOutcome.SOLD_OUT: EvidenceState.SOLD_OUT,
+    BusinessOutcome.PRICE_UNAVAILABLE: EvidenceState.PRICE_UNAVAILABLE,
 }
 _OUTCOME_ROLES = {
     BusinessOutcome.PRICE_FOUND: frozenset({()}),
@@ -85,6 +86,7 @@ _OUTCOME_ROLES = {
         }
     ),
     BusinessOutcome.SOLD_OUT: frozenset({("stock_status",)}),
+    BusinessOutcome.PRICE_UNAVAILABLE: frozenset({("price_status",), ("title", "price_status")}),
 }
 _AUTOMATION_PAGE_KEY = "quotation-automation"
 _CHANNEL_EXECUTION_PRIORITY = {

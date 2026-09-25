@@ -131,6 +131,15 @@ def _compact(value):
     return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(value).lower())
 
 
+def has_unavailable_price_text(text):
+    """Corroborate a saved unavailable-price outcome, never infer it from a blank cell."""
+    compact = _compact(text)
+    return any(word in compact for word in ("暂无报价", "待发布", "价格待公布")) or (
+        any(word in compact for word in ("新品预约", "新品预售", "订金", "定金"))
+        and ("999999" in compact or "整机价格未公布" in compact)
+    )
+
+
 def assess(scan, title, specification, channel, price, *, outcome=""):
     """Passing means these visible fields matched, not that OCR proves all price policy."""
     codes = ("C01", "C02", "C03", "C04")
@@ -220,5 +229,21 @@ def assess(scan, title, specification, channel, price, *, outcome=""):
             else "待复核",
             f"{scan.width} × {scan.height}；搜索文字核验",
             "检查搜索截图尺寸与目标文字可读性；不要求出现目标商品售价",
+        )
+    if outcome == "price_unavailable":
+        status_visible = has_unavailable_price_text(text)
+        numeric = money(price) is not None
+        result["C03"] = (
+            "未通过" if numeric else "不适用" if status_visible and not auth else "待复核",
+            "暂无有效整机报价；不参与最低价比较",
+            "无有效价格记录不得填入数值价格" if numeric
+            else "已识别未公布售价或预约占位信息" if status_visible
+            else "未清晰识别暂无有效整机报价依据，请核对原图",
+        )
+        result["C04"] = (
+            "通过" if status_visible and model_ok and store_ok and not auth
+            and scan.width >= 800 and scan.height >= 500 else "待复核",
+            f"{scan.width} × {scan.height}；未公布售价证据核验",
+            "检查机型、来源及价格状态文字可读性；规格仍单独核验",
         )
     return result

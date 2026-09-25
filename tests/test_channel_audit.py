@@ -145,3 +145,17 @@ def test_huawei_rom_only_audit_uses_trusted_brand_and_approved_store():
             assert inspect_channel(t,'nova 16 SE','8GB / 256GB / 天际白',changed,'2699',brand_name='华为')[1].status == '待复核'
         unknown=Recognition('done',scan.text.replace(store,'其他店铺'),1600,1000)
         assert inspect_channel(t,'nova 16 SE','8GB / 256GB / 天际白',unknown,'2699',brand_name='华为')[1].status == '待复核'
+
+
+def test_unpublished_price_requires_evidence_and_never_accepts_numeric_writeback():
+    from quote_app.services.channel_audit import inspect_channel
+
+    row = task()
+    row.outcome, row.price = 'price_unavailable', ''
+    scan = Recognition('done', '京东荣耀自营旗舰店 荣耀Magic8 512GB\n待发布', 1600, 1000)
+    checks = inspect_channel(row, '荣耀Magic8', '512GB', scan, '无')
+    assert checks[1].status == '通过'
+    assert checks[2].status == '不适用'
+    assert inspect_channel(row, '荣耀Magic8', '512GB', scan, '999999')[2].status == '未通过'
+    missing = Recognition('done', '京东荣耀自营旗舰店 荣耀Magic8 512GB', 1600, 1000)
+    assert inspect_channel(row, '荣耀Magic8', '512GB', missing, '无')[2].status == '待复核'

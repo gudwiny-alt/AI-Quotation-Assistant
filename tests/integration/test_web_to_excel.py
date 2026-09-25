@@ -940,3 +940,23 @@ def test_rerun_of_same_result_set_does_not_duplicate_images(
             assert len(workbook["5G手机"]._images) == 3
         finally:
             workbook.close()
+
+
+def test_unpublished_channel_price_is_excluded_from_minimum_and_keeps_evidence(tmp_path):
+    from quote_app.evidence.models import EvidenceState
+    row = make_quote_row()
+    tasks = make_tasks((row,))
+    ordinary = make_business_result(tmp_path, tasks[0], price=Decimal('5999'))
+    source = make_business_result(tmp_path, tasks[1])
+    unpublished = replace(source, outcome=BusinessOutcome.PRICE_UNAVAILABLE, price=None,
+                          evidence=replace(source.evidence, state=EvidenceState.PRICE_UNAVAILABLE))
+    fixture = run_web_fixture(tmp_path, (row,), tasks, (ordinary, unpublished))
+    workbook = load_workbook(fixture.quote_path)
+    try:
+        sheet = workbook['5G手机']
+        assert sheet['AJ2'].value == '无'
+        assert sheet['AH2'].value == 5999
+        assert sheet['R2'].value == 5999
+        assert 'AM2' in {_anchor_coordinate(image) for image in sheet._images}
+    finally:
+        workbook.close()

@@ -34,6 +34,7 @@ _OUTCOME_ROLES = {
         }
     ),
     BusinessOutcome.SOLD_OUT: frozenset({("stock_status",)}),
+    BusinessOutcome.PRICE_UNAVAILABLE: frozenset({("price_status",), ("title", "price_status")}),
 }
 _NOT_APPLICABLE = "not-applicable"
 _UNVERIFIED_MARKERS = frozenset(
@@ -148,6 +149,7 @@ class VerifiedSemanticState:
             return
         if self.outcome in {
             BusinessOutcome.NO_MODEL,
+            BusinessOutcome.PRICE_UNAVAILABLE,
             BusinessOutcome.CAPACITY_UNAVAILABLE,
             BusinessOutcome.COLOR_UNAVAILABLE,
         }:

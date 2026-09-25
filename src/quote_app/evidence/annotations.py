@@ -20,6 +20,9 @@ _EXACT_ROLES = {
     EvidenceState.SOLD_OUT: frozenset({"stock_status"}),
 }
 _COMPLETE_GROUP_ROLES = {
+    EvidenceState.PRICE_UNAVAILABLE: frozenset(
+        {frozenset({"price_status"}), frozenset({"title", "price_status"})}
+    ),
     EvidenceState.CAPACITY_UNAVAILABLE: frozenset(
         {frozenset({"capacity"}), frozenset({"title", "capacity_group"})}
     ),

@@ -4246,3 +4246,100 @@ def test_huawei_rom_only_checks_title_after_sku_selection(monkeypatch):
         page.locator('.page-right-skuname').nodes[0].text_parts = ['nova 16 8+256 黑色']
     monkeypatch.setattr(page, 'click_option', select_and_update_title)
     assert adapter.observe(task, cast(Any, page)).outcome is BusinessOutcome.PRICE_FOUND
+
+
+@pytest.mark.parametrize("model,ram,color,wanted_url", [
+    ("荣耀Magic9", "12GB", "幕布黑", "https://item.jd.com/100413396170.html"),
+    ("荣耀Magic9 超能版", "12GB", "幕布黑", "https://item.jd.com/100317159677.html"),
+    ("荣耀Magic9 Pro Max", "16GB", "苔青", "https://item.jd.com/100398043374.html"),
+])
+def test_honor_presale_results_open_unique_genuine_model_for_detail_configuration(
+    model, ram, color, wanted_url,
+):
+    html = (FIXTURES / "honor_magic9_presale_results.html").read_text("utf-8")
+    html = html.replace('value="荣耀Magic9"', f'value="{model}"')
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    task = _task(brand="HONOR", model_name=model, ram=ram, storage="512GB", color=color)
+    assert JDAdapter(_honor_spec())._search_result(task, page) == wanted_url
+
+
+def test_honor_color_before_capacity_resolves_only_exact_configuration():
+    html = (FIXTURES / "honor_magic8_multiple_colors.html").read_text("utf-8")
+    html = html.replace("16+512 天青釉", "天青釉 16GB+512GB")
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    task = _task(brand="HONOR", model_name="荣耀Magic8", ram="16GB", storage="512GB", color="天青釉")
+    assert JDAdapter(_honor_spec())._search_result(task, page) == "https://item.jd.com/100213070059.html"
+
+
+@pytest.mark.parametrize("suffix", ["【拍下无效】", "【定金链接】", "【仅售礼盒】"])
+def test_honor_invalid_or_gift_only_results_are_not_used_as_phone_links(suffix):
+    html = (FIXTURES / "honor_magic9_presale_results.html").read_text("utf-8")
+    html = html.replace("荣耀Magic9 超能版", "其他型号")
+    html = html.replace("荣耀Magic9 Pro Max", "其他型号")
+    html = html.replace("新品手机</a>", f"新品手机{suffix}</a>")
+    page = _FixturePage(html=html)
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    task = _task(brand="HONOR", model_name="荣耀Magic9", ram="16GB", storage="512GB", color="橄榄青")
+    with pytest.raises(LayoutRecognitionError):
+        JDAdapter(_honor_spec())._search_result(task, page)
+
+
+def _honor_waiting_price_page(price_text="待发布"):
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text("utf-8")
+    html = (html.replace("小米京东自营旗舰店", "荣耀京东自营旗舰店")
+            .replace("小米 15", "荣耀Magic9 超能版").replace("小米15", "荣耀Magic9 超能版")
+            .replace("¥4,299", price_text))
+    task = _task(brand="HONOR", model_name="荣耀Magic9 超能版")
+    page = _FixturePage(html=html, after_search_url=(
+        "https://mall.jd.com/view_search-1000000904-99-1-24-1.html?keyword=荣耀Magic9%20超能版"))
+    return JDAdapter(_honor_spec()), task, page
+
+
+def test_honor_explicit_pending_price_is_verified_and_captured_without_inventing_price():
+    adapter, task, page = _honor_waiting_price_page()
+    observation = adapter.observe(task, cast(Any, page))
+    assert observation.outcome is BusinessOutcome.PRICE_UNAVAILABLE
+    assert observation.price is None
+    assert tuple(r.role for r in observation.css_rectangles) == ("price_status",)
+    adapter.prepare_capture_view(task, cast(Any, page), observation.semantic_state)
+    assert adapter.verified_state_reader(task, cast(Any, page), observation.semantic_state)() == observation.semantic_state
+    assert tuple(r.role for r in adapter.capture_rectangles_for_capture(
+        task, cast(Any, page), observation.semantic_state)) == ("price_status",)
+    page.locator(".product-price--main").nodes[0].text_parts = ["¥5999"]
+    with pytest.raises(LayoutRecognitionError):
+        adapter.verified_state_reader(task, cast(Any, page), observation.semantic_state)()
+
+
+@pytest.mark.parametrize("price_text", ["定金9.9元", "预约"])
+def test_honor_missing_numeric_price_requires_explicit_pending_status(price_text):
+    adapter, task, page = _honor_waiting_price_page(price_text)
+    with pytest.raises(NonRetryableTechnicalError):
+        adapter.observe(task, cast(Any, page))
+
+
+def test_honor_pending_price_reader_rejects_changed_selected_capacity():
+    adapter, task, page = _honor_waiting_price_page()
+    observation = adapter.observe(task, cast(Any, page))
+    for node in page.locator(".specification-item-sku").nodes:
+        if "12GB+256GB" in node.text:
+            node.attrs["class"] = "specification-item-sku"
+            node.attrs["aria-selected"] = "false"
+    with pytest.raises(LayoutRecognitionError):
+        adapter.verified_state_reader(task, cast(Any, page), observation.semantic_state)()
+
+
+def test_jd_pending_price_wording_does_not_change_other_brand_outcomes():
+    html = (FIXTURES / "modern_detail_capacity_unavailable.html").read_text("utf-8")
+    page = _FixturePage(html=html.replace("¥4,299", "待发布"))
+    with pytest.raises(NonRetryableTechnicalError):
+        JDAdapter(_xiaomi_spec()).observe(_task(), cast(Any, page))
+
+
+
+def test_honor_series_rights_package_does_not_make_phone_link_ambiguous():
+    page = _FixturePage("honor_magic9_series_gift_results.html")
+    page.goto("https://mall.jd.com/view_search-1000000904-99-1-24-1.html")
+    task = _task(brand="HONOR", model_name="荣耀Magic9", ram="16GB", storage="512GB", color="幕布黑")
+    assert JDAdapter(_honor_spec())._search_result(task, page) == "https://item.jd.com/100413396138.html"

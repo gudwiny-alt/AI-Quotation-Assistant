@@ -36,6 +36,7 @@ OUTCOME_LABELS = {
     "price_found": "已获取价格",
     "no_model": "无该机型",
     "sold_out": "已售罄",
+    "price_unavailable": "暂无有效整机报价",
     "capacity_unavailable": "容量不可用",
     "color_unavailable": "颜色不可用",
 }

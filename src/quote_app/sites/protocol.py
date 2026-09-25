@@ -33,6 +33,7 @@ _OUTCOME_ROLES = {
         }
     ),
     BusinessOutcome.SOLD_OUT: frozenset({("stock_status",)}),
+    BusinessOutcome.PRICE_UNAVAILABLE: frozenset({("price_status",), ("title", "price_status")}),
 }
 
 

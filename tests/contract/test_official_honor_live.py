@@ -1176,3 +1176,121 @@ def test_honor_live_rejects_hand_price_outside_bounded_context(
 
     with pytest.raises(LayoutRecognitionError, match="price|context"):
         adapter.observe(task, cast(Any, page))
+
+
+@pytest.mark.parametrize('suffix', [' 超能版', ' 权益包', '手机壳', ' 保护套'])
+def test_honor_presale_rejects_other_variant_and_accessory(suffix: str) -> None:
+    assert not HonorOfficialOverride.card_matches_model('荣耀Magic9', '荣耀Magic9' + suffix)
+
+
+def test_honor_presale_prefers_full_product_over_deposit(official_case: Any) -> None:
+    html = _live_honor_html().replace('</ul>', '''
+        <li class="grid-items"><a class="thumb" href="/cn/shop/product/10086164863191.html">
+          【订金】荣耀Magic8 ¥100</a></li></ul>''')
+    adapter, task, page = _live_case(official_case, html=html)
+    result = adapter.observe(task, page)
+    assert result.url.endswith(f'/product/{_PRODUCT_ID}.html')
+
+
+@pytest.mark.parametrize('prefix', ['【订金】', '【定金】', '【全款预售】'])
+def test_honor_presale_accepts_known_detail_prefix(official_case: Any, prefix: str) -> None:
+    adapter, task, page = _live_case(official_case, html=_live_honor_html())
+    assert HonorOfficialOverride.detail_matches_task(task, prefix + '荣耀Magic8 12GB+256GB')
+    assert not HonorOfficialOverride.detail_matches_task(task, '【配件】荣耀Magic8 12GB+256GB')
+
+
+def _presale_unpriced_html() -> str:
+    html = _live_honor_html(detail_model='【订金】荣耀Magic9 超能版',
+                            card_model='【订金】荣耀Magic9 超能版',
+                            address_initially_hidden=True)
+    start = html.index('<div class="product-price-info">')
+    end = html.index('</div>', start) + len('</div>')
+    return html[:start] + '''<div id="deposit"><label>订金</label>
+      <div class="product-price-info"><span id="pro-price-deposit">¥100.00</span></div></div>
+      <div class="product-price-info"><span id="pro-price-original">
+      <span id="pro-price-label">暂无报价</span><span id="pro-price" hidden></span>
+      </span></div>''' + html[end:]
+
+
+def test_honor_presale_unpriced_is_verified_without_deposit_price(official_case: Any) -> None:
+    adapter, task, page = _live_case(official_case, html=_presale_unpriced_html(),
+                                   task_model='荣耀Magic9 超能版')
+    result = adapter.observe(task, page)
+    assert result.outcome.value == 'price_unavailable'
+    assert result.price is None
+    assert result.semantic_state.price is None
+    reader = adapter.verified_state_reader(task, page, result.semantic_state)
+    assert reader() == result.semantic_state
+    page.locator('#pro-price-label').nth(0).nodes[0].text_parts = ['¥5999']
+    with pytest.raises(LayoutRecognitionError):
+        reader()
+
+
+def test_honor_presale_deposit_amount_never_becomes_a_selling_price(official_case: Any) -> None:
+    html = _presale_unpriced_html()
+    start = html.index('<div class="product-price-info"><span id="pro-price-original">')
+    end = html.index('</div>', start) + len('</div>')
+    html = html[:start] + html[end:]
+    adapter, task, page = _live_case(official_case, html=html,
+                                   task_model='荣耀Magic9 超能版')
+    page.activate('product')
+    with pytest.raises(LayoutRecognitionError, match='deposit'):
+        HonorOfficialOverride.price_candidates(page)
+
+
+def test_honor_presale_deposit_only_is_unavailable_with_status_evidence(official_case: Any) -> None:
+    html = _presale_unpriced_html()
+    start = html.index('<div class="product-price-info"><span id="pro-price-original">')
+    end = html.index('</div>', start) + len('</div>')
+    adapter, task, page = _live_case(official_case, html=html[:start] + html[end:],
+                                   task_model='荣耀Magic9 超能版')
+    result = adapter.observe(task, page)
+    assert result.outcome is BusinessOutcome.PRICE_UNAVAILABLE
+    assert result.price is None
+    rectangles = adapter.capture_rectangles_for_capture(task, page, result.semantic_state)
+    assert tuple(rect.role for rect in rectangles) == ('price_status',)
+
+
+def test_honor_presale_capture_refreshes_status_geometry_after_positioning(official_case: Any) -> None:
+    adapter, task, page = _live_case(official_case, html=_presale_unpriced_html(),
+                                   task_model='荣耀Magic9 超能版')
+    result = adapter.observe(task, page)
+    page.locator('#pro-price-label').nth(0).nodes[0].attrs['style'] = 'top:220px'
+    rectangles = adapter.capture_rectangles_for_capture(task, page, result.semantic_state)
+    assert rectangles[0].y == 220
+    assert adapter.verified_state_reader(task, page, result.semantic_state)() == result.semantic_state
+
+
+def test_honor_presale_series_benefits_pack_is_not_a_phone(official_case: Any) -> None:
+    html = _live_honor_html(card_model='【全款预售】荣耀Magic9',
+                            detail_model='【全款预售】荣耀Magic9').replace('</ul>', '''
+        <li class="grid-items"><a class="thumb" href="/cn/shop/product/10086164863191.html">
+        荣耀Magic9 系列新品权益包 ¥9.90 商品赠券</a></li></ul>''')
+    adapter, task, page = _live_case(official_case, html=html, task_model='荣耀Magic9')
+    result = adapter.observe(task, page)
+    assert result.url.endswith(f'/product/{_PRODUCT_ID}.html')
+
+
+@pytest.mark.parametrize(('title', 'dispatch', 'allowed'), [
+    ('【全款预售】荣耀Magic9', '预计2026-09-28开始发货', True),
+    ('荣耀Magic9', '预计2026-09-28开始发货', False),
+    ('【全款预售】荣耀Magic9', '预计尽快发货', False),
+])
+def test_honor_full_presale_requires_exact_dispatch_contract(
+    official_case: Any, title: str, dispatch: str, allowed: bool,
+) -> None:
+    html = _live_honor_html(card_model=title, detail_model=title).replace(
+        '<div class="product-pulldown-main relative">',
+        '<div class="product-pulldown-main relative" hidden>',
+    ).replace('次日达 送货上门 <span class="red">现货</span>，预计明天送达',
+              f'<span>{dispatch}</span>')
+    adapter, task, page = _live_case(official_case, html=html, task_model='荣耀Magic9')
+    if not allowed:
+        with pytest.raises(LayoutRecognitionError):
+            adapter.observe(task, page)
+        return
+    result = adapter.observe(task, page)
+    assert result.price == Decimal('4499.00')
+    assert result.semantic_state.current_sku == _CURRENT_SKU
+    assert result.semantic_state.stock_state == '预计2026-09-28开始发货'
+    assert adapter.verified_state_reader(task, page, result.semantic_state)() == result.semantic_state
